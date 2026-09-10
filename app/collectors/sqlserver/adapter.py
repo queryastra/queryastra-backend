@@ -200,7 +200,15 @@ def _connect_and_collect(
 
         cursor.execute("SELECT SERVERPROPERTY('ProductVersion') AS product_version")
         version_row = cursor.fetchone()
-        product_version = str(version_row["product_version"]) if version_row else "0"
+        raw_product_version = version_row["product_version"] if version_row else "0"
+        # pymssql pode devolver essa coluna como bytes dependendo da configuracao de charset
+        # do driver/servidor (ex.: b'15.0.2000.5') — `str()` direto sobre bytes produz o repr
+        # literal "b'15.0.2000.5'", nao o texto decodificado, quebrando o parse da versao major.
+        product_version = (
+            raw_product_version.decode("utf-8", errors="replace")
+            if isinstance(raw_product_version, bytes)
+            else str(raw_product_version)
+        )
         version_major = _parse_major_version(product_version)
         logger.debug(
             "SQL Server instance_id=%s versao detectada product_version=%s major=%s",
