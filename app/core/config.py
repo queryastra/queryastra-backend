@@ -57,6 +57,14 @@ class Settings(BaseSettings):
         default=3600, alias="API_READ_DEFAULT_LOOKBACK_SECONDS"
     )
 
+    # Liga o supervisor de coleta continua (PollingSupervisor) no lifespan do backend. Default
+    # false - nunca ligar coleta real fora de um ambiente explicitamente configurado para isso.
+    polling_supervisor_enabled: bool = Field(default=False, alias="POLLING_SUPERVISOR_ENABLED")
+    # Intervalo (segundos) de reconciliacao de instancias ativas pelo supervisor.
+    supervisor_discovery_interval_seconds: int = Field(
+        default=15, alias="SUPERVISOR_DISCOVERY_INTERVAL_SECONDS"
+    )
+
 
 @lru_cache
 def get_settings() -> Settings:
