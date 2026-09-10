@@ -36,6 +36,12 @@ class Settings(BaseSettings):
     # (Q5, ARCHITECTURE_SPEC.md — decisao pendente).
     credential_vault_base_url: str = Field(default="", alias="CREDENTIAL_VAULT_BASE_URL")
 
+    # Chave Fernet (fora do banco) usada para cifrar/decifrar o fallback de credencial
+    # (`auth_method='encrypted_fallback'`) — `app/security/credential_encryption.py`,
+    # `app/security/credential_reference.py`. Sem default: falha no boot se ausente
+    # (Docs/rules/01-credential-security.md — chave nunca pode viver no banco/codigo).
+    credential_encryption_key: str = Field(alias="CREDENTIAL_ENCRYPTION_KEY")
+
 
 @lru_cache
 def get_settings() -> Settings:

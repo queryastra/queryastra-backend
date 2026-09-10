@@ -12,13 +12,64 @@ from __future__ import annotations
 from uuid import UUID
 
 from app.collectors.base import CapabilityResult, CapabilityStatus
+from app.collectors.connection import ConnectionParams
+from app.collectors.factory import create_collector
+from app.repositories.instances_repository import InstancesRepository
+from app.security.credential_reference import (
+    CredentialReference,
+    CredentialResolutionError,
+    CredentialResolver,
+)
+from app.services.exceptions import InstanceNotFoundError
+
+__all__ = ["HealthCheckService", "InstanceNotFoundError"]
 
 
 class HealthCheckService:
     """Agrega o resultado de `check_capabilities()` de um `Collector` num veredito por instancia."""
 
+    def __init__(
+        self, repository: InstancesRepository, credential_resolver: CredentialResolver
+    ) -> None:
+        self._repository = repository
+        self._credential_resolver = credential_resolver
+
     async def check_instance(self, instance_id: UUID) -> list[CapabilityResult]:
-        raise NotImplementedError("HealthCheckService.check_instance ainda nao implementado.")
+        """Resolve a credencial (se houver) da instancia ja cadastrada e checa suas capacidades.
+
+        Raises:
+            InstanceNotFoundError: nenhuma instancia com esse id.
+        """
+        instance = await self._repository.get_by_id(instance_id)
+        if instance is None:
+            raise InstanceNotFoundError(instance_id)
+
+        username: str | None = None
+        secret_value: str | None = None
+        if instance.auth_method == "encrypted_fallback":
+            if instance.encrypted_credential_ref is None:
+                raise CredentialResolutionError(
+                    "encrypted_credential_ref ausente para auth_method='encrypted_fallback'"
+                )
+            resolved = await self._credential_resolver.resolve(
+                CredentialReference(instance.encrypted_credential_ref)
+            )
+            username, secret_value = resolved.username, resolved.secret_value
+
+        connection = ConnectionParams(
+            host=instance.host,
+            port=instance.port,
+            auth_method=instance.auth_method,
+            username=username,
+            secret_value=secret_value,
+        )
+        collector = create_collector(
+            instance.db_type, connection=connection, instance_id=instance.id
+        )
+        try:
+            return await collector.check_capabilities()
+        finally:
+            await collector.close()
 
     @staticmethod
     def overall_status(capabilities: list[CapabilityResult]) -> CapabilityStatus:

@@ -19,6 +19,7 @@ dependencies = [
     # falhe por falta de driver ODBC do SO — nesse caso comentar as duas linhas abaixo.
     "pyodbc>=5.1",
     "pymssql>=2.3",
+    "cryptography>=42",
 ]
 
 [dependency-groups]
@@ -42,6 +43,7 @@ python_version = "3.12"
 ignore_missing_imports = true
 disallow_untyped_defs = false
 warn_unused_ignores = true
+plugins = ["pydantic.mypy"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

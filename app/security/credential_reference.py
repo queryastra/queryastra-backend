@@ -11,9 +11,13 @@ Preferir cofre corporativo por referencia; fallback criptografado deve ter chave
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import NewType
 
+from cryptography.fernet import Fernet, InvalidToken
+
+from app.core.config import get_settings
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -56,11 +60,19 @@ class CredentialResolver:
             reference: valor opaco de `instances.encrypted_credential_ref`. Nunca uma senha.
 
         Raises:
-            NotImplementedError: logica real de resolucao ainda nao implementada neste scaffold.
+            CredentialResolutionError: referencia invalida, corrompida, ou cifrada com uma chave
+                diferente da `CREDENTIAL_ENCRYPTION_KEY` atual.
         """
         logger.info("Resolvendo referencia de credencial (reference_len=%d)", len(reference))
-        raise NotImplementedError(
-            "CredentialResolver.resolve ainda nao implementado — Fase 1 deve decidir entre "
-            "criptografia simetrica local (chave fora do banco) e integracao com cofre "
-            "corporativo (Q5, ARCHITECTURE_SPEC.md, pendente)."
+        try:
+            plaintext = Fernet(get_settings().credential_encryption_key.encode()).decrypt(
+                reference.encode()
+            )
+        except InvalidToken as exc:
+            raise CredentialResolutionError(
+                "Referencia de credencial invalida ou corrompida"
+            ) from exc
+        payload = json.loads(plaintext)
+        return ResolvedCredential(
+            username=payload["username"], secret_value=payload["secret_value"]
         )

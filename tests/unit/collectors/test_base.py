@@ -6,17 +6,20 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from app.collectors.base import CapabilityResult, CapabilityStatus, CollectionResult, Collector
+from app.collectors.connection import ConnectionParams
 from app.collectors.postgresql.adapter import PostgreSQLCollector
 from app.collectors.sqlserver.adapter import SQLServerCollector
 
+_CONNECTION = ConnectionParams(host="localhost", port=5432, auth_method="encrypted_fallback")
+
 
 def test_postgresql_collector_satisfies_protocol() -> None:
-    collector = PostgreSQLCollector(instance_id=uuid4())
+    collector = PostgreSQLCollector(connection=_CONNECTION, instance_id=uuid4())
     assert isinstance(collector, Collector)
 
 
 def test_sqlserver_collector_satisfies_protocol() -> None:
-    collector = SQLServerCollector(instance_id=uuid4())
+    collector = SQLServerCollector(connection=_CONNECTION, instance_id=uuid4())
     assert isinstance(collector, Collector)
 
 
