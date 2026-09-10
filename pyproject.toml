@@ -1,0 +1,55 @@
+[project]
+name = "ab-xql-pm-backend"
+version = "0.1.0"
+description = "AB-XQL-PM backend (FastAPI) — observabilidade agentless de PostgreSQL e SQL Server"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.8",
+    "pydantic-settings>=2.4",
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.29",
+    "psycopg[binary]>=3.2",
+    "alembic>=1.13",
+    "websockets>=13.0",
+    # pyodbc/pymssql: dependencias do coletor SQL Server (ver Docs/collector-queries.md).
+    # Mantidas ativas por padrao; ver nota no README/relatorio de scaffold caso `uv sync`
+    # falhe por falta de driver ODBC do SO — nesse caso comentar as duas linhas abaixo.
+    "pyodbc>=5.1",
+    "pymssql>=2.3",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.27",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+disallow_untyped_defs = false
+warn_unused_ignores = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
