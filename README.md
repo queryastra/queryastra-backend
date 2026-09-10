@@ -27,6 +27,10 @@ repositorio de documentos para o roadmap completo.
 - PostgreSQL/TimescaleDB acessivel via `DATABASE_URL` (ver `.env.example`) para rodar migrations e
   a aplicacao de verdade — os testes automatizados nao dependem de banco real.
 
+O backend espera que o repositorio `ab-xql-pm-documentos` esteja disponivel
+localmente para consulta. Os links para `ARCHITECTURE_SPEC.md` e `Docs/` neste
+README sao referencias ao repositorio de documentacao, nao arquivos deste repo.
+
 ## Setup local
 
 ```bash
@@ -36,6 +40,9 @@ cp .env.example .env   # ajustar DATABASE_URL e demais variaveis
 uv run alembic upgrade head   # requer Postgres/TimescaleDB acessivel
 uv run uvicorn app.main:app --reload
 ```
+
+Com a aplicacao em execucao, a API fica em `http://localhost:8000` e a
+documentacao OpenAPI em `http://localhost:8000/docs`.
 
 ## Qualidade
 
