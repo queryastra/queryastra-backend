@@ -7,6 +7,9 @@ completa de bloqueio — corte de escopo, ver `app.normalizers.models.Normalized
 
 from __future__ import annotations
 
+from datetime import datetime
+from uuid import UUID
+
 import sqlalchemy as sa
 
 from app.normalizers.models import NormalizedBlockingEvent
@@ -34,3 +37,26 @@ class BlockingEventsRepository(BaseRepository):
         ]
         await self._session.execute(sa.insert(blocking_events_table), rows)
         await self._session.commit()
+
+    async def list_latest_snapshot(
+        self, instance_id: UUID, since: datetime, limit: int
+    ) -> list[sa.Row]:
+        """So o ultimo ciclo que registrou bloqueio — snapshot no timestamp mais recente dentro
+        da janela, NAO uma janela deslizante inteira (misturaria bloqueios ja resolvidos com os
+        atuais)."""
+        latest_time_stmt = sa.select(sa.func.max(blocking_events_table.c.time)).where(
+            blocking_events_table.c.instance_id == instance_id,
+            blocking_events_table.c.time >= since,
+        )
+        latest_time = (await self._session.execute(latest_time_stmt)).scalar_one_or_none()
+        if latest_time is None:
+            return []
+        stmt = (
+            sa.select(blocking_events_table)
+            .where(
+                blocking_events_table.c.instance_id == instance_id,
+                blocking_events_table.c.time == latest_time,
+            )
+            .limit(limit)
+        )
+        return list((await self._session.execute(stmt)).fetchall())

@@ -8,6 +8,7 @@ queries, alerts) — nenhum endpoint deve inventar seu proprio esquema de `page`
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import Query
@@ -39,3 +40,14 @@ def pagination_params(
 ) -> PaginationParams:
     """Dependency FastAPI que monta `PaginationParams` a partir de query params."""
     return PaginationParams(offset=offset, limit=limit)
+
+
+def resolve_time_window(
+    since: datetime | None, until: datetime | None, default_lookback: timedelta
+) -> tuple[datetime, datetime]:
+    """Resolve a janela `[since, until]` de um endpoint de leitura.
+
+    Sem periodo informado, olha `default_lookback` para tras a partir de agora (UTC).
+    """
+    now = datetime.now(UTC)
+    return (since or now - default_lookback), (until or now)

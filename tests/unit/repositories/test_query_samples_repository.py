@@ -7,7 +7,7 @@ inserido normalmente (`Docs/rules/03-sql-privacy.md`).
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import sqlalchemy as sa
@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.instance import Instance
 from app.normalizers.models import NormalizedQuerySample
+from app.normalizers.wait_taxonomy import WaitCategory
 from app.repositories._tables import query_samples_table, sql_exclusions_table
 from app.repositories.query_samples_repository import QuerySamplesRepository
 
@@ -93,3 +94,174 @@ async def test_insert_batch_noop_for_empty_list(
 ) -> None:
     repo = QuerySamplesRepository(db_session)
     await repo.insert_batch([])
+
+
+async def test_list_active_filters_by_window(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    repo = QuerySamplesRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-in-window",
+                sql_text_masked="SELECT ?",
+            ),
+            NormalizedQuerySample(
+                time=now - timedelta(hours=2),
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-out-of-window",
+                sql_text_masked="SELECT ?",
+            ),
+        ]
+    )
+
+    rows = await repo.list_active(
+        test_instance.id,
+        since=now - timedelta(minutes=5),
+        until=now + timedelta(minutes=5),
+        limit=100,
+    )
+
+    hashes = {row.sql_hash for row in rows}
+    assert hashes == {"hash-in-window"}
+
+
+async def test_top_sql_aggregates_by_hash_with_predominant_wait_type(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    repo = QuerySamplesRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-a",
+                sql_name="query-a",
+                sql_text_masked="SELECT ? FROM t",
+                wait_type=WaitCategory.LOCK,
+                wait_time_ms=100,
+            ),
+            NormalizedQuerySample(
+                time=now + timedelta(seconds=1),
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-a",
+                sql_name="query-a",
+                sql_text_masked="SELECT ? FROM t",
+                wait_type=WaitCategory.LOCK,
+                wait_time_ms=200,
+            ),
+            NormalizedQuerySample(
+                time=now + timedelta(seconds=2),
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-a",
+                sql_name="query-a",
+                sql_text_masked="SELECT ? FROM t",
+                wait_type=WaitCategory.IO,
+                wait_time_ms=50,
+            ),
+        ]
+    )
+
+    rows = await repo.top_sql(
+        test_instance.id,
+        since=now - timedelta(minutes=1),
+        until=now + timedelta(minutes=1),
+        limit=10,
+    )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.sql_hash == "hash-a"
+    assert row.execution_count == 3
+    assert row.total_wait_time_ms == 350
+    assert row.predominant_wait_type == WaitCategory.LOCK.value
+
+
+async def test_wait_summary_groups_by_wait_type(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    repo = QuerySamplesRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-a",
+                sql_text_masked="SELECT ?",
+                wait_type=WaitCategory.LOCK,
+                wait_time_ms=100,
+            ),
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-b",
+                sql_text_masked="SELECT ?",
+                wait_type=WaitCategory.LOCK,
+                wait_time_ms=50,
+            ),
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-c",
+                sql_text_masked="SELECT ?",
+                wait_type=WaitCategory.IO,
+                wait_time_ms=30,
+            ),
+        ]
+    )
+
+    rows = await repo.wait_summary(
+        test_instance.id, since=now - timedelta(minutes=1), until=now + timedelta(minutes=1)
+    )
+
+    summary = {row.wait_type: row.total_wait_time_ms for row in rows}
+    assert summary == {WaitCategory.LOCK.value: 150, WaitCategory.IO.value: 30}
+
+
+async def test_latest_by_session_returns_most_recent_row(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    repo = QuerySamplesRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=now - timedelta(seconds=10),
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-old",
+                sql_text_masked="SELECT ? FROM old",
+                session_id="session-1",
+                db_user="old_user",
+            ),
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-new",
+                sql_text_masked="SELECT ? FROM new",
+                session_id="session-1",
+                db_user="new_user",
+            ),
+        ]
+    )
+
+    result = await repo.latest_by_session(
+        test_instance.id, ["session-1"], since=now - timedelta(minutes=1)
+    )
+
+    assert result["session-1"].sql_hash == "hash-new"
+    assert result["session-1"].db_user == "new_user"

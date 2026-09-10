@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -45,3 +45,40 @@ async def test_insert_batch_noop_for_empty_list(
 ) -> None:
     repo = BlockingEventsRepository(db_session)
     await repo.insert_batch([])
+
+
+async def test_list_latest_snapshot_ignores_older_resolved_blocks(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    repo = BlockingEventsRepository(db_session)
+    now = datetime.now(UTC)
+    older_time = now - timedelta(minutes=10)
+    await repo.insert_batch(
+        [
+            NormalizedBlockingEvent(
+                time=older_time,
+                instance_id=test_instance.id,
+                blocker_session_id="resolved-blocker",
+                blocked_session_id="resolved-blocked",
+                wait_time_ms=500,
+            )
+        ]
+    )
+    await repo.insert_batch(
+        [
+            NormalizedBlockingEvent(
+                time=now,
+                instance_id=test_instance.id,
+                blocker_session_id="current-blocker",
+                blocked_session_id="current-blocked",
+                wait_time_ms=250,
+            )
+        ]
+    )
+
+    rows = await repo.list_latest_snapshot(
+        test_instance.id, since=now - timedelta(minutes=30), limit=100
+    )
+
+    blocker_ids = {row.blocker_session_id for row in rows}
+    assert blocker_ids == {"current-blocker"}

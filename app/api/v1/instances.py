@@ -17,9 +17,14 @@ from app.api.deps import get_db_session
 from app.collectors.base import CapabilityResult
 from app.collectors.capabilities import has_missing_mandatory_capability
 from app.repositories.instances_repository import InstancesRepository
+from app.repositories.metric_samples_repository import MetricSamplesRepository
 from app.security.credential_reference import CredentialResolver
 from app.services.exceptions import InstanceNotFoundError
 from app.services.health_check_service import HealthCheckService
+from app.services.instance_derived_status_service import (
+    UNKNOWN_STATUS,
+    InstanceDerivedStatusService,
+)
 from app.services.instance_service import (
     ConnectionTestInput,
     InstanceRegistrationRejected,
@@ -81,6 +86,43 @@ class InstanceResponse(BaseModel):
     updated_at: datetime
 
 
+class CapabilityErrorResponse(BaseModel):
+    """Erro de capacidade ocorrido durante a coleta — sempre `[]` neste MVP (TODO: sem segunda
+    fonte de dado ainda, ver `app.services.instance_derived_status_service`)."""
+
+    capability: str
+    message: str
+    occurred_at: datetime
+
+
+class InstanceDetailResponse(InstanceResponse):
+    """Detalhe de instancia com status derivado da telemetria de ciclo do collector."""
+
+    health_status: str
+    collection_coverage: str
+    capability_errors: list[CapabilityErrorResponse] = Field(default_factory=list)
+    last_collected_at: datetime | None
+
+
+class InstanceSummaryResponse(BaseModel):
+    """Linha resumida de instancia para listagem — status derivado, sem os campos completos de
+    `InstanceResponse`."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    name: str
+    db_type: str
+    host: str
+    port: int
+    criticality: str
+    health_status: str
+    collection_coverage: str
+    active: bool
+    open_alert_count: int  # sempre 0 — TODO, depende de GET /alerts (ainda 501)
+    last_collected_at: datetime | None
+
+
 class InstanceHealthCheckResponse(BaseModel):
     """Resposta do health-check de capacidade — `Docs/rules/04-engine-capabilities.md`."""
 
@@ -132,14 +174,26 @@ def get_health_check_service(
     return HealthCheckService(repository, credential_resolver)
 
 
+def get_metric_samples_repository(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> MetricSamplesRepository:
+    return MetricSamplesRepository(session)
+
+
+def get_instance_derived_status_service(
+    repository: Annotated[MetricSamplesRepository, Depends(get_metric_samples_repository)],
+) -> InstanceDerivedStatusService:
+    return InstanceDerivedStatusService(repository)
+
+
 # --- Endpoints -----------------------------------------------------------------------------
 
 
-@router.post("", response_model=InstanceResponse, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=InstanceDetailResponse, status_code=status.HTTP_201_CREATED)
 async def create_instance(
     payload: InstanceCreateRequest,
     service: Annotated[InstanceService, Depends(get_instance_service)],
-) -> InstanceResponse:
+) -> InstanceDetailResponse:
     """Testa a conexao e, se as capacidades mandatorias estiverem OK, cadastra a instancia."""
     password = payload.password.get_secret_value() if payload.password is not None else None
     register_input = RegisterInstanceInput(
@@ -164,30 +218,76 @@ async def create_instance(
                 "capabilities": _capabilities_to_dicts(exc.capabilities),
             },
         ) from exc
-    return InstanceResponse.model_validate(instance)
+    # Instancia recem-criada nunca tem telemetria ainda — usa `UNKNOWN_STATUS` direto, sem
+    # `InstanceDerivedStatusService`/sem Depends novo neste endpoint especifico. Isso evita
+    # exigir `MetricSamplesRepository` no fluxo de criacao, o que quebraria
+    # `test_instances_registration.py` (usa repositorio fake via `dependency_overrides`, so para
+    # `InstancesRepository`).
+    return InstanceDetailResponse(
+        **InstanceResponse.model_validate(instance).model_dump(),
+        health_status=UNKNOWN_STATUS.health_status,
+        collection_coverage=UNKNOWN_STATUS.collection_coverage,
+        capability_errors=[],
+        last_collected_at=None,
+    )
 
 
-@router.get("", response_model=list[InstanceResponse])
+@router.get("", response_model=list[InstanceSummaryResponse])
 async def list_instances(
     repository: Annotated[InstancesRepository, Depends(get_instances_repository)],
-) -> list[InstanceResponse]:
-    """Lista instancias ativas cadastradas."""
+    status_service: Annotated[
+        InstanceDerivedStatusService, Depends(get_instance_derived_status_service)
+    ],
+) -> list[InstanceSummaryResponse]:
+    """Lista instancias ativas cadastradas, com status derivado da telemetria de ciclo.
+
+    N+1 aceitavel no MVP (poucas instancias esperadas) — uma consulta de status derivado por
+    instancia da lista, em vez de uma unica query agregada.
+    """
     instances = await repository.list_active()
-    return [InstanceResponse.model_validate(instance) for instance in instances]
+    summaries = []
+    for instance in instances:
+        derived = await status_service.compute(instance.id)
+        summaries.append(
+            InstanceSummaryResponse(
+                id=instance.id,
+                name=instance.name,
+                db_type=instance.db_type,
+                host=instance.host,
+                port=instance.port,
+                criticality=instance.criticality,
+                health_status=derived.health_status,
+                collection_coverage=derived.collection_coverage,
+                active=instance.active,
+                open_alert_count=0,
+                last_collected_at=derived.last_collected_at,
+            )
+        )
+    return summaries
 
 
-@router.get("/{instance_id}", response_model=InstanceResponse)
+@router.get("/{instance_id}", response_model=InstanceDetailResponse)
 async def get_instance(
     instance_id: UUID,
     repository: Annotated[InstancesRepository, Depends(get_instances_repository)],
-) -> InstanceResponse:
-    """Detalhe de uma instancia cadastrada."""
+    status_service: Annotated[
+        InstanceDerivedStatusService, Depends(get_instance_derived_status_service)
+    ],
+) -> InstanceDetailResponse:
+    """Detalhe de uma instancia cadastrada, com status derivado da telemetria de ciclo."""
     instance = await repository.get_by_id(instance_id)
     if instance is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Instancia nao encontrada."
         )
-    return InstanceResponse.model_validate(instance)
+    derived = await status_service.compute(instance_id)
+    return InstanceDetailResponse(
+        **InstanceResponse.model_validate(instance).model_dump(),
+        health_status=derived.health_status,
+        collection_coverage=derived.collection_coverage,
+        capability_errors=[],
+        last_collected_at=derived.last_collected_at,
+    )
 
 
 @router.post("/test-connection", response_model=ConnectionTestResponse)

@@ -49,6 +49,14 @@ class Settings(BaseSettings):
     )
     collection_max_rows: int = Field(default=5000, alias="COLLECTION_MAX_ROWS")
 
+    # Limites da API de leitura contra a hypertable propria da aplicacao (nao confundir com
+    # `collection_max_rows`, que e do lado da coleta contra a instancia monitorada —
+    # responsabilidade diferente).
+    api_read_max_rows: int = Field(default=2000, alias="API_READ_MAX_ROWS")
+    api_read_default_lookback_seconds: int = Field(
+        default=3600, alias="API_READ_DEFAULT_LOOKBACK_SECONDS"
+    )
+
 
 @lru_cache
 def get_settings() -> Settings:

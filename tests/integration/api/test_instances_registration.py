@@ -132,6 +132,12 @@ async def test_register_instance_success_when_all_mandatory_full(
     assert "password" not in body
     assert "encrypted_credential_ref" not in body
     assert len(fake_repository.created) == 1
+    # Documenta o comportamento: instancia recem-criada nunca tem telemetria ainda, entao o
+    # status derivado no corpo do POST e sempre "unknown" (`UNKNOWN_STATUS`, sem consultar
+    # `metric_samples`) — ver `app/api/v1/instances.py::create_instance`.
+    assert body["health_status"] == "unknown"
+    assert body["collection_coverage"] == "unavailable"
+    assert body["last_collected_at"] is None
 
 
 async def test_register_instance_rejected_when_mandatory_capability_unavailable(
