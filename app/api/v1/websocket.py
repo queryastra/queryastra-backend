@@ -1,14 +1,16 @@
 """Canal de live update — `Docs/specs/02-backend-contract.md`, ARCHITECTURE_SPEC.md Q4.
 
-Neste scaffold o endpoint aceita a conexao WebSocket e responde a um ping com um echo simples,
-sem nenhum broadcast real de metrica/alerta ainda. Serve para validar o transporte
-(handshake, keep-alive) antes de conectar ao pipeline de coleta/alertas de verdade.
+`/ws/live` assina o `app.core.events.event_bus` (singleton in-process) e faz broadcast de
+eventos de alerta publicados por `app.workers.alerting_worker` (criacao/atualizacao de `Alert`) a
+todos os clientes conectados. CORTE DE ESCOPO: so alertas publicam evento nesta etapa —
+instancias/metricas continuam sendo consultadas via polling do frontend, sem push aqui.
 """
 
 from __future__ import annotations
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from app.core.events import event_bus
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -18,15 +20,14 @@ router = APIRouter()
 
 @router.websocket("/ws/live")
 async def live_updates(websocket: WebSocket) -> None:
-    """Aceita a conexao e ecoa qualquer mensagem recebida com o prefixo `pong:`.
-
-    TODO (nao implementado neste scaffold): assinar o worker de polling/alertas e fazer
-    broadcast real de `NormalizedMetricSample`/`Alert` para os clientes conectados.
-    """
+    """Aceita a conexao e retransmite todo evento publicado no `event_bus` como JSON."""
     await websocket.accept()
+    queue = event_bus.subscribe()
     try:
         while True:
-            message = await websocket.receive_text()
-            await websocket.send_text(f"pong:{message}")
+            event = await queue.get()
+            await websocket.send_json(event)
     except WebSocketDisconnect:
         logger.info("Cliente WebSocket desconectado de /ws/live")
+    finally:
+        event_bus.unsubscribe(queue)

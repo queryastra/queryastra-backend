@@ -9,11 +9,12 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.api.v1 import alerts, instances, metrics, queries, waits_blocking, websocket
+from app.api.v1 import alerts, hosts, instances, metrics, queries, waits_blocking, websocket
 
 api_v1_router = APIRouter()
 
 api_v1_router.include_router(instances.router, prefix="/instances", tags=["instances"])
+api_v1_router.include_router(hosts.router, prefix="/hosts", tags=["hosts"])
 api_v1_router.include_router(metrics.router, prefix="/metrics", tags=["metrics"])
 api_v1_router.include_router(queries.router, prefix="/queries", tags=["queries"])
 api_v1_router.include_router(

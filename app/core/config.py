@@ -77,9 +77,21 @@ class Settings(BaseSettings):
     alert_critical_reminder_interval_seconds: int = Field(
         default=900, alias="ALERT_CRITICAL_REMINDER_INTERVAL_SECONDS"
     )
-    # URL do webhook de notificacao de alerta. Vazio/None = notificacao so logada (nenhum envio
-    # real) — CORTE DE ESCOPO: canal email so tem schema aceito, envio real fica de fora.
+    # URL do webhook de notificacao de alerta. Vazio/None = canal webhook desabilitado (notificacao
+    # so logada nesse canal).
     alert_webhook_url: str | None = Field(default=None, alias="ALERT_WEBHOOK_URL")
+
+    # Canal de e-mail de notificacao de alerta (`app.workers.alerting_worker`). Todos vazios por
+    # padrao = canal desabilitado (nenhum envio real, mesmo default seguro do webhook). So
+    # `alert_smtp_host` habilita o envio; `alert_email_to` (lista separada por virgula) precisa
+    # estar preenchido para ter destinatario de verdade.
+    alert_smtp_host: str | None = Field(default=None, alias="ALERT_SMTP_HOST")
+    alert_smtp_port: int = Field(default=587, alias="ALERT_SMTP_PORT")
+    alert_smtp_username: str | None = Field(default=None, alias="ALERT_SMTP_USERNAME")
+    alert_smtp_password: str | None = Field(default=None, alias="ALERT_SMTP_PASSWORD")
+    alert_smtp_from: str | None = Field(default=None, alias="ALERT_SMTP_FROM")
+    # lista separada por virgula
+    alert_email_to: str | None = Field(default=None, alias="ALERT_EMAIL_TO")
 
 
 @lru_cache

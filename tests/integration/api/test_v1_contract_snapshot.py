@@ -22,6 +22,8 @@ EXPECTED_REST_PATHS = {
     "/api/v1/instances/{instance_id}",
     "/api/v1/instances/test-connection",
     "/api/v1/instances/{instance_id}/health-check",
+    "/api/v1/hosts/{hostname}/metrics",
+    "/api/v1/hosts",
     "/api/v1/metrics/{target_type}/{target_id}",
     "/api/v1/queries/active/{instance_id}",
     "/api/v1/queries/top-sql/{instance_id}",
@@ -47,6 +49,13 @@ def test_websocket_route_is_registered() -> None:
     # inclusao de router de forma preguicosa (introspeccao estatica de `app.router.routes` nao
     # reflete rotas incluidas via `include_router`) — a forma robusta de confirmar que o path
     # esta registrado e abrir a conexao de verdade contra o `TestClient`.
-    with TestClient(app).websocket_connect(EXPECTED_WEBSOCKET_PATH) as websocket:
-        websocket.send_text("hello")
-        assert websocket.receive_text() == "pong:hello"
+    #
+    # `/ws/live` nao ecoa mais (`app/api/v1/websocket.py`): assina `app.core.events.event_bus` e
+    # retransmite qualquer evento publicado la. Nao publicamos daqui: o `TestClient` roda o app
+    # numa thread/loop propria (portal do `anyio`), diferente da thread deste teste sincrono —
+    # chamar `event_bus.publish` (uma `asyncio.Queue` de outro loop) de fora dessa thread nao e
+    # thread-safe. Abrir e fechar a conexao ja e prova suficiente de que a rota esta registrada
+    # e aceita o handshake; o broadcast de verdade (mesma thread/loop do worker) e coberto pelo
+    # smoke test manual do backend.
+    with TestClient(app).websocket_connect(EXPECTED_WEBSOCKET_PATH):
+        pass

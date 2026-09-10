@@ -22,7 +22,7 @@ from app.api.v1.router import api_v1_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
 from app.db.session import async_session_factory
-from app.workers.alerting_worker import AlertingWorker
+from app.workers.alerting_worker import AlertingWorker, EmailSettings
 from app.workers.polling_supervisor import PollingSupervisor
 
 logger = get_logger(__name__)
@@ -50,11 +50,26 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.info("PollingSupervisor desabilitado (POLLING_SUPERVISOR_ENABLED=false)")
 
     if settings.alerting_worker_enabled:
+        email_settings: EmailSettings | None = None
+        if settings.alert_smtp_host:
+            email_settings = EmailSettings(
+                host=settings.alert_smtp_host,
+                port=settings.alert_smtp_port,
+                username=settings.alert_smtp_username,
+                password=settings.alert_smtp_password,
+                sender=settings.alert_smtp_from or "alerts@ab-xql-pm.local",
+                recipients=[
+                    address.strip()
+                    for address in (settings.alert_email_to or "").split(",")
+                    if address.strip()
+                ],
+            )
         alerting_worker = AlertingWorker(
             async_session_factory,
             settings.alerting_evaluation_interval_seconds,
             settings.alert_critical_reminder_interval_seconds,
             webhook_url=settings.alert_webhook_url,
+            email_settings=email_settings,
         )
         alerting_task = asyncio.create_task(alerting_worker.run())
         logger.info(
