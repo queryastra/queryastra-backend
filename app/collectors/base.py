@@ -20,7 +20,11 @@ from enum import StrEnum
 from typing import Protocol, runtime_checkable
 from uuid import UUID
 
-from app.normalizers.models import NormalizedMetricSample, NormalizedQuerySample
+from app.normalizers.models import (
+    NormalizedBlockingEvent,
+    NormalizedMetricSample,
+    NormalizedQuerySample,
+)
 
 
 class CapabilityStatus(StrEnum):
@@ -65,6 +69,7 @@ class CollectionResult:
     duration_ms: int
     metric_samples: list[NormalizedMetricSample] = field(default_factory=list)
     query_samples: list[NormalizedQuerySample] = field(default_factory=list)
+    blocking_events: list[NormalizedBlockingEvent] = field(default_factory=list)
     capabilities: list[CapabilityResult] = field(default_factory=list)
 
 

@@ -8,17 +8,25 @@ Usa `asyncpg` (Docs/database-schema.md, ARCHITECTURE_SPEC.md §4) como driver as
 `pg_signal_backend`) — mandatorias — e a disponibilidade opcional de `pg_stat_statements`
 ("Top SQL"), que so degrada, nunca reprova o cadastro sozinha.
 
-Views usadas como referencia para `collect()` (ainda fora de escopo desta feature):
-    - `pg_stat_activity` — sessao/query ativa (collector-queries.md §1).
-    - `pg_blocking_pids(pid)` — deteccao de bloqueio (collector-queries.md §2).
-    - `pg_stat_database`, `pg_stat_bgwriter` (< PG17) / `pg_stat_checkpointer` (>= PG17),
-      `pg_stat_replication`, `pg_stat_archiver` — metricas de recurso/instancia
-      (collector-queries.md §5).
-    - `pg_stat_statements` (extensao opcional, requer restart) — Top SQL agregado
-      (collector-queries.md §5, "Resumo").
+`collect()` executa um ciclo real de coleta somente leitura, com timeout por query
+(`settings.collection_query_timeout_seconds`) e limite de linhas truncado em Python apos o
+fetch (`settings.collection_max_rows`) — nunca DDL/DML:
+    - `pg_stat_activity` (WHERE state != 'idle') — sessao/query ativa (collector-queries.md §1),
+      normalizada em `NormalizedQuerySample` (mascarada via `mask_sql_literals` antes do hash).
+    - `pg_blocking_pids(pid)` — deteccao de bloqueio de nivel direto apenas (collector-queries.md
+      §2); NAO implementa a arvore recursiva completa (corte de escopo desta feature).
+      `wait_time_ms` de `NormalizedBlockingEvent` e uma aproximacao (`collected_at - query_start`
+      da sessao bloqueada, ou `0`) — Postgres nao expoe duracao nativa de espera de lock.
+    - `pg_stat_database` (agregado via SUM, cluster inteiro — `ConnectionParams` nao carrega
+      banco especifico) e `pg_stat_bgwriter` (< PG17) / `pg_stat_checkpointer` (>= PG17) —
+      metricas de recurso/instancia (collector-queries.md §5). Versao e detectada a cada ciclo
+      dentro de `collect()` (via `server_version_num`), nunca persistida em `Instance` (corte de
+      escopo desta feature — `engine_version*` fica para o health-check de cadastro).
+    - `pg_stat_statements` (extensao opcional) — Top SQL agregado: **nao implementado** em
+      `collect()` nesta feature (so a capacidade e checada em `check_capabilities()`).
     - Detalhe de deadlock: **nao disponivel via SQL** neste motor — so
-      `pg_stat_database.deadlocks` (contador agregado); detalhe fica em log do servidor
-      (collector-queries.md §4) — decisao de escopo pendente antes da Fase 2.
+      `pg_stat_database.deadlocks` (contador agregado, coletado como metrica); detalhe fica em
+      log do servidor (collector-queries.md §4) — `deadlock_events` fora de escopo (corte).
 
 Permissao minima esperada: role `pg_read_all_stats`/`pg_read_all_settings`/`pg_signal_backend`
 (ou superuser) — collector-queries.md §7.
@@ -27,6 +35,8 @@ Permissao minima esperada: role `pg_read_all_stats`/`pg_read_all_settings`/`pg_s
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import time
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -41,13 +51,81 @@ from app.collectors.capabilities import (
     POSTGRESQL_TOP_SQL,
 )
 from app.collectors.connection import ConnectionParams
+from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.masking.sql_masking import mask_sql_literals
+from app.normalizers.metric_names import (
+    PG_ACTIVE_SESSION_COUNT,
+    PG_BLKS_HIT,
+    PG_BLKS_READ,
+    PG_CHECKPOINT_BUFFERS_WRITTEN,
+    PG_CHECKPOINT_SYNC_TIME_MS,
+    PG_CHECKPOINT_WRITE_TIME_MS,
+    PG_CHECKPOINTS_REQUESTED,
+    PG_CHECKPOINTS_TIMED,
+    PG_DEADLOCKS,
+    PG_NUMBACKENDS,
+    PG_TEMP_BYTES,
+    PG_TEMP_FILES,
+    PG_TUP_DELETED,
+    PG_TUP_FETCHED,
+    PG_TUP_INSERTED,
+    PG_TUP_RETURNED,
+    PG_TUP_UPDATED,
+    PG_XACT_COMMIT,
+    PG_XACT_ROLLBACK,
+)
+from app.normalizers.models import (
+    NormalizedBlockingEvent,
+    NormalizedMetricSample,
+    NormalizedQuerySample,
+)
+from app.normalizers.wait_taxonomy import map_wait_event
 
 logger = get_logger(__name__)
 
 # `track_activity_query_size` minimo para nao truncar query capturada demais cedo
 # (default do Postgres e 1024 — Docs/collector-queries.md §7).
 _MIN_TRACK_ACTIVITY_QUERY_SIZE = 4096
+
+# PG17 substitui `pg_stat_bgwriter.checkpoints_*` por `pg_stat_checkpointer` (colunas renomeadas
+# `num_timed`/`num_requested`/`write_time`/`sync_time`/`buffers_written`).
+_PG17_VERSION_NUM = 170000
+
+_SESSION_ACTIVITY_QUERY = """
+    SELECT pid, usename, datname, application_name, client_addr, backend_start, xact_start,
+           query_start, state_change, wait_event_type, wait_event, state, backend_type, query
+    FROM pg_stat_activity
+    WHERE state != 'idle'
+"""
+
+_BLOCKING_QUERY = """
+    SELECT pid, pg_blocking_pids(pid) AS blocked_by, query
+    FROM pg_stat_activity
+    WHERE cardinality(pg_blocking_pids(pid)) > 0
+"""
+
+_DATABASE_STATS_QUERY = """
+    SELECT sum(numbackends) AS numbackends, sum(xact_commit) AS xact_commit,
+           sum(xact_rollback) AS xact_rollback, sum(blks_read) AS blks_read,
+           sum(blks_hit) AS blks_hit, sum(tup_returned) AS tup_returned,
+           sum(tup_fetched) AS tup_fetched, sum(tup_inserted) AS tup_inserted,
+           sum(tup_updated) AS tup_updated, sum(tup_deleted) AS tup_deleted,
+           sum(deadlocks) AS deadlocks, sum(temp_files) AS temp_files,
+           sum(temp_bytes) AS temp_bytes
+    FROM pg_stat_database
+"""
+
+_BGWRITER_QUERY = """
+    SELECT checkpoints_timed, checkpoints_req, checkpoint_write_time, checkpoint_sync_time,
+           buffers_checkpoint
+    FROM pg_stat_bgwriter
+"""
+
+_CHECKPOINTER_QUERY = """
+    SELECT num_timed, num_requested, write_time, sync_time, buffers_written
+    FROM pg_stat_checkpointer
+"""
 
 
 class PostgreSQLCollector:
@@ -179,20 +257,245 @@ class PostgreSQLCollector:
         )
 
     async def collect(self) -> CollectionResult:
-        """Deveria consultar `pg_stat_activity`/`pg_blocking_pids`/`pg_stat_*` e normalizar.
+        """Executa um ciclo de coleta: sessao ativa, bloqueio (nivel direto) e metricas de recurso.
 
         Ver `Docs/collector-queries.md` §1 (sessao ativa), §2 (bloqueio), §5 (metricas de
-        recurso) para as queries exatas por versao. Fora de escopo desta feature (cadastro).
+        recurso). Versao do engine e detectada a cada ciclo (nao persistida —
+        `Instance.engine_version*` fica fora de escopo desta feature) so para decidir entre
+        `pg_stat_bgwriter` (< PG17) e `pg_stat_checkpointer` (>= PG17).
+
+        Requer `instance_id` (levanta `ValueError` se `None` — usado em teste de conexao
+        pre-cadastro, onde `collect()` nao se aplica).
         """
-        logger.info(
-            "collect ainda nao implementado para instancia postgresql (instance_id=%s)",
-            self._instance_id,
+        if self._instance_id is None:
+            raise ValueError(
+                "PostgreSQLCollector.collect requer instance_id de uma instancia ja cadastrada."
+            )
+
+        start = time.perf_counter()
+        collected_at = self._now()
+        settings = get_settings()
+
+        conn = await asyncio.wait_for(
+            self._connect(), timeout=self._connection_params.connect_timeout_seconds
         )
-        raise NotImplementedError(
-            "PostgreSQLCollector.collect: implementar consulta a pg_stat_activity, "
-            "pg_blocking_pids(pid) e pg_stat_database/pg_stat_bgwriter|pg_stat_checkpointer, "
-            "conforme Docs/collector-queries.md §1, §2, §5."
+        try:
+            version_num = await self._fetch_version(conn, settings.collection_query_timeout_seconds)
+
+            session_rows = await self._fetch_rows(
+                conn, _SESSION_ACTIVITY_QUERY, settings.collection_query_timeout_seconds
+            )
+            session_rows = session_rows[: settings.collection_max_rows]
+
+            blocking_rows = await self._fetch_rows(
+                conn, _BLOCKING_QUERY, settings.collection_query_timeout_seconds
+            )
+            blocking_rows = blocking_rows[: settings.collection_max_rows]
+
+            database_stats_row = await asyncio.wait_for(
+                conn.fetchrow(_DATABASE_STATS_QUERY),
+                timeout=settings.collection_query_timeout_seconds,
+            )
+
+            if version_num >= _PG17_VERSION_NUM:
+                checkpoint_row = await asyncio.wait_for(
+                    conn.fetchrow(_CHECKPOINTER_QUERY),
+                    timeout=settings.collection_query_timeout_seconds,
+                )
+            else:
+                checkpoint_row = await asyncio.wait_for(
+                    conn.fetchrow(_BGWRITER_QUERY),
+                    timeout=settings.collection_query_timeout_seconds,
+                )
+        finally:
+            await conn.close()
+
+        query_samples = self._build_query_samples(session_rows, collected_at)
+        blocking_events = self._build_blocking_events(session_rows, blocking_rows, collected_at)
+        metric_samples = self._build_metric_samples(
+            session_rows,
+            database_stats_row,
+            checkpoint_row,
+            version_num,
+            collected_at,
         )
+
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        return CollectionResult(
+            instance_id=self._instance_id,
+            collected_at=collected_at,
+            duration_ms=duration_ms,
+            metric_samples=metric_samples,
+            query_samples=query_samples,
+            blocking_events=blocking_events,
+        )
+
+    async def _fetch_version(self, conn: asyncpg.Connection, timeout_seconds: float) -> int:
+        return await asyncio.wait_for(
+            conn.fetchval("SELECT current_setting('server_version_num')::int"),
+            timeout=timeout_seconds,
+        )
+
+    async def _fetch_rows(
+        self, conn: asyncpg.Connection, query: str, timeout_seconds: float
+    ) -> list[asyncpg.Record]:
+        return await asyncio.wait_for(conn.fetch(query), timeout=timeout_seconds)
+
+    def _build_query_samples(
+        self, session_rows: list[asyncpg.Record], collected_at: datetime
+    ) -> list[NormalizedQuerySample]:
+        assert self._instance_id is not None  # garantido por collect()
+        instance_id: UUID = self._instance_id
+        samples: list[NormalizedQuerySample] = []
+        for row in session_rows:
+            query_text = row["query"]
+            if not query_text:
+                continue
+            masked = mask_sql_literals(query_text)
+            sql_hash = hashlib.sha256(masked.encode("utf-8")).hexdigest()
+            query_start = row["query_start"]
+            duration_ms = (
+                int((collected_at - query_start).total_seconds() * 1000)
+                if query_start is not None
+                else None
+            )
+            client_addr = row["client_addr"]
+            samples.append(
+                NormalizedQuerySample(
+                    time=collected_at,
+                    instance_id=instance_id,
+                    engine="postgresql",
+                    sql_hash=sql_hash,
+                    sql_text_masked=masked,
+                    wait_type=map_wait_event("postgresql", row["wait_event_type"]),
+                    wait_event_native=row["wait_event"],
+                    # Postgres nao expoe duracao de espera do backend diretamente.
+                    wait_time_ms=None,
+                    duration_ms=duration_ms,
+                    session_id=str(row["pid"]),
+                    db_user=row["usename"],
+                    program=row["application_name"],
+                    database_name=row["datname"],
+                    machine=str(client_addr) if client_addr is not None else None,
+                )
+            )
+        return samples
+
+    def _build_blocking_events(
+        self,
+        session_rows: list[asyncpg.Record],
+        blocking_rows: list[asyncpg.Record],
+        collected_at: datetime,
+    ) -> list[NormalizedBlockingEvent]:
+        """Constroi um evento por par (bloqueador, bloqueado) — nivel direto apenas.
+
+        `wait_time_ms` e uma APROXIMACAO: Postgres nao expoe duracao nativa de espera de lock,
+        entao usamos `collected_at - query_start` da sessao bloqueada quando disponivel, ou `0`
+        quando `query_start` e `None`.
+        """
+        assert self._instance_id is not None  # garantido por collect()
+        instance_id: UUID = self._instance_id
+        sessions_by_pid = {row["pid"]: row for row in session_rows}
+        events: list[NormalizedBlockingEvent] = []
+        for row in blocking_rows:
+            blocked_pid = row["pid"]
+            blocked_session = sessions_by_pid.get(blocked_pid)
+            blocked_sql_hash = self._hash_query(
+                blocked_session["query"] if blocked_session is not None else None
+            )
+            query_start = blocked_session["query_start"] if blocked_session is not None else None
+            wait_time_ms = (
+                int((collected_at - query_start).total_seconds() * 1000)
+                if query_start is not None
+                else 0
+            )
+            for blocker_pid in row["blocked_by"]:
+                blocker_session = sessions_by_pid.get(blocker_pid)
+                blocker_sql_hash = self._hash_query(
+                    blocker_session["query"] if blocker_session is not None else None
+                )
+                events.append(
+                    NormalizedBlockingEvent(
+                        time=collected_at,
+                        instance_id=instance_id,
+                        blocker_session_id=str(blocker_pid),
+                        blocked_session_id=str(blocked_pid),
+                        blocker_sql_hash=blocker_sql_hash,
+                        blocked_sql_hash=blocked_sql_hash,
+                        wait_time_ms=wait_time_ms,
+                    )
+                )
+        return events
+
+    @staticmethod
+    def _hash_query(query_text: str | None) -> str | None:
+        if not query_text:
+            return None
+        return hashlib.sha256(mask_sql_literals(query_text).encode("utf-8")).hexdigest()
+
+    def _build_metric_samples(
+        self,
+        session_rows: list[asyncpg.Record],
+        database_stats_row: asyncpg.Record,
+        checkpoint_row: asyncpg.Record,
+        version_num: int,
+        collected_at: datetime,
+    ) -> list[NormalizedMetricSample]:
+        assert self._instance_id is not None  # garantido por collect()
+        instance_id: UUID = self._instance_id
+        labels: dict[str, str] = {}
+
+        def sample(metric_name: str, value: float | None) -> NormalizedMetricSample | None:
+            if value is None:
+                return None
+            return NormalizedMetricSample(
+                time=collected_at,
+                target_type="instance",
+                target_id=instance_id,
+                metric_name=metric_name,
+                value=float(value),
+                labels=labels,
+            )
+
+        candidates = [
+            sample(PG_ACTIVE_SESSION_COUNT, len(session_rows)),
+            sample(PG_NUMBACKENDS, database_stats_row["numbackends"]),
+            sample(PG_XACT_COMMIT, database_stats_row["xact_commit"]),
+            sample(PG_XACT_ROLLBACK, database_stats_row["xact_rollback"]),
+            sample(PG_BLKS_READ, database_stats_row["blks_read"]),
+            sample(PG_BLKS_HIT, database_stats_row["blks_hit"]),
+            sample(PG_TUP_RETURNED, database_stats_row["tup_returned"]),
+            sample(PG_TUP_FETCHED, database_stats_row["tup_fetched"]),
+            sample(PG_TUP_INSERTED, database_stats_row["tup_inserted"]),
+            sample(PG_TUP_UPDATED, database_stats_row["tup_updated"]),
+            sample(PG_TUP_DELETED, database_stats_row["tup_deleted"]),
+            sample(PG_DEADLOCKS, database_stats_row["deadlocks"]),
+            sample(PG_TEMP_FILES, database_stats_row["temp_files"]),
+            sample(PG_TEMP_BYTES, database_stats_row["temp_bytes"]),
+        ]
+
+        if version_num >= _PG17_VERSION_NUM:
+            candidates.extend(
+                [
+                    sample(PG_CHECKPOINTS_TIMED, checkpoint_row["num_timed"]),
+                    sample(PG_CHECKPOINTS_REQUESTED, checkpoint_row["num_requested"]),
+                    sample(PG_CHECKPOINT_WRITE_TIME_MS, checkpoint_row["write_time"]),
+                    sample(PG_CHECKPOINT_SYNC_TIME_MS, checkpoint_row["sync_time"]),
+                    sample(PG_CHECKPOINT_BUFFERS_WRITTEN, checkpoint_row["buffers_written"]),
+                ]
+            )
+        else:
+            candidates.extend(
+                [
+                    sample(PG_CHECKPOINTS_TIMED, checkpoint_row["checkpoints_timed"]),
+                    sample(PG_CHECKPOINTS_REQUESTED, checkpoint_row["checkpoints_req"]),
+                    sample(PG_CHECKPOINT_WRITE_TIME_MS, checkpoint_row["checkpoint_write_time"]),
+                    sample(PG_CHECKPOINT_SYNC_TIME_MS, checkpoint_row["checkpoint_sync_time"]),
+                    sample(PG_CHECKPOINT_BUFFERS_WRITTEN, checkpoint_row["buffers_checkpoint"]),
+                ]
+            )
+
+        return [c for c in candidates if c is not None]
 
     async def close(self) -> None:
         """Sem estado persistente entre chamadas (cada `check_capabilities` fecha sua conexao)."""

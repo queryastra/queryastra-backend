@@ -73,3 +73,22 @@ class NormalizedQuerySample(BaseModel):
     program: str | None = None
     database_name: str | None = None
     machine: str | None = None
+
+
+class NormalizedBlockingEvent(BaseModel):
+    """Evento de bloqueio normalizado — destino: hypertable `blocking_events`.
+
+    Nivel direto apenas (`blocking_session_id`/`pg_blocking_pids`), sem arvore recursiva
+    completa (corte de escopo). `wait_time_ms` sempre preenchido (nunca None) mesmo quando o
+    motor nao expoe duracao de espera diretamente.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    time: datetime
+    instance_id: UUID
+    blocker_session_id: str
+    blocked_session_id: str
+    blocker_sql_hash: str | None = None
+    blocked_sql_hash: str | None = None
+    wait_time_ms: int

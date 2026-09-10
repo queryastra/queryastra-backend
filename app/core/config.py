@@ -42,6 +42,13 @@ class Settings(BaseSettings):
     # (Docs/rules/01-credential-security.md — chave nunca pode viver no banco/codigo).
     credential_encryption_key: str = Field(alias="CREDENTIAL_ENCRYPTION_KEY")
 
+    # Timeout por query de coleta e limite de linhas por resultado (Docs/rules/02-safe-collection.md
+    # — coleta somente leitura, nunca deve travar ou sobrecarregar a instancia monitorada).
+    collection_query_timeout_seconds: float = Field(
+        default=5.0, alias="COLLECTION_QUERY_TIMEOUT_SECONDS"
+    )
+    collection_max_rows: int = Field(default=5000, alias="COLLECTION_MAX_ROWS")
+
 
 @lru_cache
 def get_settings() -> Settings:

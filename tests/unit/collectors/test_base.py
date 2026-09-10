@@ -41,4 +41,5 @@ def test_collection_result_defaults_to_empty_samples() -> None:
     )
     assert result.metric_samples == []
     assert result.query_samples == []
+    assert result.blocking_events == []
     assert result.capabilities == []
