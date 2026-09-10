@@ -20,6 +20,7 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import async_session_factory, engine
+from app.models.alert import Alert, AlertNotification, AlertRule, AlertSilence
 from app.models.instance import Instance
 from app.repositories._tables import (
     blocking_events_table,
@@ -67,6 +68,50 @@ async def test_instance(db_session: AsyncSession) -> AsyncIterator[Instance]:
     await db_session.execute(
         sa.delete(metric_samples_table).where(metric_samples_table.c.target_id == instance.id)
     )
+    # Alertas/notificacoes/silenciamentos que tenham esta instancia como alvo — ordem de FK:
+    # alert_notifications antes de alerts (nao apaga alert_rules aqui: uma regra nao e escopada
+    # por instancia, quem cria uma regra em teste usa a fixture `alert_rule`, que cuida do
+    # proprio ciclo de vida).
+    await db_session.execute(
+        sa.delete(AlertNotification).where(
+            AlertNotification.alert_id.in_(
+                sa.select(Alert.id).where(Alert.target_id == instance.id)
+            )
+        )
+    )
+    await db_session.execute(sa.delete(Alert).where(Alert.target_id == instance.id))
+    await db_session.execute(sa.delete(AlertSilence).where(AlertSilence.target_id == instance.id))
     await db_session.commit()
     await db_session.delete(instance)
+    await db_session.commit()
+
+
+@pytest.fixture
+async def alert_rule(db_session: AsyncSession) -> AsyncIterator[AlertRule]:
+    """Regra de alerta de threshold simples descartavel — cuida do proprio ciclo de vida (regra
+    nao e escopada por instancia, entao nao entra na limpeza de `test_instance`)."""
+    rule = AlertRule(
+        name=f"test-rule-{uuid4()}",
+        target_type="instance",
+        metric_name="test_metric",
+        comparison="gte",
+        threshold_warning=1.0,
+    )
+    db_session.add(rule)
+    await db_session.commit()
+    await db_session.refresh(rule)
+
+    yield rule
+
+    await db_session.execute(
+        sa.delete(AlertNotification).where(
+            AlertNotification.alert_id.in_(
+                sa.select(Alert.id).where(Alert.alert_rule_id == rule.id)
+            )
+        )
+    )
+    await db_session.execute(sa.delete(Alert).where(Alert.alert_rule_id == rule.id))
+    await db_session.execute(sa.delete(AlertSilence).where(AlertSilence.alert_rule_id == rule.id))
+    await db_session.commit()
+    await db_session.delete(rule)
     await db_session.commit()

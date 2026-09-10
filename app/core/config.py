@@ -65,6 +65,22 @@ class Settings(BaseSettings):
         default=15, alias="SUPERVISOR_DISCOVERY_INTERVAL_SECONDS"
     )
 
+    # Liga o worker de avaliacao continua de alertas (AlertingWorker) no lifespan do backend.
+    # Default false - nunca ligar avaliacao real fora de um ambiente explicitamente configurado
+    # para isso.
+    alerting_worker_enabled: bool = Field(default=False, alias="ALERTING_WORKER_ENABLED")
+    # Intervalo (segundos) entre ciclos de avaliacao de alert_rules.
+    alerting_evaluation_interval_seconds: int = Field(
+        default=60, alias="ALERTING_EVALUATION_INTERVAL_SECONDS"
+    )
+    # Intervalo (segundos) minimo entre lembretes de um alerta critico nao reconhecido.
+    alert_critical_reminder_interval_seconds: int = Field(
+        default=900, alias="ALERT_CRITICAL_REMINDER_INTERVAL_SECONDS"
+    )
+    # URL do webhook de notificacao de alerta. Vazio/None = notificacao so logada (nenhum envio
+    # real) — CORTE DE ESCOPO: canal email so tem schema aceito, envio real fica de fora.
+    alert_webhook_url: str | None = Field(default=None, alias="ALERT_WEBHOOK_URL")
+
 
 @lru_cache
 def get_settings() -> Settings:

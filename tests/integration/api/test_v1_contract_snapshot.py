@@ -30,6 +30,8 @@ EXPECTED_REST_PATHS = {
     "/api/v1/alerts/rules",
     "/api/v1/alerts",
     "/api/v1/alerts/{alert_id}/acknowledge",
+    "/api/v1/alerts/silences",
+    "/api/v1/alerts/silences/{silence_id}",
 }
 
 EXPECTED_WEBSOCKET_PATH = "/api/v1/ws/live"
