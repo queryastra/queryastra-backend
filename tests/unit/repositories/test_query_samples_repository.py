@@ -283,6 +283,102 @@ async def test_top_sql_by_database_groups_by_database_name(
     assert by_database["db_b"].total_wait_time_ms == 30
 
 
+async def test_top_wait_types_groups_by_wait_event_native(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """`top_wait_types` agrupa `query_samples` por `wait_event_native` — dimensao "Waits" do
+    drill-down, folha da propria dimensao (sem `wait_breakdown`)."""
+    repo = QuerySamplesRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-a",
+                sql_text_masked="SELECT ? FROM t",
+                wait_event_native="WAITFOR",
+                wait_time_ms=100,
+            ),
+            NormalizedQuerySample(
+                time=now + timedelta(seconds=1),
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-b",
+                sql_text_masked="SELECT ? FROM t",
+                wait_event_native="WAITFOR",
+                wait_time_ms=50,
+            ),
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-c",
+                sql_text_masked="SELECT ? FROM t",
+                wait_event_native="PAGEIOLATCH_SH",
+                wait_time_ms=30,
+            ),
+        ]
+    )
+
+    rows = await repo.top_wait_types(
+        test_instance.id,
+        since=now - timedelta(minutes=1),
+        until=now + timedelta(minutes=1),
+        limit=10,
+    )
+
+    by_type = {row.wait_event_native: row for row in rows}
+    assert set(by_type) == {"WAITFOR", "PAGEIOLATCH_SH"}
+    assert by_type["WAITFOR"].execution_count == 2
+    assert by_type["WAITFOR"].total_wait_time_ms == 150
+    assert by_type["PAGEIOLATCH_SH"].total_wait_time_ms == 30
+
+
+async def test_wait_time_by_bucket_and_wait_type_groups_by_utc_day(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """`wait_time_by_bucket_and_wait_type` (bucket="day", default) agrupa por dia calendario UTC
+    + tipo de espera nativo — visao historica "Tudo" da dimensao "Waits"."""
+    repo = QuerySamplesRepository(db_session)
+    day1 = datetime(2026, 9, 1, 10, 0, tzinfo=UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=day1,
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-a",
+                sql_text_masked="SELECT ? FROM t",
+                wait_event_native="WAITFOR",
+                wait_time_ms=100,
+            ),
+            NormalizedQuerySample(
+                time=day1 + timedelta(hours=1),
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-b",
+                sql_text_masked="SELECT ? FROM t",
+                wait_event_native="PAGEIOLATCH_SH",
+                wait_time_ms=20,
+            ),
+        ]
+    )
+
+    rows = await repo.wait_time_by_bucket_and_wait_type(
+        test_instance.id,
+        since=day1 - timedelta(days=1),
+        until=day1 + timedelta(days=1),
+        limit=10,
+    )
+
+    assert all(row.bucket_start.tzinfo is not None for row in rows)
+    by_type = {row.wait_event_native: row.total_wait_time_ms for row in rows}
+    assert by_type["WAITFOR"] == 100
+    assert by_type["PAGEIOLATCH_SH"] == 20
+
+
 async def test_top_sql_by_database_groups_null_database_name_as_desconhecido(
     db_session: AsyncSession, test_instance: Instance
 ) -> None:

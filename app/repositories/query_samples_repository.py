@@ -197,6 +197,31 @@ class QuerySamplesRepository(BaseRepository):
         )
         return list(result.fetchall())
 
+    async def top_wait_types(
+        self, instance_id: UUID, since: datetime, until: datetime, limit: int
+    ) -> list[sa.Row]:
+        """Agrega `query_samples` por `wait_event_native` — dimensao "Waits" do drill-down
+        (irma de "Bancos de dados"/"SQL": `top_sql_by_database`/`top_sql`), folha da propria
+        dimensao (um tipo de espera nao se decompoe em mais nada, ao contrario de banco/query, que
+        se decompoem por wait nativo). `wait_event_native` NULL vira 'desconhecido' (COALESCE),
+        nunca descartado."""
+        stmt = sa.text("""
+            SELECT
+                COALESCE(wait_event_native, 'desconhecido') AS wait_event_native,
+                count(*) AS execution_count,
+                coalesce(sum(wait_time_ms), 0) AS total_wait_time_ms,
+                coalesce(avg(wait_time_ms), 0) AS avg_wait_time_ms
+            FROM query_samples
+            WHERE instance_id = :instance_id AND time >= :since AND time <= :until
+            GROUP BY COALESCE(wait_event_native, 'desconhecido')
+            ORDER BY total_wait_time_ms DESC
+            LIMIT :limit
+        """)
+        result = await self._session.execute(
+            stmt, {"instance_id": instance_id, "since": since, "until": until, "limit": limit}
+        )
+        return list(result.fetchall())
+
     async def wait_breakdown_by_database(
         self, instance_id: UUID, since: datetime, until: datetime, limit: int
     ) -> list[sa.Row]:
@@ -346,6 +371,43 @@ class QuerySamplesRepository(BaseRepository):
                 "until": until,
                 "limit": limit,
                 "database_name": database_name,
+                "bucket": bucket,
+            },
+        )
+        return list(result.fetchall())
+
+    async def wait_time_by_bucket_and_wait_type(
+        self,
+        instance_id: UUID,
+        since: datetime,
+        until: datetime,
+        limit: int,
+        bucket: Literal["day", "hour"] = "day",
+    ) -> list[sa.Row]:
+        """Agrega `query_samples` por (`bucket` de tempo, `wait_event_native`) — visao historica
+        "Tudo" da dimensao "Waits" (`bucket="day"`) ou detalhamento por hora dentro de um dia
+        (`bucket="hour"`). Mesmas ressalvas de `wait_time_by_bucket_and_database` (`bucket_start`
+        convertido de volta pra `timestamptz` via `AT TIME ZONE 'UTC'` externo)."""
+        stmt = sa.text("""
+            SELECT
+                (date_trunc(:bucket, time AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') AS bucket_start,
+                COALESCE(wait_event_native, 'desconhecido') AS wait_event_native,
+                coalesce(sum(wait_time_ms), 0) AS total_wait_time_ms
+            FROM query_samples
+            WHERE instance_id = :instance_id AND time >= :since AND time <= :until
+            GROUP BY
+                date_trunc(:bucket, time AT TIME ZONE 'UTC'),
+                COALESCE(wait_event_native, 'desconhecido')
+            ORDER BY bucket_start, total_wait_time_ms DESC
+            LIMIT :limit
+        """)
+        result = await self._session.execute(
+            stmt,
+            {
+                "instance_id": instance_id,
+                "since": since,
+                "until": until,
+                "limit": limit,
                 "bucket": bucket,
             },
         )

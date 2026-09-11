@@ -19,6 +19,11 @@ referencia): `GET /databases-by-day/{instance_id}` (nivel 1) e `GET /top-sql-by-
 Detalhamento por hora dentro de um dia (passo intermediario entre "Tudo" e o grafico de um dia
 inteiro, equivalente ao "Interval: 1 hour" de ferramentas de referencia): `GET
 /databases-by-hour/{instance_id}` (nivel 1) e `GET /top-sql-by-hour/{instance_id}` (nivel 2).
+
+Dimensao "Waits" (irma de "Bancos de dados"/"SQL", mesmo padrao Tudo/dia/hora, mas por tipo de
+espera nativo — folha da propria dimensao, sem decomposicao adicional): `GET
+/wait-types/{instance_id}`, `GET /wait-types-by-day/{instance_id}`, `GET
+/wait-types-by-hour/{instance_id}`.
 """
 
 from __future__ import annotations
@@ -96,13 +101,25 @@ class BucketEntryResponse(BaseModel):
     """Uma fatia (bucket de tempo, entidade) dos graficos historicos por periodo — usado tanto
     pela visao "Tudo" (`bucket_start` e meia-noite UTC de um dia calendario, um dia por barra)
     quanto pelo detalhamento por hora dentro de um dia (`bucket_start` e o inicio de uma hora
-    UTC). `label` e `database_name` nas rotas `*databases*` ou `sql_hash` nas rotas `*top-sql*`.
-    Retornado plano (nao agrupado) — o cliente agrupa por `bucket_start` para montar cada barra
-    empilhada."""
+    UTC). `label` e `database_name` nas rotas `*databases*`, `sql_hash` nas rotas `*top-sql*`, ou
+    `wait_event_native` nas rotas `*wait-types*`. Retornado plano (nao agrupado) — o cliente
+    agrupa por `bucket_start` para montar cada barra empilhada."""
 
     bucket_start: datetime
     label: str
     total_wait_time_ms: int
+
+
+class WaitTypeSummaryResponse(BaseModel):
+    """Linha agregada por tipo de espera NATIVO — dimensao "Waits" do drill-down (irma de
+    "Bancos de dados"/"SQL"), folha da propria dimensao: um tipo de espera nao se decompoe em
+    mais nada (ao contrario de banco/query, que tem `wait_breakdown` por serem decompostos por
+    wait nativo)."""
+
+    wait_event_native: str
+    execution_count: int
+    total_wait_time_ms: int
+    avg_wait_time_ms: float
 
 
 class QuerySampleDetailResponse(BaseModel):
@@ -371,6 +388,78 @@ async def list_top_sql_by_hour(
         BucketEntryResponse(
             bucket_start=row.bucket_start,
             label=row.sql_hash,
+            total_wait_time_ms=row.total_wait_time_ms,
+        )
+        for row in rows
+    ]
+
+
+@router.get("/wait-types/{instance_id}", response_model=list[WaitTypeSummaryResponse])
+async def list_wait_types(
+    instance_id: UUID,
+    repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
+    since: Annotated[datetime | None, Query(alias="from")] = None,
+    until: Annotated[datetime | None, Query(alias="to")] = None,
+) -> list[WaitTypeSummaryResponse]:
+    """Dimensao "Waits" do drill-down (irma de "Bancos de dados"/"SQL"): agrega `query_samples`
+    por `wait_event_native` (GROUP BY), folha da propria dimensao — sem `wait_breakdown` (um tipo
+    de espera nao se decompoe em mais nada)."""
+    settings = get_settings()
+    resolved_since, resolved_until = resolve_time_window(
+        since, until, timedelta(seconds=settings.api_read_default_lookback_seconds)
+    )
+    rows = await repository.top_wait_types(
+        instance_id, resolved_since, resolved_until, settings.api_read_max_rows
+    )
+    return [WaitTypeSummaryResponse(**row._mapping) for row in rows]
+
+
+@router.get("/wait-types-by-day/{instance_id}", response_model=list[BucketEntryResponse])
+async def list_wait_types_by_day(
+    instance_id: UUID,
+    repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
+    since: Annotated[datetime | None, Query(alias="from")] = None,
+    until: Annotated[datetime | None, Query(alias="to")] = None,
+) -> list[BucketEntryResponse]:
+    """Visao historica "Tudo" da dimensao "Waits": um dia por barra, empilhada por tipo de
+    espera. `label` e `wait_event_native`."""
+    settings = get_settings()
+    resolved_since, resolved_until = resolve_time_window(
+        since, until, timedelta(seconds=settings.api_read_default_lookback_seconds)
+    )
+    rows = await repository.wait_time_by_bucket_and_wait_type(
+        instance_id, resolved_since, resolved_until, settings.api_read_max_rows, bucket="day"
+    )
+    return [
+        BucketEntryResponse(
+            bucket_start=row.bucket_start,
+            label=row.wait_event_native,
+            total_wait_time_ms=row.total_wait_time_ms,
+        )
+        for row in rows
+    ]
+
+
+@router.get("/wait-types-by-hour/{instance_id}", response_model=list[BucketEntryResponse])
+async def list_wait_types_by_hour(
+    instance_id: UUID,
+    repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
+    since: Annotated[datetime | None, Query(alias="from")] = None,
+    until: Annotated[datetime | None, Query(alias="to")] = None,
+) -> list[BucketEntryResponse]:
+    """Detalhamento por hora da dimensao "Waits", dentro de um dia especifico — mesma ideia de
+    `list_wait_types_by_day`, granularidade de hora."""
+    settings = get_settings()
+    resolved_since, resolved_until = resolve_time_window(
+        since, until, timedelta(seconds=settings.api_read_default_lookback_seconds)
+    )
+    rows = await repository.wait_time_by_bucket_and_wait_type(
+        instance_id, resolved_since, resolved_until, settings.api_read_max_rows, bucket="hour"
+    )
+    return [
+        BucketEntryResponse(
+            bucket_start=row.bucket_start,
+            label=row.wait_event_native,
             total_wait_time_ms=row.total_wait_time_ms,
         )
         for row in rows
