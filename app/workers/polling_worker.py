@@ -130,6 +130,10 @@ class PollingWorker:
             await self._metric_samples_repository.insert_batch(result.metric_samples)
             await self._query_samples_repository.insert_batch(result.query_samples)
             await self._blocking_events_repository.insert_batch(result.blocking_events)
+            if result.engine_version is not None and result.engine_version_major is not None:
+                await self._instances_repository.update_engine_version(
+                    self._instance_id, result.engine_version, result.engine_version_major
+                )
         except Exception:  # noqa: BLE001 — worker nunca deve morrer por erro de 1 ciclo
             error_count = 1
             logger.exception(

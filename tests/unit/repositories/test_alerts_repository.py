@@ -78,6 +78,49 @@ async def test_get_open_alert_counts_acknowledged_as_open(
     assert still_open.state == "acknowledged"
 
 
+async def test_count_open_alerts_by_target_excludes_closed_and_missing_targets(
+    db_session: AsyncSession, test_instance: Instance, alert_rule: AlertRule
+) -> None:
+    """`GET /instances` (coluna "Saude" do resumo) usa isto pra `open_alert_count` — alvo sem
+    nenhum alerta simplesmente nao aparece no dict (contagem implicita 0), e um alerta 'closed'
+    nao conta (mesmo criterio de `get_open_alert`: so 'closed' fecha o episodio)."""
+    repo = AlertsRepository(db_session)
+    other_instance_id = uuid4()
+    await repo.create_alert(
+        Alert(
+            alert_rule_id=alert_rule.id,
+            target_type="instance",
+            target_id=test_instance.id,
+            severity="warning",
+            state="open",
+        )
+    )
+    await repo.create_alert(
+        Alert(
+            alert_rule_id=alert_rule.id,
+            target_type="instance",
+            target_id=test_instance.id,
+            severity="critical",
+            state="acknowledged",
+        )
+    )
+    closed = await repo.create_alert(
+        Alert(
+            alert_rule_id=alert_rule.id,
+            target_type="instance",
+            target_id=other_instance_id,
+            severity="warning",
+        )
+    )
+    closed.state = "closed"
+    await repo.update_alert(closed)
+
+    counts = await repo.count_open_alerts_by_target([test_instance.id, other_instance_id])
+
+    assert counts[test_instance.id] == 2
+    assert other_instance_id not in counts
+
+
 async def test_get_open_alert_returns_none_when_closed(
     db_session: AsyncSession, test_instance: Instance, alert_rule: AlertRule
 ) -> None:

@@ -71,6 +71,7 @@ class _FakeBlockingEventsRepository:
 class _FakeInstancesRepository:
     def __init__(self, instance: Instance | None) -> None:
         self._instance = instance
+        self.engine_version_calls: list[tuple] = []
 
     async def get_by_id(self, instance_id):  # noqa: ANN001, ANN201 - fake, assinatura simples
         return self._instance
@@ -81,13 +82,22 @@ class _FakeInstancesRepository:
     async def create(self, instance: Instance) -> Instance:
         return instance
 
+    async def update_engine_version(
+        self, instance_id, engine_version, engine_version_major
+    ) -> None:  # noqa: ANN001 - fake, assinatura simples
+        self.engine_version_calls.append((instance_id, engine_version, engine_version_major))
 
-def _build_result(instance_id) -> CollectionResult:  # noqa: ANN001 - fake, assinatura simples
+
+def _build_result(  # noqa: ANN001 - fake, assinatura simples
+    instance_id, *, engine_version: str | None = None, engine_version_major: int | None = None
+) -> CollectionResult:
     collected_at = datetime.now(UTC)
     return CollectionResult(
         instance_id=instance_id,
         collected_at=collected_at,
         duration_ms=5,
+        engine_version=engine_version,
+        engine_version_major=engine_version_major,
         metric_samples=[
             NormalizedMetricSample(
                 time=collected_at,
@@ -148,6 +158,33 @@ async def test_run_cycle_persists_samples_and_records_success_telemetry() -> Non
         s for s in telemetry_batch if s.metric_name == COLLECTOR_CYCLE_DURATION_MS
     )
     assert duration_sample.value >= 0.0
+    # Sem engine_version no CollectionResult (default None) -> nunca persiste (guard em
+    # _run_cycle checando `is not None` nos dois campos).
+    assert instances_repo.engine_version_calls == []
+
+
+async def test_run_cycle_persists_detected_engine_version() -> None:
+    """Regressao: a versao que o coletor ja detecta a cada ciclo (pra decidir variante de query,
+    ex.: pg_stat_checkpointer vs pg_stat_bgwriter) passa a ser persistida de volta em
+    `instances.engine_version*` via o `instances_repository` ja injetado — sem mudar o construtor
+    de `PollingWorker` (mesmo padrao da publicacao de evento em `event_bus`)."""
+    instance_id = uuid4()
+    result = _build_result(instance_id, engine_version="17.0", engine_version_major=17)
+    collector = _FakeCollector(result=result)
+    instances_repo = _FakeInstancesRepository(instance=None)
+
+    worker = PollingWorker(
+        instance_id,
+        collector,
+        10,
+        _FakeMetricSamplesRepository(),
+        _FakeQuerySamplesRepository(),
+        _FakeBlockingEventsRepository(),
+        instances_repo,
+    )
+    await worker._run_cycle()
+
+    assert instances_repo.engine_version_calls == [(instance_id, "17.0", 17)]
 
 
 async def test_run_cycle_skips_entirely_during_active_maintenance_window() -> None:

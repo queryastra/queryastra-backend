@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
 
 from app.models.instance import Instance
@@ -36,3 +36,20 @@ class InstancesRepository(BaseRepository):
         await self._session.commit()
         await self._session.refresh(instance)
         return instance
+
+    async def update_engine_version(
+        self, instance_id: UUID, engine_version: str, engine_version_major: int
+    ) -> None:
+        """Grava a versao do motor detectada no ciclo de coleta mais recente (`PollingWorker`,
+        via `CollectionResult.engine_version*`) — o coletor ja detecta a versao a cada ciclo
+        (pra decidir qual variante de query usar, ex.: `pg_stat_checkpointer` vs
+        `pg_stat_bgwriter`), mas ate aqui isso nunca era persistido de volta em `instances`
+        (corte de escopo da Etapa 3, fechado agora). UPDATE simples, sem `commit()` proprio
+        (chamado dentro do ciclo do `PollingWorker`, que ja gerencia a sessao/commit dos
+        demais inserts do mesmo ciclo)."""
+        await self._session.execute(
+            update(Instance)
+            .where(Instance.id == instance_id)
+            .values(engine_version=engine_version, engine_version_major=engine_version_major)
+        )
+        await self._session.commit()

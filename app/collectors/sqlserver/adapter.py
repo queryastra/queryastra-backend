@@ -36,8 +36,9 @@ linhas truncado em Python apos o fetch (`settings.collection_max_rows`):
     - `sys.dm_io_virtual_file_stats`, `sys.dm_db_file_space_usage`, backup
       (`msdb.dbo.backupset`): **nao implementados** nesta feature.
 
-Versao (`SERVERPROPERTY('ProductVersion')`) e detectada a cada ciclo dentro de `collect()` so
-para log/diagnostico — `Instance.engine_version*` nao e persistido aqui (corte de escopo).
+Versao (`SERVERPROPERTY('ProductVersion')`) e detectada a cada ciclo dentro de `collect()` e
+exposta em `CollectionResult.engine_version*` — `PollingWorker` persiste de volta em
+`instances.engine_version*` apos um ciclo bem-sucedido.
 
 Permissao minima esperada: `VIEW SERVER STATE` (< 2022) / `VIEW SERVER PERFORMANCE STATE`
 (>= 2022) — collector-queries.md §7, §9.
@@ -197,7 +198,11 @@ def _connect_and_collect(
     max_rows: int,
     collected_at: datetime,
 ) -> tuple[
-    list[NormalizedMetricSample], list[NormalizedQuerySample], list[NormalizedBlockingEvent]
+    list[NormalizedMetricSample],
+    list[NormalizedQuerySample],
+    list[NormalizedBlockingEvent],
+    str,
+    int,
 ]:
     """Helper sincrono: conecta via `pymssql`, roda as queries de coleta e normaliza.
 
@@ -251,7 +256,7 @@ def _connect_and_collect(
     query_samples = _build_query_samples(session_rows, instance_id, collected_at)
     blocking_events = _build_blocking_events(session_rows, instance_id, collected_at)
     metric_samples = _build_metric_samples(session_rows, counter_rows, instance_id, collected_at)
-    return metric_samples, query_samples, blocking_events
+    return metric_samples, query_samples, blocking_events, product_version, version_major
 
 
 def _hash_query_text(query_text: str | None) -> str | None:
@@ -482,7 +487,13 @@ class SQLServerCollector:
             self._connection_params.connect_timeout_seconds
             + settings.collection_query_timeout_seconds
         )
-        metric_samples, query_samples, blocking_events = await asyncio.wait_for(
+        (
+            metric_samples,
+            query_samples,
+            blocking_events,
+            product_version,
+            version_major,
+        ) = await asyncio.wait_for(
             asyncio.to_thread(
                 _connect_and_collect,
                 self._connection_params,
@@ -502,6 +513,8 @@ class SQLServerCollector:
             metric_samples=metric_samples,
             query_samples=query_samples,
             blocking_events=blocking_events,
+            engine_version=product_version,
+            engine_version_major=version_major,
         )
 
     async def close(self) -> None:

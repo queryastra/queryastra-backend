@@ -138,6 +138,10 @@ async def test_collect_treats_negative_blocking_session_id_as_no_block(
 
     assert result.blocking_events == []
     assert len(result.query_samples) == 1
+    # Regressao: versao exposta em CollectionResult pra PollingWorker persistir de volta em
+    # instances.engine_version* (antes desta feature, nunca era persistida).
+    assert result.engine_version == "16.0.1000.6"
+    assert result.engine_version_major == 16
 
 
 async def test_collect_creates_blocking_event_for_positive_blocking_session_id(

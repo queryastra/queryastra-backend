@@ -64,6 +64,23 @@ class AlertsRepository(BaseRepository):
     async def get_alert_by_id(self, alert_id: UUID) -> Alert | None:
         return await self._session.get(Alert, alert_id)
 
+    async def count_open_alerts_by_target(self, target_ids: list[UUID]) -> dict[UUID, int]:
+        """Quantos alertas ainda nao fechados (`state != 'closed'`, mesmo criterio de
+        `get_open_alert`) cada alvo tem — usado por `GET /instances` (coluna "Saude" do resumo).
+        Uma unica query agregada para todos os alvos da lista, evitando N+1. Alvos sem nenhum
+        alerta aberto simplesmente nao aparecem no dict retornado (contagem implicita 0)."""
+        if not target_ids:
+            return {}
+        # Label "open_count", nao "count": `Row` e tuple-like e ja tem um metodo `.count()`
+        # herdado — um label "count" colidiria com esse metodo em vez de virar atributo.
+        stmt = (
+            select(Alert.target_id, sa.func.count().label("open_count"))
+            .where(Alert.target_id.in_(target_ids), Alert.state != "closed")
+            .group_by(Alert.target_id)
+        )
+        result = await self._session.execute(stmt)
+        return {row.target_id: row.open_count for row in result.all()}
+
     async def create_alert(self, alert: Alert) -> Alert:
         self._session.add(alert)
         await self._session.commit()

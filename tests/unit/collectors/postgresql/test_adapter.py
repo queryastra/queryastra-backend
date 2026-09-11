@@ -138,6 +138,11 @@ async def test_collect_uses_checkpointer_on_pg17_plus(monkeypatch: pytest.Monkey
     checkpoints_timed = [s for s in result.metric_samples if s.metric_name == PG_CHECKPOINTS_TIMED]
     assert len(checkpoints_timed) == 1
     assert checkpoints_timed[0].value == 8.0
+    # Regressao: versao exposta em CollectionResult pra PollingWorker persistir de volta em
+    # instances.engine_version* (antes desta feature, nunca era persistida - corte de escopo
+    # da Etapa 3, fechado agora).
+    assert result.engine_version == "17.0"
+    assert result.engine_version_major == 17
 
 
 async def test_collect_uses_bgwriter_below_pg17(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -152,6 +157,10 @@ async def test_collect_uses_bgwriter_below_pg17(monkeypatch: pytest.MonkeyPatch)
     checkpoints_timed = [s for s in result.metric_samples if s.metric_name == PG_CHECKPOINTS_TIMED]
     assert len(checkpoints_timed) == 1
     assert checkpoints_timed[0].value == 7.0
+    # 160003 -> major 16, minor 3 (nao "16.0"; server_version_num nao tem componente de patch
+    # separado no PG10+, o minor completo ja esta nos ultimos 4 digitos).
+    assert result.engine_version == "16.3"
+    assert result.engine_version_major == 16
 
 
 async def test_collect_masks_sql_literal_before_hashing(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -7,12 +7,15 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import sqlalchemy as sa
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.alert import Alert, AlertRule
 from app.models.instance import Instance
 from app.normalizers.metric_names import COLLECTOR_CYCLE_DURATION_MS, COLLECTOR_CYCLE_ERROR_COUNT
 from app.normalizers.models import NormalizedMetricSample
+from app.repositories.alerts_repository import AlertsRepository
 from app.repositories.metric_samples_repository import MetricSamplesRepository
 
 
@@ -140,3 +143,39 @@ async def test_list_instances_includes_derived_status(
     assert entry["health_status"] == "healthy"
     assert entry["collection_coverage"] == "full"
     assert entry["open_alert_count"] == 0
+    assert entry["engine_version"] is None  # test_instance nunca teve um ciclo real de coleta
+
+
+async def test_list_instances_open_alert_count_reflects_real_alerts(
+    client: AsyncClient, db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """Regressao: `open_alert_count` era hardcoded em 0 (TODO de quando `GET /alerts` ainda era
+    501) — agora reflete `AlertsRepository.count_open_alerts_by_target` de verdade."""
+    alerts_repo = AlertsRepository(db_session)
+    rule = await alerts_repo.create_alert_rule(
+        AlertRule(
+            name="regra-teste-open-alert-count",
+            target_type="instance",
+            metric_name="test_metric",
+            comparison="gte",
+            threshold_warning=1.0,
+        )
+    )
+    await alerts_repo.create_alert(
+        Alert(
+            alert_rule_id=rule.id,
+            target_type="instance",
+            target_id=test_instance.id,
+            severity="warning",
+        )
+    )
+
+    response = await client.get("/api/v1/instances")
+
+    assert response.status_code == 200
+    entry = next(i for i in response.json() if i["id"] == str(test_instance.id))
+    assert entry["open_alert_count"] == 1
+
+    await db_session.execute(sa.delete(Alert).where(Alert.alert_rule_id == rule.id))
+    await db_session.execute(sa.delete(AlertRule).where(AlertRule.id == rule.id))
+    await db_session.commit()

@@ -260,9 +260,10 @@ class PostgreSQLCollector:
         """Executa um ciclo de coleta: sessao ativa, bloqueio (nivel direto) e metricas de recurso.
 
         Ver `Docs/collector-queries.md` §1 (sessao ativa), §2 (bloqueio), §5 (metricas de
-        recurso). Versao do engine e detectada a cada ciclo (nao persistida —
-        `Instance.engine_version*` fica fora de escopo desta feature) so para decidir entre
-        `pg_stat_bgwriter` (< PG17) e `pg_stat_checkpointer` (>= PG17).
+        recurso). Versao do engine e detectada a cada ciclo pra decidir entre `pg_stat_bgwriter`
+        (< PG17) e `pg_stat_checkpointer` (>= PG17); tambem exposta em
+        `CollectionResult.engine_version*` pra `PollingWorker` persistir de volta em
+        `instances.engine_version*`.
 
         Requer `instance_id` (levanta `ValueError` se `None` — usado em teste de conexao
         pre-cadastro, onde `collect()` nao se aplica).
@@ -280,6 +281,11 @@ class PostgreSQLCollector:
         )
         try:
             version_num = await self._fetch_version(conn, settings.collection_query_timeout_seconds)
+            # `server_version_num` (PG10+, unico suportado formalmente - Q20): major*10000+minor
+            # direto, sem componente de patch separado (ex.: 170000 -> "17.0", 160003 -> "16.3") —
+            # confirmado contra pgpedia.info/documentacao oficial. Derivado do que ja foi
+            # buscado, sem round-trip extra.
+            engine_version = f"{version_num // 10000}.{version_num % 10000}"
 
             session_rows = await self._fetch_rows(
                 conn, _SESSION_ACTIVITY_QUERY, settings.collection_query_timeout_seconds
@@ -333,6 +339,8 @@ class PostgreSQLCollector:
             metric_samples=metric_samples,
             query_samples=query_samples,
             blocking_events=blocking_events,
+            engine_version=engine_version,
+            engine_version_major=version_num // 10000,
         )
 
     async def _fetch_version(self, conn: asyncpg.Connection, timeout_seconds: float) -> int:

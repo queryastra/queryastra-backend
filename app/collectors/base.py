@@ -71,6 +71,12 @@ class CollectionResult:
     query_samples: list[NormalizedQuerySample] = field(default_factory=list)
     blocking_events: list[NormalizedBlockingEvent] = field(default_factory=list)
     capabilities: list[CapabilityResult] = field(default_factory=list)
+    # Versao do motor detectada NESTE ciclo (o coletor ja detecta pra decidir qual variante de
+    # query usar — ex.: `pg_stat_checkpointer` vs `pg_stat_bgwriter` — mas so passou a expor isso
+    # aqui pra `PollingWorker` persistir de volta em `instances.engine_version*` a partir desta
+    # feature; `None` nao apaga o valor ja persistido, so significa "nao detectado neste ciclo").
+    engine_version: str | None = None
+    engine_version_major: int | None = None
 
 
 @runtime_checkable

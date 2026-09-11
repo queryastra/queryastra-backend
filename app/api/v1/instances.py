@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_db_session
 from app.collectors.base import CapabilityResult
 from app.collectors.capabilities import has_missing_mandatory_capability
+from app.repositories.alerts_repository import AlertsRepository
 from app.repositories.instances_repository import InstancesRepository
 from app.repositories.metric_samples_repository import MetricSamplesRepository
 from app.security.credential_reference import CredentialResolver
@@ -115,11 +116,14 @@ class InstanceSummaryResponse(BaseModel):
     db_type: str
     host: str
     port: int
+    engine_version: str | None  # detectado no ciclo de coleta mais recente (PollingWorker)
     criticality: str
     health_status: str
     collection_coverage: str
     active: bool
-    open_alert_count: int  # sempre 0 — TODO, depende de GET /alerts (ainda 501)
+    open_alert_count: (
+        int  # alertas com state != 'closed' (AlertsRepository.count_open_alerts_by_target)
+    )
     last_collected_at: datetime | None
 
 
@@ -155,6 +159,12 @@ def get_instances_repository(
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> InstancesRepository:
     return InstancesRepository(session)
+
+
+def get_alerts_repository_for_summary(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> AlertsRepository:
+    return AlertsRepository(session)
 
 
 def get_credential_resolver() -> CredentialResolver:
@@ -235,6 +245,7 @@ async def create_instance(
 @router.get("", response_model=list[InstanceSummaryResponse])
 async def list_instances(
     repository: Annotated[InstancesRepository, Depends(get_instances_repository)],
+    alerts_repository: Annotated[AlertsRepository, Depends(get_alerts_repository_for_summary)],
     status_service: Annotated[
         InstanceDerivedStatusService, Depends(get_instance_derived_status_service)
     ],
@@ -242,9 +253,13 @@ async def list_instances(
     """Lista instancias ativas cadastradas, com status derivado da telemetria de ciclo.
 
     N+1 aceitavel no MVP (poucas instancias esperadas) — uma consulta de status derivado por
-    instancia da lista, em vez de uma unica query agregada.
+    instancia da lista, em vez de uma unica query agregada. `open_alert_count` ja e uma unica
+    query agregada pra todas as instancias (`count_open_alerts_by_target`), sem N+1.
     """
     instances = await repository.list_active()
+    open_alert_counts = await alerts_repository.count_open_alerts_by_target(
+        [instance.id for instance in instances]
+    )
     summaries = []
     for instance in instances:
         derived = await status_service.compute(instance.id)
@@ -255,11 +270,12 @@ async def list_instances(
                 db_type=instance.db_type,
                 host=instance.host,
                 port=instance.port,
+                engine_version=instance.engine_version,
                 criticality=instance.criticality,
                 health_status=derived.health_status,
                 collection_coverage=derived.collection_coverage,
                 active=instance.active,
-                open_alert_count=0,
+                open_alert_count=open_alert_counts.get(instance.id, 0),
                 last_collected_at=derived.last_collected_at,
             )
         )
