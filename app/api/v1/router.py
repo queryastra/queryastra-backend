@@ -11,6 +11,7 @@ from fastapi import APIRouter
 
 from app.api.v1 import (
     alerts,
+    backup_status,
     hosts,
     instances,
     metrics,
@@ -33,6 +34,7 @@ api_v1_router.include_router(alerts.router, prefix="/alerts", tags=["alerts"])
 api_v1_router.include_router(
     missing_index.router, prefix="/missing-index-suggestions", tags=["missing-index"]
 )
+api_v1_router.include_router(backup_status.router, prefix="/backup-status", tags=["backup-status"])
 api_v1_router.include_router(websocket.router, tags=["websocket"])
 
 # Endpoint de health-check do backend em si (nao confundir com health-check de instancia

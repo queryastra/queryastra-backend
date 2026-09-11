@@ -44,6 +44,7 @@ EXPECTED_REST_PATHS = {
     "/api/v1/alerts/silences",
     "/api/v1/alerts/silences/{silence_id}",
     "/api/v1/missing-index-suggestions/{instance_id}",
+    "/api/v1/backup-status/{instance_id}",
 }
 
 EXPECTED_WEBSOCKET_PATH = "/api/v1/ws/live"

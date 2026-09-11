@@ -21,6 +21,7 @@ from typing import Protocol, runtime_checkable
 from uuid import UUID
 
 from app.normalizers.models import (
+    NormalizedBackupStatus,
     NormalizedBlockingEvent,
     NormalizedMetricSample,
     NormalizedMissingIndexSuggestion,
@@ -119,5 +120,16 @@ class Collector(Protocol):
         `pg_stat_user_tables`, iterando por banco (essa view e escopada ao banco conectado, ao
         contrario de `pg_stat_activity`/`pg_stat_database`). SQL Server: sugestao real do
         otimizador via `sys.dm_db_missing_index_*`, instancia inteira numa unica chamada.
+        """
+        ...
+
+    async def collect_backup_status(self) -> list[NormalizedBackupStatus]:
+        """Executa a checagem de backup/archiving (`Docs/collector-queries.md` §6, Q16).
+
+        Separado de `collect()` pelo mesmo motivo de `collect_missing_index_suggestions()` —
+        roda num worker de baixa frequencia (`app/workers/backup_status_supervisor.py`, 1x/dia
+        por padrao). SQL Server: `msdb.dbo.backupset` (`type='D'`, so backup completo), uma
+        linha por banco. PostgreSQL: `pg_stat_archiver` (cluster-wide), uma unica linha por
+        instancia — proxy de saude de WAL archiving, NAO um backup de fato.
         """
         ...

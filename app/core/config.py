@@ -101,6 +101,18 @@ class Settings(BaseSettings):
     )
     missing_index_pg_min_seq_scans: int = Field(default=100, alias="MISSING_INDEX_PG_MIN_SEQ_SCANS")
 
+    # Liga o supervisor de checagem de backup/archiving (BackupStatusSupervisor,
+    # ARCHITECTURE_SPEC.md Q16) no lifespan do backend. Default false - mesma politica de
+    # seguranca dos demais workers.
+    backup_status_supervisor_enabled: bool = Field(
+        default=False, alias="BACKUP_STATUS_SUPERVISOR_ENABLED"
+    )
+    # Intervalo (segundos) entre checagens de backup por instancia ativa. Default 1 dia - mesma
+    # cadencia baixa do MissingIndexSupervisor, backup nao muda a cada poucos segundos.
+    backup_status_check_interval_seconds: int = Field(
+        default=86400, alias="BACKUP_STATUS_CHECK_INTERVAL_SECONDS"
+    )
+
     # Canal de e-mail de notificacao de alerta (`app.workers.alerting_worker`). Todos vazios por
     # padrao = canal desabilitado (nenhum envio real, mesmo default seguro do webhook). So
     # `alert_smtp_host` habilita o envio; `alert_email_to` (lista separada por virgula) precisa

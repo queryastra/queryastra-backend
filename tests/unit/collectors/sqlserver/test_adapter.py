@@ -7,6 +7,7 @@ Usa um fake de `pymssql.connect`/cursor (`as_dict=True`), sem I/O de rede real, 
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
@@ -372,3 +373,94 @@ async def test_collect_missing_index_suggestions_raises_value_error_without_inst
     collector = SQLServerCollector(connection=_CONNECTION, instance_id=None)
     with pytest.raises(ValueError, match="instance_id"):
         await collector.collect_missing_index_suggestions()
+
+
+class _FakeBackupStatusCursor:
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self._rows = rows
+        self._pending: list[dict[str, Any]] = []
+
+    def execute(self, query: str) -> None:
+        if "msdb.dbo.backupset" in query:
+            self._pending = self._rows
+        else:
+            raise AssertionError(f"execute inesperado: {query}")
+
+    def fetchall(self) -> list[dict[str, Any]]:
+        return self._pending
+
+    def close(self) -> None:
+        pass
+
+
+class _FakeBackupStatusConnection:
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self._rows = rows
+        self.closed = False
+
+    def cursor(self, as_dict: bool = False) -> _FakeBackupStatusCursor:
+        assert as_dict is True
+        return _FakeBackupStatusCursor(self._rows)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _patch_backup_status_connect(
+    monkeypatch: pytest.MonkeyPatch, rows: list[dict[str, Any]]
+) -> _FakeBackupStatusConnection:
+    fake_conn = _FakeBackupStatusConnection(rows)
+
+    def fake_connect(**kwargs: object) -> _FakeBackupStatusConnection:
+        return fake_conn
+
+    monkeypatch.setattr(pymssql, "connect", fake_connect)
+    return fake_conn
+
+
+async def test_collect_backup_status_returns_one_row_per_database(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`msdb.dbo.backupset` cobre a instancia inteira numa unica chamada — uma linha por banco,
+    so backup completo (`type='D'`)."""
+    last_backup = datetime(2026, 9, 10, 3, 0, 0)
+    _patch_backup_status_connect(
+        monkeypatch,
+        [
+            {"database_name": "AB_COBRANCA", "last_backup_at": last_backup},
+            {"database_name": "master", "last_backup_at": last_backup},
+        ],
+    )
+
+    instance_id = uuid4()
+    collector = SQLServerCollector(connection=_CONNECTION, instance_id=instance_id)
+    rows = await collector.collect_backup_status()
+
+    assert len(rows) == 2
+    by_database = {row.database_name: row for row in rows}
+    assert by_database["AB_COBRANCA"].instance_id == instance_id
+    assert by_database["AB_COBRANCA"].last_backup_at == last_backup
+    assert by_database["AB_COBRANCA"].detail == {"backup_type": "D"}
+    assert by_database["master"].last_backup_at == last_backup
+
+
+async def test_collect_backup_status_handles_database_with_no_backup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Um banco sem nenhum backup completo registrado ainda deve vir com `last_backup_at=None`
+    (MAX() de um conjunto vazio no SQL sai NULL, nao levanta erro)."""
+    _patch_backup_status_connect(
+        monkeypatch, [{"database_name": "banco_novo", "last_backup_at": None}]
+    )
+
+    collector = SQLServerCollector(connection=_CONNECTION, instance_id=uuid4())
+    rows = await collector.collect_backup_status()
+
+    assert len(rows) == 1
+    assert rows[0].last_backup_at is None
+
+
+async def test_collect_backup_status_raises_value_error_without_instance_id() -> None:
+    collector = SQLServerCollector(connection=_CONNECTION, instance_id=None)
+    with pytest.raises(ValueError, match="instance_id"):
+        await collector.collect_backup_status()

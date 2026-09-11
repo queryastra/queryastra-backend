@@ -72,6 +72,7 @@ from app.normalizers.metric_names import (
     SQLSERVER_RAW_COUNTER_TO_METRIC_NAME,
 )
 from app.normalizers.models import (
+    NormalizedBackupStatus,
     NormalizedBlockingEvent,
     NormalizedMetricSample,
     NormalizedMissingIndexSuggestion,
@@ -153,6 +154,16 @@ _MISSING_INDEX_QUERY = """
     INNER JOIN sys.dm_db_missing_index_details AS mid
         ON mig.index_handle = mid.index_handle
     ORDER BY impact_score DESC
+"""
+
+# Docs/collector-queries.md §6 — so backup COMPLETO (`type='D'`, "Database"); diferencial
+# (`type='I'`) e log (`type='L'`) ficam de fora desta primeira versao. `MAX(backup_finish_date)`
+# ja agrega pra "ultimo backup completo por banco" direto na query, sem pos-processamento.
+_BACKUP_STATUS_QUERY = """
+    SELECT database_name, MAX(backup_finish_date) AS last_backup_at
+    FROM msdb.dbo.backupset
+    WHERE type = 'D'
+    GROUP BY database_name
 """
 
 
@@ -338,6 +349,42 @@ def _build_missing_index_suggestions(
             )
         )
     return suggestions
+
+
+def _connect_and_collect_backup_status(
+    connection: ConnectionParams,
+    instance_id: UUID,
+    query_timeout_seconds: float,
+    max_rows: int,
+) -> list[NormalizedBackupStatus]:
+    """Helper sincrono (mesmo padrao de `_connect_and_collect_missing_indexes`): conecta via
+    `pymssql` e roda a query de backup, instancia inteira numa unica chamada."""
+    login_timeout_seconds = int(connection.connect_timeout_seconds)
+    conn = pymssql.connect(
+        server=connection.host,
+        port=str(connection.port),
+        user=connection.username,
+        password=connection.secret_value,
+        timeout=int(query_timeout_seconds),
+        login_timeout=login_timeout_seconds,
+    )
+    try:
+        cursor = conn.cursor(as_dict=True)
+        cursor.execute(_BACKUP_STATUS_QUERY)
+        rows = list(cursor.fetchall())[:max_rows]
+        cursor.close()
+    finally:
+        conn.close()
+
+    return [
+        NormalizedBackupStatus(
+            instance_id=instance_id,
+            database_name=row["database_name"],
+            last_backup_at=row["last_backup_at"],
+            detail={"backup_type": "D"},
+        )
+        for row in rows
+    ]
 
 
 def _hash_query_text(query_text: str | None) -> str | None:
@@ -615,6 +662,30 @@ class SQLServerCollector:
         return await asyncio.wait_for(
             asyncio.to_thread(
                 _connect_and_collect_missing_indexes,
+                self._connection_params,
+                self._instance_id,
+                settings.collection_query_timeout_seconds,
+                settings.collection_max_rows,
+            ),
+            timeout=overall_timeout,
+        )
+
+    async def collect_backup_status(self) -> list[NormalizedBackupStatus]:
+        """`msdb.dbo.backupset` (Docs/collector-queries.md §6) — instancia inteira numa unica
+        chamada, uma linha por banco. So backup COMPLETO (`type='D'`) nesta primeira versao."""
+        if self._instance_id is None:
+            raise ValueError(
+                "SQLServerCollector.collect_backup_status requer instance_id de uma instancia "
+                "ja cadastrada."
+            )
+        settings = get_settings()
+        overall_timeout = (
+            self._connection_params.connect_timeout_seconds
+            + settings.collection_query_timeout_seconds
+        )
+        return await asyncio.wait_for(
+            asyncio.to_thread(
+                _connect_and_collect_backup_status,
                 self._connection_params,
                 self._instance_id,
                 settings.collection_query_timeout_seconds,

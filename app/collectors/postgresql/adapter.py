@@ -76,6 +76,7 @@ from app.normalizers.metric_names import (
     PG_XACT_ROLLBACK,
 )
 from app.normalizers.models import (
+    NormalizedBackupStatus,
     NormalizedBlockingEvent,
     NormalizedMetricSample,
     NormalizedMissingIndexSuggestion,
@@ -148,6 +149,14 @@ _MISSING_INDEX_HEURISTIC_QUERY = """
       AND pg_relation_size(relid) > $1
       AND seq_scan > $2
     ORDER BY seq_scan - COALESCE(idx_scan, 0) DESC
+"""
+
+# `pg_stat_archiver` sempre devolve exatamente 1 linha (cluster-wide, nao por banco) — mesmo com
+# archiving desabilitado (colunas ficam NULL nesse caso). Docs/collector-queries.md §6.
+_ARCHIVER_STATUS_QUERY = """
+    SELECT archived_count, last_archived_wal, last_archived_time,
+           failed_count, last_failed_wal, last_failed_time, stats_reset
+    FROM pg_stat_archiver
 """
 
 
@@ -629,6 +638,50 @@ class PostgreSQLCollector:
                     )
                 )
         return suggestions
+
+    async def collect_backup_status(self) -> list[NormalizedBackupStatus]:
+        """`pg_stat_archiver` (Docs/collector-queries.md §6) — cluster-wide, 1 unica linha,
+        `database_name=None`. `last_backup_at = last_archived_time`: PROXY de saude de WAL
+        archiving, NAO um backup de fato (Postgres nao tem catalogo nativo de backup completo
+        como o `msdb` do SQL Server)."""
+        if self._instance_id is None:
+            raise ValueError(
+                "PostgreSQLCollector.collect_backup_status requer instance_id de uma instancia "
+                "ja cadastrada."
+            )
+        instance_id: UUID = self._instance_id
+        settings = get_settings()
+
+        conn = await asyncio.wait_for(
+            self._connect(), timeout=self._connection_params.connect_timeout_seconds
+        )
+        try:
+            row = await asyncio.wait_for(
+                conn.fetchrow(_ARCHIVER_STATUS_QUERY),
+                timeout=settings.collection_query_timeout_seconds,
+            )
+        finally:
+            await conn.close()
+
+        return [
+            NormalizedBackupStatus(
+                instance_id=instance_id,
+                database_name=None,
+                last_backup_at=row["last_archived_time"],
+                detail={
+                    "archived_count": row["archived_count"],
+                    "last_archived_wal": row["last_archived_wal"],
+                    "failed_count": row["failed_count"],
+                    "last_failed_wal": row["last_failed_wal"],
+                    "last_failed_time": row["last_failed_time"].isoformat()
+                    if row["last_failed_time"] is not None
+                    else None,
+                    "stats_reset": row["stats_reset"].isoformat()
+                    if row["stats_reset"] is not None
+                    else None,
+                },
+            )
+        ]
 
     async def close(self) -> None:
         """Sem estado persistente entre chamadas (cada `check_capabilities` fecha sua conexao)."""

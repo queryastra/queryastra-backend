@@ -355,3 +355,91 @@ async def test_collect_missing_index_suggestions_raises_value_error_without_inst
     collector = PostgreSQLCollector(connection=_CONNECTION, instance_id=None)
     with pytest.raises(ValueError, match="instance_id"):
         await collector.collect_missing_index_suggestions()
+
+
+class _FakeArchiverConnection:
+    """Fake de conexao para `collect_backup_status()` — `fetchrow()` devolve a linha fixa de
+    `pg_stat_archiver` (sempre exatamente 1 linha, cluster-wide)."""
+
+    def __init__(self, row: dict[str, Any]) -> None:
+        self._row = row
+        self.closed = False
+
+    async def fetchrow(self, query: str, *args: object) -> dict[str, Any]:
+        if "pg_stat_archiver" in query:
+            return self._row
+        raise AssertionError(f"fetchrow inesperado: {query}")
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+_DEFAULT_ARCHIVED_TIME = datetime(2026, 1, 1, tzinfo=UTC)
+
+
+def _archiver_row(
+    archived_count: int = 42,
+    last_archived_wal: str | None = "000000010000000000000005",
+    last_archived_time: datetime | None = _DEFAULT_ARCHIVED_TIME,
+    failed_count: int = 0,
+    last_failed_wal: str | None = None,
+    last_failed_time: datetime | None = None,
+    stats_reset: datetime | None = _DEFAULT_ARCHIVED_TIME,
+) -> dict[str, Any]:
+    """`last_archived_time`/`stats_reset` default a um timestamp fixo (nao `None`) — passar
+    `None` explicitamente nos testes representa de verdade "arquivamento nunca rodou", nao "usa
+    o padrao"."""
+    return {
+        "archived_count": archived_count,
+        "last_archived_wal": last_archived_wal,
+        "last_archived_time": last_archived_time,
+        "failed_count": failed_count,
+        "last_failed_wal": last_failed_wal,
+        "last_failed_time": last_failed_time,
+        "stats_reset": stats_reset,
+    }
+
+
+async def test_collect_backup_status_uses_last_archived_time_as_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`pg_stat_archiver` e cluster-wide (nao por banco) — 1 unica linha, `database_name=None`.
+    `last_backup_at` e um PROXY de saude de WAL archiving, nao um backup de fato."""
+    archived_at = datetime(2026, 9, 11, 12, 0, tzinfo=UTC)
+    fake_conn = _FakeArchiverConnection(
+        _archiver_row(archived_count=100, last_archived_time=archived_at)
+    )
+    _patch_connect(monkeypatch, fake_conn)  # type: ignore[arg-type]
+
+    instance_id = uuid4()
+    collector = PostgreSQLCollector(connection=_CONNECTION, instance_id=instance_id)
+    rows = await collector.collect_backup_status()
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.instance_id == instance_id
+    assert row.database_name is None
+    assert row.last_backup_at == archived_at
+    assert row.detail["archived_count"] == 100
+    assert fake_conn.closed
+
+
+async def test_collect_backup_status_handles_null_last_archived_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Archiving desabilitado/nunca rodou — `last_archived_time` pode ser `None`."""
+    fake_conn = _FakeArchiverConnection(
+        _archiver_row(archived_count=0, last_archived_wal=None, last_archived_time=None)
+    )
+    _patch_connect(monkeypatch, fake_conn)  # type: ignore[arg-type]
+
+    collector = PostgreSQLCollector(connection=_CONNECTION, instance_id=uuid4())
+    rows = await collector.collect_backup_status()
+
+    assert rows[0].last_backup_at is None
+
+
+async def test_collect_backup_status_raises_value_error_without_instance_id() -> None:
+    collector = PostgreSQLCollector(connection=_CONNECTION, instance_id=None)
+    with pytest.raises(ValueError, match="instance_id"):
+        await collector.collect_backup_status()

@@ -23,6 +23,7 @@ from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
 from app.db.session import async_session_factory
 from app.workers.alerting_worker import AlertingWorker, EmailSettings
+from app.workers.backup_status_supervisor import BackupStatusSupervisor
 from app.workers.missing_index_supervisor import MissingIndexSupervisor
 from app.workers.polling_supervisor import PollingSupervisor
 
@@ -39,6 +40,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     alerting_task: asyncio.Task[None] | None = None
     missing_index_supervisor: MissingIndexSupervisor | None = None
     missing_index_task: asyncio.Task[None] | None = None
+    backup_status_supervisor: BackupStatusSupervisor | None = None
+    backup_status_task: asyncio.Task[None] | None = None
 
     if settings.polling_supervisor_enabled:
         supervisor = PollingSupervisor(
@@ -94,6 +97,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     else:
         logger.info("MissingIndexSupervisor desabilitado (MISSING_INDEX_SUPERVISOR_ENABLED=false)")
 
+    if settings.backup_status_supervisor_enabled:
+        backup_status_supervisor = BackupStatusSupervisor(
+            async_session_factory, settings.backup_status_check_interval_seconds
+        )
+        backup_status_task = asyncio.create_task(backup_status_supervisor.run())
+        logger.info(
+            "BackupStatusSupervisor habilitado (check_interval=%ss)",
+            settings.backup_status_check_interval_seconds,
+        )
+    else:
+        logger.info("BackupStatusSupervisor desabilitado (BACKUP_STATUS_SUPERVISOR_ENABLED=false)")
+
     yield
 
     if supervisor is not None and supervisor_task is not None:
@@ -105,6 +120,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if missing_index_supervisor is not None and missing_index_task is not None:
         missing_index_supervisor.stop()
         await missing_index_task
+    if backup_status_supervisor is not None and backup_status_task is not None:
+        backup_status_supervisor.stop()
+        await backup_status_task
     logger.info("Lifespan finalizado")
 
 

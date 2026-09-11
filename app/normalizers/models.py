@@ -119,3 +119,24 @@ class NormalizedMissingIndexSuggestion(BaseModel):
     suggestion: str
     impact_score: float | None = None
     detail: dict[str, Any] = Field(default_factory=dict)
+
+
+class NormalizedBackupStatus(BaseModel):
+    """Estado de backup/archiving normalizado — destino: tabela relacional `backup_status`
+    (upsert por instance_id/database_name, nao serie temporal). Ver `Docs/collector-queries.md`
+    §6, ARCHITECTURE_SPEC.md Q16.
+
+    SQL Server: uma instancia desta classe por banco (`database_name` preenchido),
+    `last_backup_at` = `MAX(backup_finish_date)` de `msdb.dbo.backupset` (`type='D'`, so backup
+    completo/full). PostgreSQL: uma UNICA instancia por instancia monitorada (`database_name`
+    None — `pg_stat_archiver` e cluster-wide, nao por banco), `last_backup_at` =
+    `last_archived_time` como PROXY de saude de WAL archiving, NAO um backup de fato — Postgres
+    nao tem catalogo nativo de backup completo como o `msdb` do SQL Server. `detail` guarda a
+    estrutura bruta especifica do engine."""
+
+    model_config = ConfigDict(frozen=True)
+
+    instance_id: UUID
+    database_name: str | None = None
+    last_backup_at: datetime | None = None
+    detail: dict[str, Any] = Field(default_factory=dict)
