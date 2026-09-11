@@ -78,6 +78,7 @@ from app.normalizers.metric_names import (
 from app.normalizers.models import (
     NormalizedBlockingEvent,
     NormalizedMetricSample,
+    NormalizedMissingIndexSuggestion,
     NormalizedQuerySample,
 )
 from app.normalizers.wait_taxonomy import map_wait_event
@@ -127,6 +128,28 @@ _CHECKPOINTER_QUERY = """
     FROM pg_stat_checkpointer
 """
 
+# `datallowconn=false` (ex.: templates) nunca aceitaria conexao; `datistemplate=false` exclui
+# template0/template1 mesmo que `datallowconn` estivesse true por engano de configuracao.
+_LIST_DATABASES_QUERY = """
+    SELECT datname FROM pg_database
+    WHERE datistemplate = false AND datallowconn = true
+"""
+
+# Heuristica (Docs/collector-queries.md §10) — sem DMV nativa equivalente ao
+# `sys.dm_db_missing_index_details` do SQL Server. `pg_stat_user_tables` e escopada ao banco
+# CONECTADO (ao contrario de `pg_stat_activity`/`pg_stat_database`, cluster-wide) — por isso
+# `collect_missing_index_suggestions()` itera por banco em vez de rodar uma unica vez.
+_MISSING_INDEX_HEURISTIC_QUERY = """
+    SELECT schemaname, relname AS table_name,
+           seq_scan, idx_scan, n_live_tup,
+           pg_relation_size(relid) AS table_size_bytes
+    FROM pg_stat_user_tables
+    WHERE seq_scan > COALESCE(idx_scan, 0)
+      AND pg_relation_size(relid) > $1
+      AND seq_scan > $2
+    ORDER BY seq_scan - COALESCE(idx_scan, 0) DESC
+"""
+
 
 class PostgreSQLCollector:
     """Implementa `app.collectors.base.Collector` para instancias PostgreSQL."""
@@ -161,13 +184,17 @@ class PostgreSQLCollector:
         finally:
             await conn.close()
 
-    async def _connect(self) -> asyncpg.Connection:
+    async def _connect(self, database: str = "postgres") -> asyncpg.Connection:
+        """`database` default ("postgres", banco de manutencao) serve pra `check_capabilities()`/
+        `collect()`, que so leem views cluster-wide (`pg_stat_activity`/`pg_stat_database`) — o
+        banco conectado nao importa pra elas. `collect_missing_index_suggestions()` passa um
+        banco real explicito (`pg_stat_user_tables` e escopada ao banco conectado)."""
         params = self._connection_params
         connect_kwargs: dict[str, object] = {
             "host": params.host,
             "port": params.port,
             "user": params.username,
-            "database": "postgres",
+            "database": database,
             "timeout": params.connect_timeout_seconds,
         }
         # `auth_method == "integrated"`: nao passamos `password` — a conexao depende de
@@ -520,6 +547,88 @@ class PostgreSQLCollector:
             )
 
         return [c for c in candidates if c is not None]
+
+    async def collect_missing_index_suggestions(self) -> list[NormalizedMissingIndexSuggestion]:
+        """Heuristica de indice ausente (Docs/collector-queries.md §10) — itera por banco do
+        cluster (`pg_stat_user_tables` e escopada ao banco conectado), nao so o banco de
+        manutencao usado por `collect()`. Erro num banco especifico (permissao, timeout) e
+        logado e pulado — nunca aborta a checagem dos demais bancos."""
+        if self._instance_id is None:
+            raise ValueError(
+                "PostgreSQLCollector.collect_missing_index_suggestions requer instance_id de "
+                "uma instancia ja cadastrada."
+            )
+        instance_id: UUID = self._instance_id
+        settings = get_settings()
+
+        bootstrap_conn = await asyncio.wait_for(
+            self._connect(), timeout=self._connection_params.connect_timeout_seconds
+        )
+        try:
+            database_rows = await self._fetch_rows(
+                bootstrap_conn, _LIST_DATABASES_QUERY, settings.collection_query_timeout_seconds
+            )
+        finally:
+            await bootstrap_conn.close()
+
+        suggestions: list[NormalizedMissingIndexSuggestion] = []
+        for db_row in database_rows:
+            database_name = db_row["datname"]
+            try:
+                db_conn = await asyncio.wait_for(
+                    self._connect(database=database_name),
+                    timeout=self._connection_params.connect_timeout_seconds,
+                )
+            except (OSError, asyncpg.PostgresError, TimeoutError):
+                logger.warning(
+                    "Falha ao conectar ao banco %s (instance_id=%s) para checagem de indice "
+                    "ausente - pulando",
+                    database_name,
+                    instance_id,
+                )
+                continue
+            try:
+                rows = await asyncio.wait_for(
+                    db_conn.fetch(
+                        _MISSING_INDEX_HEURISTIC_QUERY,
+                        settings.missing_index_pg_min_table_size_bytes,
+                        settings.missing_index_pg_min_seq_scans,
+                    ),
+                    timeout=settings.collection_query_timeout_seconds,
+                )
+            except (asyncpg.PostgresError, TimeoutError):
+                logger.warning(
+                    "Falha ao rodar heuristica de indice ausente no banco %s "
+                    "(instance_id=%s) - pulando",
+                    database_name,
+                    instance_id,
+                )
+                continue
+            finally:
+                await db_conn.close()
+
+            for row in rows[: settings.collection_max_rows]:
+                seq_scan = row["seq_scan"]
+                idx_scan = row["idx_scan"] or 0
+                suggestions.append(
+                    NormalizedMissingIndexSuggestion(
+                        instance_id=instance_id,
+                        database_name=database_name,
+                        table_name=f"{row['schemaname']}.{row['table_name']}",
+                        suggestion=(
+                            f"Candidato a indice (heuristica, nao indica coluna): "
+                            f"{seq_scan} sequential scans vs {idx_scan} index scans"
+                        ),
+                        impact_score=float(seq_scan - idx_scan),
+                        detail={
+                            "seq_scan": seq_scan,
+                            "idx_scan": row["idx_scan"],
+                            "n_live_tup": row["n_live_tup"],
+                            "table_size_bytes": row["table_size_bytes"],
+                        },
+                    )
+                )
+        return suggestions
 
     async def close(self) -> None:
         """Sem estado persistente entre chamadas (cada `check_capabilities` fecha sua conexao)."""

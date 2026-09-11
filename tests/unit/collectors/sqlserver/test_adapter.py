@@ -259,3 +259,116 @@ async def test_collect_raises_value_error_without_instance_id() -> None:
     collector = SQLServerCollector(connection=_CONNECTION, instance_id=None)
     with pytest.raises(ValueError, match="instance_id"):
         await collector.collect()
+
+
+class _FakeMissingIndexCursor:
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self._rows = rows
+        self._pending: list[dict[str, Any]] = []
+
+    def execute(self, query: str) -> None:
+        if "dm_db_missing_index_group_stats" in query:
+            self._pending = self._rows
+        else:
+            raise AssertionError(f"execute inesperado: {query}")
+
+    def fetchall(self) -> list[dict[str, Any]]:
+        return self._pending
+
+    def close(self) -> None:
+        pass
+
+
+class _FakeMissingIndexConnection:
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self._rows = rows
+        self.closed = False
+
+    def cursor(self, as_dict: bool = False) -> _FakeMissingIndexCursor:
+        assert as_dict is True
+        return _FakeMissingIndexCursor(self._rows)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _patch_missing_index_connect(
+    monkeypatch: pytest.MonkeyPatch, rows: list[dict[str, Any]]
+) -> _FakeMissingIndexConnection:
+    fake_conn = _FakeMissingIndexConnection(rows)
+
+    def fake_connect(**kwargs: object) -> _FakeMissingIndexConnection:
+        return fake_conn
+
+    monkeypatch.setattr(pymssql, "connect", fake_connect)
+    return fake_conn
+
+
+def _missing_index_row(
+    database_name: str = "AB_COBRANCA",
+    table_name: str = "[AB_COBRANCA].[dbo].[pedidos]",
+    equality_columns: str | None = "[cliente_id]",
+    inequality_columns: str | None = None,
+    included_columns: str | None = "[valor]",
+    avg_total_user_cost: float = 5.0,
+    avg_user_impact: float = 80.0,
+    user_seeks: int = 100,
+    user_scans: int = 10,
+) -> dict[str, Any]:
+    impact_score = avg_total_user_cost * avg_user_impact * (user_seeks + user_scans)
+    return {
+        "database_name": database_name,
+        "table_name": table_name,
+        "impact_score": impact_score,
+        "equality_columns": equality_columns,
+        "inequality_columns": inequality_columns,
+        "included_columns": included_columns,
+        "user_seeks": user_seeks,
+        "user_scans": user_scans,
+    }
+
+
+async def test_collect_missing_index_suggestions_builds_readable_suggestion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`sys.dm_db_missing_index_details` cobre a instancia inteira numa unica chamada — sem
+    iterar por banco (ao contrario do PostgreSQL)."""
+    row = _missing_index_row()
+    _patch_missing_index_connect(monkeypatch, [row])
+
+    instance_id = uuid4()
+    collector = SQLServerCollector(connection=_CONNECTION, instance_id=instance_id)
+    suggestions = await collector.collect_missing_index_suggestions()
+
+    assert len(suggestions) == 1
+    suggestion = suggestions[0]
+    assert suggestion.instance_id == instance_id
+    assert suggestion.database_name == "AB_COBRANCA"
+    assert suggestion.table_name == "[AB_COBRANCA].[dbo].[pedidos]"
+    assert suggestion.impact_score == 5.0 * 80.0 * (100 + 10)
+    assert "cliente_id" in suggestion.suggestion
+    assert "valor" in suggestion.suggestion
+    assert suggestion.detail["user_seeks"] == 100
+    assert suggestion.detail["user_scans"] == 10
+
+
+async def test_collect_missing_index_suggestions_handles_null_columns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`equality_columns`/`inequality_columns`/`included_columns` sao todos nullable — uma
+    sugestao real quase sempre so preenche um subconjunto deles."""
+    row = _missing_index_row(equality_columns=None, inequality_columns="[data_criacao]")
+    _patch_missing_index_connect(monkeypatch, [row])
+
+    collector = SQLServerCollector(connection=_CONNECTION, instance_id=uuid4())
+    suggestions = await collector.collect_missing_index_suggestions()
+
+    assert len(suggestions) == 1
+    assert "data_criacao" in suggestions[0].suggestion
+    assert suggestions[0].detail["equality_columns"] is None
+
+
+async def test_collect_missing_index_suggestions_raises_value_error_without_instance_id() -> None:
+    collector = SQLServerCollector(connection=_CONNECTION, instance_id=None)
+    with pytest.raises(ValueError, match="instance_id"):
+        await collector.collect_missing_index_suggestions()

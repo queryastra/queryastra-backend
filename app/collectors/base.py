@@ -23,6 +23,7 @@ from uuid import UUID
 from app.normalizers.models import (
     NormalizedBlockingEvent,
     NormalizedMetricSample,
+    NormalizedMissingIndexSuggestion,
     NormalizedQuerySample,
 )
 
@@ -107,4 +108,16 @@ class Collector(Protocol):
 
     async def close(self) -> None:
         """Libera a conexao/pool mantido pelo adaptador."""
+        ...
+
+    async def collect_missing_index_suggestions(self) -> list[NormalizedMissingIndexSuggestion]:
+        """Executa a checagem de indices ausentes (`Docs/collector-queries.md` §10, Q21).
+
+        Separado de `collect()` de proposito: roda num worker de baixa frequencia
+        (`app/workers/missing_index_supervisor.py`, 1x/dia por padrao), nao a cada poucos
+        segundos como a coleta de sessao/wait/metrica. PostgreSQL: heuristica via
+        `pg_stat_user_tables`, iterando por banco (essa view e escopada ao banco conectado, ao
+        contrario de `pg_stat_activity`/`pg_stat_database`). SQL Server: sugestao real do
+        otimizador via `sys.dm_db_missing_index_*`, instancia inteira numa unica chamada.
+        """
         ...

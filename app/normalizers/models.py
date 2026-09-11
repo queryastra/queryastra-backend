@@ -98,3 +98,24 @@ class NormalizedBlockingEvent(BaseModel):
     blocker_sql_hash: str | None = None
     blocked_sql_hash: str | None = None
     wait_time_ms: int
+
+
+class NormalizedMissingIndexSuggestion(BaseModel):
+    """Sugestao de indice ausente normalizada — destino: tabela relacional
+    `missing_index_suggestions` (upsert por instance_id/database_name/table_name/suggestion, nao
+    serie temporal). Ver `Docs/collector-queries.md` §10, ARCHITECTURE_SPEC.md Q21.
+
+    `impact_score` NAO e comparavel entre engines — SQL Server usa a formula real do otimizador
+    (`avg_total_user_cost * avg_user_impact * (user_seeks + user_scans)`), PostgreSQL usa um proxy
+    heuristico (`seq_scan - idx_scan`) que so serve para ordenar candidatos dentro do proprio
+    cluster. `detail` guarda a estrutura bruta especifica do engine, para nao perder informacao
+    que a `suggestion` textual resume."""
+
+    model_config = ConfigDict(frozen=True)
+
+    instance_id: UUID
+    database_name: str | None = None
+    table_name: str
+    suggestion: str
+    impact_score: float | None = None
+    detail: dict[str, Any] = Field(default_factory=dict)

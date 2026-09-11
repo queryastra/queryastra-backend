@@ -81,6 +81,26 @@ class Settings(BaseSettings):
     # so logada nesse canal).
     alert_webhook_url: str | None = Field(default=None, alias="ALERT_WEBHOOK_URL")
 
+    # Liga o supervisor de checagem de indices ausentes (MissingIndexSupervisor,
+    # ARCHITECTURE_SPEC.md Q18/Q21) no lifespan do backend. Default false - mesma politica de
+    # seguranca dos demais workers (nunca ligar coleta real sem configuracao explicita).
+    missing_index_supervisor_enabled: bool = Field(
+        default=False, alias="MISSING_INDEX_SUPERVISOR_ENABLED"
+    )
+    # Intervalo (segundos) entre checagens de indice ausente por instancia ativa. Default 1 dia -
+    # o proprio Monitoramento Autbank (Docs/monitoramento-autbank-analysis.md §1) ja roda essa
+    # familia de checagem 1x/dia ou 1x/semana, nao a cada poucos segundos.
+    missing_index_check_interval_seconds: int = Field(
+        default=86400, alias="MISSING_INDEX_CHECK_INTERVAL_SECONDS"
+    )
+    # Thresholds da heuristica PostgreSQL (Docs/collector-queries.md §10) - sem DMV nativa
+    # equivalente ao SQL Server, entao filtramos por tamanho de tabela e volume de seq_scan para
+    # nao sinalizar tabela pequena/pouco acessada.
+    missing_index_pg_min_table_size_bytes: int = Field(
+        default=10_000_000, alias="MISSING_INDEX_PG_MIN_TABLE_SIZE_BYTES"
+    )
+    missing_index_pg_min_seq_scans: int = Field(default=100, alias="MISSING_INDEX_PG_MIN_SEQ_SCANS")
+
     # Canal de e-mail de notificacao de alerta (`app.workers.alerting_worker`). Todos vazios por
     # padrao = canal desabilitado (nenhum envio real, mesmo default seguro do webhook). So
     # `alert_smtp_host` habilita o envio; `alert_email_to` (lista separada por virgula) precisa

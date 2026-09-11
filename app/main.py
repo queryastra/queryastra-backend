@@ -23,6 +23,7 @@ from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
 from app.db.session import async_session_factory
 from app.workers.alerting_worker import AlertingWorker, EmailSettings
+from app.workers.missing_index_supervisor import MissingIndexSupervisor
 from app.workers.polling_supervisor import PollingSupervisor
 
 logger = get_logger(__name__)
@@ -36,6 +37,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     supervisor_task: asyncio.Task[None] | None = None
     alerting_worker: AlertingWorker | None = None
     alerting_task: asyncio.Task[None] | None = None
+    missing_index_supervisor: MissingIndexSupervisor | None = None
+    missing_index_task: asyncio.Task[None] | None = None
 
     if settings.polling_supervisor_enabled:
         supervisor = PollingSupervisor(
@@ -79,6 +82,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     else:
         logger.info("AlertingWorker desabilitado (ALERTING_WORKER_ENABLED=false)")
 
+    if settings.missing_index_supervisor_enabled:
+        missing_index_supervisor = MissingIndexSupervisor(
+            async_session_factory, settings.missing_index_check_interval_seconds
+        )
+        missing_index_task = asyncio.create_task(missing_index_supervisor.run())
+        logger.info(
+            "MissingIndexSupervisor habilitado (check_interval=%ss)",
+            settings.missing_index_check_interval_seconds,
+        )
+    else:
+        logger.info("MissingIndexSupervisor desabilitado (MISSING_INDEX_SUPERVISOR_ENABLED=false)")
+
     yield
 
     if supervisor is not None and supervisor_task is not None:
@@ -87,6 +102,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if alerting_worker is not None and alerting_task is not None:
         alerting_worker.stop()
         await alerting_task
+    if missing_index_supervisor is not None and missing_index_task is not None:
+        missing_index_supervisor.stop()
+        await missing_index_task
     logger.info("Lifespan finalizado")
 
 

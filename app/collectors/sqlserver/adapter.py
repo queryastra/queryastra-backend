@@ -74,6 +74,7 @@ from app.normalizers.metric_names import (
 from app.normalizers.models import (
     NormalizedBlockingEvent,
     NormalizedMetricSample,
+    NormalizedMissingIndexSuggestion,
     NormalizedQuerySample,
 )
 from app.normalizers.wait_taxonomy import map_wait_event
@@ -131,6 +132,27 @@ _PERFORMANCE_COUNTERS_QUERY = """
           'Target Server Memory (KB)', 'Total Server Memory (KB)'
       )
       AND RTRIM(instance_name) = ''
+"""
+
+# Baseado no exemplo oficial da Microsoft para este exato caso de uso (Docs/collector-queries.md
+# §10) — `mid.statement` ja vem qualificado pela propria DMV (ex.: "[DB].[schema].[tabela]"), sem
+# precisar de `OBJECT_NAME()`. Ao contrario de `sys.dm_exec_requests` (sempre "banco atual"),
+# `sys.dm_db_missing_index_details` cobre a INSTANCIA INTEIRA numa unica chamada — sem iterar por
+# banco (confirmado contra a documentacao oficial da Microsoft).
+_MISSING_INDEX_QUERY = """
+    SELECT
+        DB_NAME(mid.database_id) AS database_name,
+        mid.statement AS table_name,
+        migs.avg_total_user_cost * migs.avg_user_impact
+            * (migs.user_seeks + migs.user_scans) AS impact_score,
+        mid.equality_columns, mid.inequality_columns, mid.included_columns,
+        migs.user_seeks, migs.user_scans
+    FROM sys.dm_db_missing_index_group_stats AS migs
+    INNER JOIN sys.dm_db_missing_index_groups AS mig
+        ON migs.group_handle = mig.index_group_handle
+    INNER JOIN sys.dm_db_missing_index_details AS mid
+        ON mig.index_handle = mid.index_handle
+    ORDER BY impact_score DESC
 """
 
 
@@ -257,6 +279,65 @@ def _connect_and_collect(
     blocking_events = _build_blocking_events(session_rows, instance_id, collected_at)
     metric_samples = _build_metric_samples(session_rows, counter_rows, instance_id, collected_at)
     return metric_samples, query_samples, blocking_events, product_version, version_major
+
+
+def _connect_and_collect_missing_indexes(
+    connection: ConnectionParams,
+    instance_id: UUID,
+    query_timeout_seconds: float,
+    max_rows: int,
+) -> list[NormalizedMissingIndexSuggestion]:
+    """Helper sincrono (mesmo padrao de `_connect_and_collect`): conecta via `pymssql` e roda a
+    query de indice ausente, instancia inteira numa unica chamada."""
+    login_timeout_seconds = int(connection.connect_timeout_seconds)
+    conn = pymssql.connect(
+        server=connection.host,
+        port=str(connection.port),
+        user=connection.username,
+        password=connection.secret_value,
+        timeout=int(query_timeout_seconds),
+        login_timeout=login_timeout_seconds,
+    )
+    try:
+        cursor = conn.cursor(as_dict=True)
+        cursor.execute(_MISSING_INDEX_QUERY)
+        rows = list(cursor.fetchall())[:max_rows]
+        cursor.close()
+    finally:
+        conn.close()
+
+    return _build_missing_index_suggestions(rows, instance_id)
+
+
+def _build_missing_index_suggestions(
+    rows: list[dict], instance_id: UUID
+) -> list[NormalizedMissingIndexSuggestion]:
+    suggestions: list[NormalizedMissingIndexSuggestion] = []
+    for row in rows:
+        equality = row["equality_columns"] or "-"
+        inequality = row["inequality_columns"] or "-"
+        included = row["included_columns"] or "-"
+        suggestions.append(
+            NormalizedMissingIndexSuggestion(
+                instance_id=instance_id,
+                database_name=row["database_name"],
+                table_name=row["table_name"],
+                suggestion=(
+                    f"Igualdade: {equality}; Desigualdade: {inequality}; Incluidas: {included}"
+                ),
+                impact_score=(
+                    float(row["impact_score"]) if row["impact_score"] is not None else None
+                ),
+                detail={
+                    "equality_columns": row["equality_columns"],
+                    "inequality_columns": row["inequality_columns"],
+                    "included_columns": row["included_columns"],
+                    "user_seeks": row["user_seeks"],
+                    "user_scans": row["user_scans"],
+                },
+            )
+        )
+    return suggestions
 
 
 def _hash_query_text(query_text: str | None) -> str | None:
@@ -515,6 +596,31 @@ class SQLServerCollector:
             blocking_events=blocking_events,
             engine_version=product_version,
             engine_version_major=version_major,
+        )
+
+    async def collect_missing_index_suggestions(self) -> list[NormalizedMissingIndexSuggestion]:
+        """Sugestao real do otimizador via `sys.dm_db_missing_index_*` (Docs/collector-queries.md
+        §10) — instancia inteira numa unica chamada, sem iterar por banco (ao contrario do
+        PostgreSQL, que nao tem DMV equivalente)."""
+        if self._instance_id is None:
+            raise ValueError(
+                "SQLServerCollector.collect_missing_index_suggestions requer instance_id de "
+                "uma instancia ja cadastrada."
+            )
+        settings = get_settings()
+        overall_timeout = (
+            self._connection_params.connect_timeout_seconds
+            + settings.collection_query_timeout_seconds
+        )
+        return await asyncio.wait_for(
+            asyncio.to_thread(
+                _connect_and_collect_missing_indexes,
+                self._connection_params,
+                self._instance_id,
+                settings.collection_query_timeout_seconds,
+                settings.collection_max_rows,
+            ),
+            timeout=overall_timeout,
         )
 
     async def close(self) -> None:

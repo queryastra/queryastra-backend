@@ -7,6 +7,7 @@ sao Fase 2 (`Docs/database-schema.md` §5) e ficam fora deste MVP de proposito.
 
 from app.models.alert import Alert, AlertNotification, AlertRule, AlertSilence
 from app.models.instance import Instance, InstanceMaintenanceWindow
+from app.models.missing_index_suggestion import MissingIndexSuggestion
 from app.models.server import InstanceServer, Server
 
 __all__ = [
@@ -18,4 +19,5 @@ __all__ = [
     "Alert",
     "AlertNotification",
     "AlertSilence",
+    "MissingIndexSuggestion",
 ]

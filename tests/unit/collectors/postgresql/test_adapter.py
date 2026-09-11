@@ -244,3 +244,118 @@ async def test_collect_raises_value_error_without_instance_id() -> None:
     collector = PostgreSQLCollector(connection=_CONNECTION, instance_id=None)
     with pytest.raises(ValueError, match="instance_id"):
         await collector.collect()
+
+
+class _FakeMissingIndexConnection:
+    """Fake de conexao para `collect_missing_index_suggestions()` — `fetch()` devolve linhas
+    fixas conforme a query pedida (lista de bancos ou heuristica de indice ausente)."""
+
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self._rows = rows
+        self.closed = False
+
+    async def fetch(self, query: str, *args: object) -> list[dict[str, Any]]:
+        if "pg_database" in query or "pg_stat_user_tables" in query:
+            return self._rows
+        raise AssertionError(f"fetch inesperado: {query}")
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+async def test_collect_missing_index_suggestions_iterates_per_database(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`pg_stat_user_tables` e escopada ao banco conectado — a checagem precisa iterar por banco
+    do cluster (nao so o banco de manutencao "postgres" usado por `collect()`/
+    `check_capabilities()`), ao contrario do resto do coletor, cluster-wide via `pg_stat_activity`/
+    `pg_stat_database`."""
+    bootstrap_conn = _FakeMissingIndexConnection(
+        rows=[{"datname": "db_a"}, {"datname": "db_b"}]
+    )
+    db_a_conn = _FakeMissingIndexConnection(
+        rows=[
+            {
+                "schemaname": "public",
+                "table_name": "pedidos",
+                "seq_scan": 500,
+                "idx_scan": 10,
+                "n_live_tup": 100_000,
+                "table_size_bytes": 20_000_000,
+            }
+        ]
+    )
+    db_b_conn = _FakeMissingIndexConnection(rows=[])
+
+    async def fake_connect(**kwargs: object) -> _FakeMissingIndexConnection:
+        database = kwargs["database"]
+        if database == "postgres":
+            return bootstrap_conn
+        if database == "db_a":
+            return db_a_conn
+        if database == "db_b":
+            return db_b_conn
+        raise AssertionError(f"conexao inesperada para database={database}")
+
+    monkeypatch.setattr(asyncpg, "connect", fake_connect)
+
+    instance_id = uuid4()
+    collector = PostgreSQLCollector(connection=_CONNECTION, instance_id=instance_id)
+    suggestions = await collector.collect_missing_index_suggestions()
+
+    assert len(suggestions) == 1
+    suggestion = suggestions[0]
+    assert suggestion.instance_id == instance_id
+    assert suggestion.database_name == "db_a"
+    assert suggestion.table_name == "public.pedidos"
+    assert suggestion.impact_score == 490.0
+    assert suggestion.detail["seq_scan"] == 500
+    assert bootstrap_conn.closed
+    assert db_a_conn.closed
+    assert db_b_conn.closed
+
+
+async def test_collect_missing_index_suggestions_skips_database_that_fails_to_connect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Falha de conexao/permissao num banco especifico do cluster nao aborta a checagem dos
+    demais bancos — so aquele banco fica sem sugestao."""
+    bootstrap_conn = _FakeMissingIndexConnection(
+        rows=[{"datname": "db_a"}, {"datname": "db_b"}]
+    )
+    db_b_conn = _FakeMissingIndexConnection(
+        rows=[
+            {
+                "schemaname": "public",
+                "table_name": "clientes",
+                "seq_scan": 200,
+                "idx_scan": 0,
+                "n_live_tup": 50_000,
+                "table_size_bytes": 15_000_000,
+            }
+        ]
+    )
+
+    async def fake_connect(**kwargs: object) -> _FakeMissingIndexConnection:
+        database = kwargs["database"]
+        if database == "postgres":
+            return bootstrap_conn
+        if database == "db_a":
+            raise asyncpg.InvalidAuthorizationSpecificationError("sem permissao")
+        if database == "db_b":
+            return db_b_conn
+        raise AssertionError(f"conexao inesperada para database={database}")
+
+    monkeypatch.setattr(asyncpg, "connect", fake_connect)
+
+    collector = PostgreSQLCollector(connection=_CONNECTION, instance_id=uuid4())
+    suggestions = await collector.collect_missing_index_suggestions()
+
+    assert len(suggestions) == 1
+    assert suggestions[0].database_name == "db_b"
+
+
+async def test_collect_missing_index_suggestions_raises_value_error_without_instance_id() -> None:
+    collector = PostgreSQLCollector(connection=_CONNECTION, instance_id=None)
+    with pytest.raises(ValueError, match="instance_id"):
+        await collector.collect_missing_index_suggestions()
