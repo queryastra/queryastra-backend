@@ -27,7 +27,66 @@ class QuerySamplesRepository(BaseRepository):
     Regras de `sql_exclusions`: `instance_id IS NULL` vale para todas as instancias; com
     `instance_id` preenchido, so para aquela instancia. Comparacao de `match_value` e sempre
     exata (sem regex/glob) contra `sql_hash`/`program`/`db_user` conforme `match_type`.
+
+    ## `effective_wait_ms` — correcao do bug de contagem de wait time (2026-09-11)
+
+    `sys.dm_exec_requests.wait_time` (SQL Server) e o equivalente do coletor PostgreSQL reportam
+    "ha quanto tempo a espera ATUAL dura", nao um delta desde o ultimo poll — o valor cresce
+    monotonicamente enquanto a MESMA espera continua e so zera quando uma nova espera comeca.
+    Antes desta correcao, toda agregacao aqui somava `wait_time_ms` bruto por amostra
+    (`SUM(wait_time_ms)`); para uma espera mais longa que o intervalo de poll (~10s), isso soma a
+    mesma espera varias vezes (cada amostra e uma "foto" cumulativa da mesma espera), inflando o
+    total proporcionalmente a `duracao_da_espera / intervalo_de_poll`. Confirmado ao vivo contra
+    o banco de dev real (instancia `Autklinux20`, sessao 797, banco `AB_APLICAUT_AX`): 14 amostras
+    consecutivas da mesma sessao/wait mostrando `wait_time_ms` crescendo 40162 -> 50241 -> ... ->
+    173425 — a soma ingenua das 14 amostras (~1.496.529 ms) superestima em ~8,6x a duracao real da
+    espera (173.425 ms), e chega a exceder o proprio tempo de parede decorrido entre a 1a e a
+    ultima amostra (~133s). Comparado com a metodologia documentada do SolarWinds DPA (credito
+    fixo de 1s de wait por poll a cada dimensao ativa, por amostragem a 1Hz), esse era o principal
+    ponto de divergencia visto ao comparar o mesmo instante/instancia nas duas ferramentas.
+
+    Correcao (opcao B, escolhida explicitamente pelo usuario em vez de replicar o credito fixo por
+    poll do DPA): toda query de agregacao abaixo usa uma CTE `effective` que calcula, por amostra,
+    `effective_wait_ms` = incremento real desde a amostra anterior da MESMA sessao, quando essa
+    amostra anterior tinha o mesmo `wait_event_native` e um `wait_time_ms` menor ou igual (== a
+    mesma espera continuando); caso contrario (espera mudou, zerou, ou e a primeira amostra da
+    sessao na janela) conta o valor cheio da amostra (e uma espera nova comecando do zero). Isso
+    elimina a re-contagem sem "arredondar pra cima" esperas curtas (que ja eram corretas antes,
+    pois cada amostra ja captura uma espera diferente quando ela dura menos que o intervalo de
+    poll). `LAG(...) OVER (PARTITION BY session_id ORDER BY time)` so e usada quando `session_id`
+    e `wait_event_native` nao sao nulos (varias sessoes podem ter `session_id IS NULL` ao mesmo
+    tempo — particionar por NULL as agruparia todas numa unica particao artificial).
+
+    Limitacao conhecida, documentada e aceita (nao corrigida): a CTE so enxerga amostras dentro da
+    janela `[since, until]` pedida — a primeira amostra de uma sessao dentro da janela sempre conta
+    o valor cheio, mesmo que seja continuacao de uma espera que comecou ANTES de `since`. Afeta so
+    a borda inicial da janela, nao o volume agregado como um todo.
     """
+
+    _EFFECTIVE_WAIT_SELECT = """
+        SELECT
+            time, session_id, sql_hash, sql_name, sql_text_masked, database_name,
+            wait_type, wait_event_native,
+            CASE
+                WHEN session_id IS NOT NULL
+                 AND wait_event_native IS NOT NULL
+                 AND wait_time_ms IS NOT NULL
+                 AND wait_event_native = LAG(wait_event_native)
+                     OVER (PARTITION BY session_id ORDER BY time)
+                 AND LAG(wait_time_ms) OVER (PARTITION BY session_id ORDER BY time) IS NOT NULL
+                 AND wait_time_ms >= LAG(wait_time_ms) OVER (PARTITION BY session_id ORDER BY time)
+                THEN wait_time_ms - LAG(wait_time_ms) OVER (PARTITION BY session_id ORDER BY time)
+                ELSE wait_time_ms
+            END AS effective_wait_ms
+        FROM query_samples
+        WHERE instance_id = :instance_id AND time >= :since AND time <= :until
+    """
+    """Bloco `SELECT` reutilizado dentro da CTE `effective AS (...)` de cada metodo abaixo — todas
+    as colunas usadas por alguma agregacao downstream, mais `effective_wait_ms` ja calculado.
+    Filtro de `database_name` (quando existe) e aplicado FORA desta CTE (na query externa), nunca
+    aqui dentro — a continuidade de uma espera e uma propriedade da sessao fisica, independente de
+    banco de dados; filtrar `database_name` antes do `LAG` cortaria a amostra anterior da mesma
+    espera sempre que ela (impossivelmente, mas por seguranca) aparecesse com outro banco."""
 
     async def insert_batch(self, samples: list[NormalizedQuerySample]) -> None:
         if not samples:
@@ -120,32 +179,33 @@ class QuerySamplesRepository(BaseRepository):
         `database_name` (nivel 2 do drill-down hierarquico: Instancia -> Banco -> Query) filtra
         as amostras a um unico banco quando informado; `None` (default) mantem o comportamento
         historico de agregar todos os bancos juntos sob o mesmo `sql_hash` — o filtro e aplicado
-        via `:database_name IS NULL OR database_name = :database_name` nas 3 CTEs, sempre com
-        `database_name` no dict de params (valor `None` quando nao ha filtro), em vez de montar
-        SQL condicionalmente."""
-        stmt = sa.text("""
-            WITH agg AS (
+        na query externa, apos a CTE `effective` calcular `effective_wait_ms` sem restricao de
+        banco (ver docstring da classe). `total_wait_time_ms`/`avg_wait_time_ms` somam/promediam
+        `effective_wait_ms` (delta real por amostra), nao mais `wait_time_ms` bruto — ver
+        docstring da classe para o porque."""
+        stmt = sa.text(
+            f"""
+            WITH effective AS ({self._EFFECTIVE_WAIT_SELECT}),
+            filtered AS (
+                SELECT * FROM effective
+                WHERE (CAST(:database_name AS text) IS NULL OR database_name = :database_name)
+            ),
+            agg AS (
                 SELECT sql_hash, count(*) AS execution_count,
-                       coalesce(sum(wait_time_ms), 0) AS total_wait_time_ms,
-                       coalesce(avg(wait_time_ms), 0) AS avg_wait_time_ms
-                FROM query_samples
-                WHERE instance_id = :instance_id AND time >= :since AND time <= :until
-                    AND (CAST(:database_name AS text) IS NULL OR database_name = :database_name)
+                       coalesce(sum(effective_wait_ms), 0) AS total_wait_time_ms,
+                       coalesce(avg(effective_wait_ms), 0) AS avg_wait_time_ms
+                FROM filtered
                 GROUP BY sql_hash
             ),
             latest AS (
                 SELECT DISTINCT ON (sql_hash) sql_hash, sql_name, sql_text_masked, database_name
-                FROM query_samples
-                WHERE instance_id = :instance_id AND time >= :since AND time <= :until
-                    AND (CAST(:database_name AS text) IS NULL OR database_name = :database_name)
+                FROM filtered
                 ORDER BY sql_hash, time DESC
             ),
             wait_counts AS (
                 SELECT sql_hash, wait_type, count(*) AS wait_count
-                FROM query_samples
-                WHERE instance_id = :instance_id AND time >= :since AND time <= :until
-                    AND wait_type IS NOT NULL
-                    AND (CAST(:database_name AS text) IS NULL OR database_name = :database_name)
+                FROM filtered
+                WHERE wait_type IS NOT NULL
                 GROUP BY sql_hash, wait_type
             ),
             wait_mode AS (
@@ -161,7 +221,8 @@ class QuerySamplesRepository(BaseRepository):
             LEFT JOIN wait_mode ON wait_mode.sql_hash = agg.sql_hash AND wait_mode.rn = 1
             ORDER BY agg.total_wait_time_ms DESC
             LIMIT :limit
-        """)
+        """
+        )
         result = await self._session.execute(
             stmt,
             {
@@ -180,19 +241,22 @@ class QuerySamplesRepository(BaseRepository):
         """Agrega `query_samples` por `database_name` (nivel 1 do drill-down hierarquico:
         Instancia -> Banco -> Query). Mesmo padrao de CTE de `top_sql()`, mas agrupando por
         `database_name` em vez de `sql_hash`. Linhas com `database_name` NULL sao agrupadas sob a
-        label 'desconhecido' (COALESCE), nunca descartadas."""
-        stmt = sa.text("""
+        label 'desconhecido' (COALESCE), nunca descartadas. `total_wait_time_ms`/`avg_wait_time_ms`
+        somam/promediam `effective_wait_ms` (delta real por amostra) — ver docstring da classe."""
+        stmt = sa.text(
+            f"""
+            WITH effective AS ({self._EFFECTIVE_WAIT_SELECT})
             SELECT
                 COALESCE(database_name, 'desconhecido') AS database_name,
                 count(*) AS execution_count,
-                coalesce(sum(wait_time_ms), 0) AS total_wait_time_ms,
-                coalesce(avg(wait_time_ms), 0) AS avg_wait_time_ms
-            FROM query_samples
-            WHERE instance_id = :instance_id AND time >= :since AND time <= :until
+                coalesce(sum(effective_wait_ms), 0) AS total_wait_time_ms,
+                coalesce(avg(effective_wait_ms), 0) AS avg_wait_time_ms
+            FROM effective
             GROUP BY COALESCE(database_name, 'desconhecido')
             ORDER BY total_wait_time_ms DESC
             LIMIT :limit
-        """)
+        """
+        )
         result = await self._session.execute(
             stmt, {"instance_id": instance_id, "since": since, "until": until, "limit": limit}
         )
@@ -205,19 +269,22 @@ class QuerySamplesRepository(BaseRepository):
         (irma de "Bancos de dados"/"SQL": `top_sql_by_database`/`top_sql`), folha da propria
         dimensao (um tipo de espera nao se decompoe em mais nada, ao contrario de banco/query, que
         se decompoem por wait nativo). `wait_event_native` NULL vira 'desconhecido' (COALESCE),
-        nunca descartado."""
-        stmt = sa.text("""
+        nunca descartado. `total_wait_time_ms`/`avg_wait_time_ms` somam/promediam
+        `effective_wait_ms` (delta real por amostra) — ver docstring da classe."""
+        stmt = sa.text(
+            f"""
+            WITH effective AS ({self._EFFECTIVE_WAIT_SELECT})
             SELECT
                 COALESCE(wait_event_native, 'desconhecido') AS wait_event_native,
                 count(*) AS execution_count,
-                coalesce(sum(wait_time_ms), 0) AS total_wait_time_ms,
-                coalesce(avg(wait_time_ms), 0) AS avg_wait_time_ms
-            FROM query_samples
-            WHERE instance_id = :instance_id AND time >= :since AND time <= :until
+                coalesce(sum(effective_wait_ms), 0) AS total_wait_time_ms,
+                coalesce(avg(effective_wait_ms), 0) AS avg_wait_time_ms
+            FROM effective
             GROUP BY COALESCE(wait_event_native, 'desconhecido')
             ORDER BY total_wait_time_ms DESC
             LIMIT :limit
-        """)
+        """
+        )
         result = await self._session.execute(
             stmt, {"instance_id": instance_id, "since": since, "until": until, "limit": limit}
         )
@@ -233,20 +300,23 @@ class QuerySamplesRepository(BaseRepository):
         `wait_type` (usados em `wait_summary()`), a pedido explicito de ver o wait nativo por
         banco, nao so a categoria agregada. `database_name`/`wait_event_native`
         NULL viram 'desconhecido' (COALESCE), nunca descartados — mesmo padrao de
-        `top_sql_by_database`."""
-        stmt = sa.text("""
+        `top_sql_by_database`. `total_wait_time_ms` soma `effective_wait_ms` (delta real por
+        amostra) — ver docstring da classe."""
+        stmt = sa.text(
+            f"""
+            WITH effective AS ({self._EFFECTIVE_WAIT_SELECT})
             SELECT
                 COALESCE(database_name, 'desconhecido') AS database_name,
                 COALESCE(wait_event_native, 'desconhecido') AS wait_event_native,
-                coalesce(sum(wait_time_ms), 0) AS total_wait_time_ms
-            FROM query_samples
-            WHERE instance_id = :instance_id AND time >= :since AND time <= :until
+                coalesce(sum(effective_wait_ms), 0) AS total_wait_time_ms
+            FROM effective
             GROUP BY
                 COALESCE(database_name, 'desconhecido'),
                 COALESCE(wait_event_native, 'desconhecido')
             ORDER BY database_name, total_wait_time_ms DESC
             LIMIT :limit
-        """)
+        """
+        )
         result = await self._session.execute(
             stmt, {"instance_id": instance_id, "since": since, "until": until, "limit": limit}
         )
@@ -264,19 +334,23 @@ class QuerySamplesRepository(BaseRepository):
         time de cada query (nivel 2 do drill-down) pelo tipo de espera NATIVO do engine. Mesma
         ideia de `wait_breakdown_by_database`, granularidade `sql_hash` em vez de
         `database_name`; aceita o mesmo filtro opcional `database_name` de `top_sql()` (nivel 2
-        so quer a decomposicao das queries daquele banco)."""
-        stmt = sa.text("""
+        so quer a decomposicao das queries daquele banco). `database_name` e filtrado apos a CTE
+        `effective` (nao antes, ver docstring da classe). `total_wait_time_ms` soma
+        `effective_wait_ms` (delta real por amostra)."""
+        stmt = sa.text(
+            f"""
+            WITH effective AS ({self._EFFECTIVE_WAIT_SELECT})
             SELECT
                 sql_hash,
                 COALESCE(wait_event_native, 'desconhecido') AS wait_event_native,
-                coalesce(sum(wait_time_ms), 0) AS total_wait_time_ms
-            FROM query_samples
-            WHERE instance_id = :instance_id AND time >= :since AND time <= :until
-                AND (CAST(:database_name AS text) IS NULL OR database_name = :database_name)
+                coalesce(sum(effective_wait_ms), 0) AS total_wait_time_ms
+            FROM effective
+            WHERE (CAST(:database_name AS text) IS NULL OR database_name = :database_name)
             GROUP BY sql_hash, COALESCE(wait_event_native, 'desconhecido')
             ORDER BY sql_hash, total_wait_time_ms DESC
             LIMIT :limit
-        """)
+        """
+        )
         result = await self._session.execute(
             stmt,
             {
@@ -311,20 +385,25 @@ class QuerySamplesRepository(BaseRepository):
         Sem filtro de `since`/`until` restritivo o suficiente (bucket="day" tipicamente varre
         tudo), isto pode varrer o historico inteiro de `query_samples` (sem retention policy
         hoje) — aceitavel no volume atual, mas pode exigir paginacao/particionamento se o
-        historico crescer muito."""
-        stmt = sa.text("""
+        historico crescer muito. `total_wait_time_ms` soma `effective_wait_ms` (delta real por
+        amostra, ver docstring da classe) — uma espera continua que atravessa a fronteira de um
+        bucket tem seu delta inteiro atribuido ao bucket da amostra mais recente (aproximacao
+        aceita, mesma limitacao de borda ja documentada na classe)."""
+        stmt = sa.text(
+            f"""
+            WITH effective AS ({self._EFFECTIVE_WAIT_SELECT})
             SELECT
                 (date_trunc(:bucket, time AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') AS bucket_start,
                 COALESCE(database_name, 'desconhecido') AS database_name,
-                coalesce(sum(wait_time_ms), 0) AS total_wait_time_ms
-            FROM query_samples
-            WHERE instance_id = :instance_id AND time >= :since AND time <= :until
+                coalesce(sum(effective_wait_ms), 0) AS total_wait_time_ms
+            FROM effective
             GROUP BY
                 date_trunc(:bucket, time AT TIME ZONE 'UTC'),
                 COALESCE(database_name, 'desconhecido')
             ORDER BY bucket_start, total_wait_time_ms DESC
             LIMIT :limit
-        """)
+        """
+        )
         result = await self._session.execute(
             stmt,
             {
@@ -351,19 +430,23 @@ class QuerySamplesRepository(BaseRepository):
         (`bucket="hour"`). Mesmas ressalvas de `wait_time_by_bucket_and_database` (`bucket_start`
         convertido de volta pra `timestamptz` via `AT TIME ZONE 'UTC'` externo, pra sair com `Z`
         no JSON); aceita o mesmo filtro opcional `database_name` de
-        `top_sql()`/`wait_breakdown_by_sql_hash()`."""
-        stmt = sa.text("""
+        `top_sql()`/`wait_breakdown_by_sql_hash()`. `total_wait_time_ms` soma `effective_wait_ms`
+        (delta real por amostra) — `database_name` filtrado apos a CTE `effective`, ver docstring
+        da classe."""
+        stmt = sa.text(
+            f"""
+            WITH effective AS ({self._EFFECTIVE_WAIT_SELECT})
             SELECT
                 (date_trunc(:bucket, time AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') AS bucket_start,
                 sql_hash,
-                coalesce(sum(wait_time_ms), 0) AS total_wait_time_ms
-            FROM query_samples
-            WHERE instance_id = :instance_id AND time >= :since AND time <= :until
-                AND (CAST(:database_name AS text) IS NULL OR database_name = :database_name)
+                coalesce(sum(effective_wait_ms), 0) AS total_wait_time_ms
+            FROM effective
+            WHERE (CAST(:database_name AS text) IS NULL OR database_name = :database_name)
             GROUP BY date_trunc(:bucket, time AT TIME ZONE 'UTC'), sql_hash
             ORDER BY bucket_start, total_wait_time_ms DESC
             LIMIT :limit
-        """)
+        """
+        )
         result = await self._session.execute(
             stmt,
             {
@@ -388,20 +471,24 @@ class QuerySamplesRepository(BaseRepository):
         """Agrega `query_samples` por (`bucket` de tempo, `wait_event_native`) — visao historica
         "Tudo" da dimensao "Waits" (`bucket="day"`) ou detalhamento por hora dentro de um dia
         (`bucket="hour"`). Mesmas ressalvas de `wait_time_by_bucket_and_database` (`bucket_start`
-        convertido de volta pra `timestamptz` via `AT TIME ZONE 'UTC'` externo)."""
-        stmt = sa.text("""
+        convertido de volta pra `timestamptz` via `AT TIME ZONE 'UTC'` externo).
+        `total_wait_time_ms` soma `effective_wait_ms` (delta real por amostra) — ver docstring da
+        classe."""
+        stmt = sa.text(
+            f"""
+            WITH effective AS ({self._EFFECTIVE_WAIT_SELECT})
             SELECT
                 (date_trunc(:bucket, time AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') AS bucket_start,
                 COALESCE(wait_event_native, 'desconhecido') AS wait_event_native,
-                coalesce(sum(wait_time_ms), 0) AS total_wait_time_ms
-            FROM query_samples
-            WHERE instance_id = :instance_id AND time >= :since AND time <= :until
+                coalesce(sum(effective_wait_ms), 0) AS total_wait_time_ms
+            FROM effective
             GROUP BY
                 date_trunc(:bucket, time AT TIME ZONE 'UTC'),
                 COALESCE(wait_event_native, 'desconhecido')
             ORDER BY bucket_start, total_wait_time_ms DESC
             LIMIT :limit
-        """)
+        """
+        )
         result = await self._session.execute(
             stmt,
             {
@@ -435,23 +522,29 @@ class QuerySamplesRepository(BaseRepository):
     async def wait_summary(
         self, instance_id: UUID, since: datetime, until: datetime
     ) -> list[sa.Row]:
-        stmt = (
-            sa.select(
-                query_samples_table.c.wait_type,
-                sa.func.coalesce(sa.func.sum(query_samples_table.c.wait_time_ms), 0).label(
-                    "total_wait_time_ms"
-                ),
-            )
-            .where(
-                query_samples_table.c.instance_id == instance_id,
-                query_samples_table.c.time >= since,
-                query_samples_table.c.time <= until,
-                query_samples_table.c.wait_type.is_not(None),
-            )
-            .group_by(query_samples_table.c.wait_type)
-            .order_by(sa.desc("total_wait_time_ms"))
+        """Agrega `query_samples` por `wait_type` (categoria canonica cross-engine, ver
+        `app/normalizers/wait_taxonomy.py`) — usada na visao geral de waits/bloqueios e na barra
+        de severidade de wait da lista de instancias (`InstanceRow`). `total_wait_time_ms` soma
+        `effective_wait_ms` (delta real por amostra, nao mais `wait_time_ms` bruto) — ver
+        docstring da classe. Reescrita de expression-builder para SQL literal (`sa.text`) porque
+        precisa da `LAG()` window function da CTE `effective`, compartilhada com os demais
+        metodos desta classe."""
+        stmt = sa.text(
+            f"""
+            WITH effective AS ({self._EFFECTIVE_WAIT_SELECT})
+            SELECT
+                wait_type,
+                coalesce(sum(effective_wait_ms), 0) AS total_wait_time_ms
+            FROM effective
+            WHERE wait_type IS NOT NULL
+            GROUP BY wait_type
+            ORDER BY total_wait_time_ms DESC
+        """
         )
-        return list((await self._session.execute(stmt)).fetchall())
+        result = await self._session.execute(
+            stmt, {"instance_id": instance_id, "since": since, "until": until}
+        )
+        return list(result.fetchall())
 
     async def latest_by_session(
         self, instance_id: UUID, session_ids: Sequence[str], since: datetime

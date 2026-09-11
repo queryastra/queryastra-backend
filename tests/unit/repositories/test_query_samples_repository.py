@@ -820,6 +820,209 @@ async def test_query_detail_returns_raw_samples_for_hash(
     assert rows[0].session_id == "2"
 
 
+async def test_top_sql_sums_effective_wait_delta_for_continuous_wait_same_session(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """Regressao do bug real encontrado ao vivo (instancia `Autklinux20`, sessao 797,
+    `AB_APLICAUT_AX`): amostras sucessivas da MESMA sessao, no MESMO `wait_event_native`, com
+    `wait_time_ms` crescendo monotonicamente, sao a mesma espera continua sendo fotografada
+    varias vezes — `total_wait_time_ms` deve somar so os incrementos (deltas), nao os valores
+    brutos (que somados dariam 100+250+400=750, quase 2x o valor real da espera de 400ms)."""
+    repo = QuerySamplesRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-continuous",
+                sql_text_masked="SELECT ? FROM t",
+                session_id="sess-1",
+                wait_event_native="WAITFOR",
+                wait_time_ms=100,
+            ),
+            NormalizedQuerySample(
+                time=now + timedelta(seconds=10),
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-continuous",
+                sql_text_masked="SELECT ? FROM t",
+                session_id="sess-1",
+                wait_event_native="WAITFOR",
+                wait_time_ms=250,
+            ),
+            NormalizedQuerySample(
+                time=now + timedelta(seconds=20),
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-continuous",
+                sql_text_masked="SELECT ? FROM t",
+                session_id="sess-1",
+                wait_event_native="WAITFOR",
+                wait_time_ms=400,
+            ),
+        ]
+    )
+
+    rows = await repo.top_sql(
+        test_instance.id,
+        since=now - timedelta(minutes=1),
+        until=now + timedelta(minutes=1),
+        limit=10,
+    )
+
+    assert len(rows) == 1
+    # 100 (1a amostra, espera nova) + 150 (250-100) + 150 (400-250) = 400 — nao 750.
+    assert rows[0].total_wait_time_ms == 400
+
+
+async def test_top_sql_counts_full_value_when_wait_resets_or_changes_type(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """Quando o `wait_time_ms` cai (a espera anterior terminou e uma nova comecou) ou o
+    `wait_event_native` muda entre amostras da mesma sessao, cada amostra conta o valor cheio —
+    nao ha "delta negativo" nem mistura de deltas entre esperas diferentes."""
+    repo = QuerySamplesRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-reset",
+                sql_text_masked="SELECT ? FROM t",
+                session_id="sess-2",
+                wait_event_native="WAITFOR",
+                wait_time_ms=9000,
+            ),
+            # Wait_time_ms caiu — a espera de 9000ms terminou, uma nova comecou do zero.
+            NormalizedQuerySample(
+                time=now + timedelta(seconds=10),
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-reset",
+                sql_text_masked="SELECT ? FROM t",
+                session_id="sess-2",
+                wait_event_native="WAITFOR",
+                wait_time_ms=500,
+            ),
+            # Mesmo crescendo, o tipo de espera mudou — nao e continuacao da anterior.
+            NormalizedQuerySample(
+                time=now + timedelta(seconds=20),
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-reset",
+                sql_text_masked="SELECT ? FROM t",
+                session_id="sess-2",
+                wait_event_native="PAGEIOLATCH_SH",
+                wait_time_ms=800,
+            ),
+        ]
+    )
+
+    rows = await repo.top_sql(
+        test_instance.id,
+        since=now - timedelta(minutes=1),
+        until=now + timedelta(minutes=1),
+        limit=10,
+    )
+
+    assert len(rows) == 1
+    # 9000 (nova) + 500 (nova, valor caiu) + 800 (nova, tipo mudou) = 10300.
+    assert rows[0].total_wait_time_ms == 10300
+
+
+async def test_wait_summary_sums_effective_wait_delta_for_continuous_wait(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """Mesma regressao de `test_top_sql_sums_effective_wait_delta_for_continuous_wait_same_session`,
+    validada em `wait_summary` — usada pela barra de severidade de wait da lista de instancias."""
+    repo = QuerySamplesRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-a",
+                sql_text_masked="SELECT ?",
+                session_id="sess-3",
+                wait_type=WaitCategory.LOCK,
+                wait_event_native="LCK_M_S",
+                wait_time_ms=1000,
+            ),
+            NormalizedQuerySample(
+                time=now + timedelta(seconds=10),
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-a",
+                sql_text_masked="SELECT ?",
+                session_id="sess-3",
+                wait_type=WaitCategory.LOCK,
+                wait_event_native="LCK_M_S",
+                wait_time_ms=2200,
+            ),
+        ]
+    )
+
+    rows = await repo.wait_summary(
+        test_instance.id, since=now - timedelta(minutes=1), until=now + timedelta(minutes=1)
+    )
+
+    summary = {row.wait_type: row.total_wait_time_ms for row in rows}
+    # 1000 (1a amostra) + 1200 (2200-1000) = 2200 — nao 3200.
+    assert summary == {WaitCategory.LOCK.value: 2200}
+
+
+async def test_wait_breakdown_by_database_sums_effective_wait_delta(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """Mesma regressao validada em `wait_breakdown_by_database` — a decomposicao por wait nativo
+    usada no grafico "Bancos de dados" do drill-down."""
+    repo = QuerySamplesRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-a",
+                sql_text_masked="SELECT ?",
+                database_name="db_a",
+                session_id="sess-4",
+                wait_event_native="WAITFOR",
+                wait_time_ms=3000,
+            ),
+            NormalizedQuerySample(
+                time=now + timedelta(seconds=10),
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-a",
+                sql_text_masked="SELECT ?",
+                database_name="db_a",
+                session_id="sess-4",
+                wait_event_native="WAITFOR",
+                wait_time_ms=6500,
+            ),
+        ]
+    )
+
+    rows = await repo.wait_breakdown_by_database(
+        test_instance.id,
+        since=now - timedelta(minutes=1),
+        until=now + timedelta(minutes=1),
+        limit=10,
+    )
+
+    by_key = {(row.database_name, row.wait_event_native): row.total_wait_time_ms for row in rows}
+    # 3000 (1a amostra) + 3500 (6500-3000) = 6500 — nao 9500.
+    assert by_key[("db_a", "WAITFOR")] == 6500
+
+
 async def test_latest_by_session_returns_most_recent_row(
     db_session: AsyncSession, test_instance: Instance
 ) -> None:
