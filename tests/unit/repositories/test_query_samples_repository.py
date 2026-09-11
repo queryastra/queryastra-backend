@@ -231,6 +231,200 @@ async def test_wait_summary_groups_by_wait_type(
     assert summary == {WaitCategory.LOCK.value: 150, WaitCategory.IO.value: 30}
 
 
+async def test_top_sql_by_database_groups_by_database_name(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    repo = QuerySamplesRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-a",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_a",
+                wait_time_ms=100,
+            ),
+            NormalizedQuerySample(
+                time=now + timedelta(seconds=1),
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-b",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_a",
+                wait_time_ms=50,
+            ),
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-c",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_b",
+                wait_time_ms=30,
+            ),
+        ]
+    )
+
+    rows = await repo.top_sql_by_database(
+        test_instance.id,
+        since=now - timedelta(minutes=1),
+        until=now + timedelta(minutes=1),
+        limit=10,
+    )
+
+    by_database = {row.database_name: row for row in rows}
+    assert set(by_database) == {"db_a", "db_b"}
+    assert by_database["db_a"].execution_count == 2
+    assert by_database["db_a"].total_wait_time_ms == 150
+    assert by_database["db_b"].execution_count == 1
+    assert by_database["db_b"].total_wait_time_ms == 30
+
+
+async def test_top_sql_by_database_groups_null_database_name_as_desconhecido(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    repo = QuerySamplesRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-no-db",
+                sql_text_masked="SELECT ?",
+                database_name=None,
+                wait_time_ms=10,
+            )
+        ]
+    )
+
+    rows = await repo.top_sql_by_database(
+        test_instance.id,
+        since=now - timedelta(minutes=1),
+        until=now + timedelta(minutes=1),
+        limit=10,
+    )
+
+    assert len(rows) == 1
+    assert rows[0].database_name == "desconhecido"
+    assert rows[0].execution_count == 1
+
+
+async def test_top_sql_filters_by_database_name(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    repo = QuerySamplesRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-shared",
+                sql_name="query-shared",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_a",
+                wait_time_ms=100,
+            ),
+            NormalizedQuerySample(
+                time=now + timedelta(seconds=1),
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-shared",
+                sql_name="query-shared",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_b",
+                wait_time_ms=200,
+            ),
+        ]
+    )
+
+    unfiltered = await repo.top_sql(
+        test_instance.id,
+        since=now - timedelta(minutes=1),
+        until=now + timedelta(minutes=1),
+        limit=10,
+    )
+    assert len(unfiltered) == 1
+    assert unfiltered[0].sql_hash == "hash-shared"
+    # Sem filtro: agrega os dois bancos juntos sob o mesmo sql_hash (comportamento historico).
+    assert unfiltered[0].execution_count == 2
+    assert unfiltered[0].total_wait_time_ms == 300
+
+    filtered = await repo.top_sql(
+        test_instance.id,
+        since=now - timedelta(minutes=1),
+        until=now + timedelta(minutes=1),
+        limit=10,
+        database_name="db_a",
+    )
+    assert len(filtered) == 1
+    assert filtered[0].sql_hash == "hash-shared"
+    assert filtered[0].database_name == "db_a"
+    assert filtered[0].execution_count == 1
+    assert filtered[0].total_wait_time_ms == 100
+
+
+async def test_query_detail_returns_raw_samples_for_hash(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    repo = QuerySamplesRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-detail",
+                sql_name="query-detail",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_a",
+                session_id="1",
+                wait_time_ms=10,
+            ),
+            NormalizedQuerySample(
+                time=now + timedelta(seconds=1),
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-detail",
+                sql_name="query-detail",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_a",
+                session_id="2",
+                wait_time_ms=20,
+            ),
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-other",
+                sql_text_masked="SELECT ? FROM other",
+                database_name="db_a",
+            ),
+        ]
+    )
+
+    rows = await repo.query_detail(
+        test_instance.id,
+        "hash-detail",
+        since=now - timedelta(minutes=1),
+        until=now + timedelta(minutes=1),
+        limit=10,
+    )
+
+    assert len(rows) == 2
+    session_ids = {row.session_id for row in rows}
+    assert session_ids == {"1", "2"}
+    # Ordenado por time desc — o mais recente (session_id="2") vem primeiro.
+    assert rows[0].session_id == "2"
+
+
 async def test_latest_by_session_returns_most_recent_row(
     db_session: AsyncSession, test_instance: Instance
 ) -> None:

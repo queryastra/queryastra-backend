@@ -34,6 +34,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from app.collectors.base import Collector
+from app.core.events import event_bus
 from app.core.logging import get_logger
 from app.models.instance import Instance
 from app.normalizers.metric_names import COLLECTOR_CYCLE_DURATION_MS, COLLECTOR_CYCLE_ERROR_COUNT
@@ -154,6 +155,18 @@ class PollingWorker:
                     value=float(error_count),
                 ),
             ]
+        )
+
+        # Push em tempo real (`/ws/live`): notifica que um ciclo de coleta terminou para esta
+        # instancia — nao publicado quando o ciclo e suprimido por janela de manutencao (return
+        # antecipado acima, antes deste ponto).
+        event_bus.publish(
+            {
+                "type": "instance_collected",
+                "instance_id": str(self._instance_id),
+                "error_count": error_count,
+                "duration_ms": int(cycle_duration_ms),
+            }
         )
 
     def stop(self) -> None:

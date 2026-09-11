@@ -11,6 +11,7 @@ from datetime import UTC, datetime, time
 from uuid import uuid4
 
 from app.collectors.base import CollectionResult
+from app.core.events import event_bus
 from app.models.instance import Instance, InstanceMaintenanceWindow
 from app.normalizers.metric_names import COLLECTOR_CYCLE_DURATION_MS, COLLECTOR_CYCLE_ERROR_COUNT
 from app.normalizers.models import (
@@ -211,6 +212,78 @@ async def test_run_cycle_records_error_telemetry_when_collect_raises() -> None:
     telemetry_batch = metric_repo.batches[0]
     error_sample = next(s for s in telemetry_batch if s.metric_name == COLLECTOR_CYCLE_ERROR_COUNT)
     assert error_sample.value == 1.0
+
+
+async def test_run_cycle_publishes_instance_collected_event() -> None:
+    """`_run_cycle()` publica um evento `instance_collected` no `event_bus` real (singleton do
+    modulo) — push em tempo real via `/ws/live`. Usa `event_bus.subscribe()` (mesmo singleton
+    usado por `app/api/v1/websocket.py`), sem fake: e o objeto real do processo."""
+    instance_id = uuid4()
+    result = _build_result(instance_id)
+    collector = _FakeCollector(result=result)
+    metric_repo = _FakeMetricSamplesRepository()
+    query_repo = _FakeQuerySamplesRepository()
+    blocking_repo = _FakeBlockingEventsRepository()
+    instances_repo = _FakeInstancesRepository(instance=None)
+
+    worker = PollingWorker(
+        instance_id, collector, 10, metric_repo, query_repo, blocking_repo, instances_repo
+    )
+
+    queue = event_bus.subscribe()
+    try:
+        await worker._run_cycle()
+        event = await asyncio.wait_for(queue.get(), timeout=1)
+    finally:
+        event_bus.unsubscribe(queue)
+
+    assert event["type"] == "instance_collected"
+    assert event["instance_id"] == str(instance_id)
+    assert event["error_count"] == 0
+    assert event["duration_ms"] >= 0
+
+
+async def test_run_cycle_does_not_publish_event_during_maintenance_window() -> None:
+    instance_id = uuid4()
+    now = datetime.now(UTC)
+    schema_day_of_week = (now.weekday() + 1) % 7
+
+    instance = Instance(
+        id=instance_id,
+        name="instancia-em-manutencao-evento",
+        db_type="postgresql",
+        host="127.0.0.1",
+        port=5432,
+        criticality="standard",
+        polling_interval_seconds=10,
+        auth_method="integrated",
+    )
+    instance.maintenance_windows = [
+        InstanceMaintenanceWindow(
+            instance_id=instance_id,
+            day_of_week=schema_day_of_week,
+            start_time=time(0, 0, 0),
+            end_time=time(23, 59, 59),
+            suppress_polling=True,
+        )
+    ]
+
+    collector = _FakeCollector(result=_build_result(instance_id))
+    metric_repo = _FakeMetricSamplesRepository()
+    query_repo = _FakeQuerySamplesRepository()
+    blocking_repo = _FakeBlockingEventsRepository()
+    instances_repo = _FakeInstancesRepository(instance=instance)
+
+    worker = PollingWorker(
+        instance_id, collector, 10, metric_repo, query_repo, blocking_repo, instances_repo
+    )
+
+    queue = event_bus.subscribe()
+    try:
+        await worker._run_cycle()
+        assert queue.empty()
+    finally:
+        event_bus.unsubscribe(queue)
 
 
 async def test_run_stops_promptly_after_stop_is_called() -> None:

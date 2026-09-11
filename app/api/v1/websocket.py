@@ -1,9 +1,10 @@
 """Canal de live update — `Docs/specs/02-backend-contract.md`, ARCHITECTURE_SPEC.md Q4.
 
 `/ws/live` assina o `app.core.events.event_bus` (singleton in-process) e faz broadcast de
-eventos de alerta publicados por `app.workers.alerting_worker` (criacao/atualizacao de `Alert`) a
-todos os clientes conectados. CORTE DE ESCOPO: so alertas publicam evento nesta etapa —
-instancias/metricas continuam sendo consultadas via polling do frontend, sem push aqui.
+qualquer evento publicado nele a todos os clientes conectados — hoje, eventos de alerta
+publicados por `app.workers.alerting_worker` (criacao/atualizacao de `Alert`) e eventos de ciclo
+de coleta (`instance_collected`) publicados por `app.workers.polling_worker` ao final de cada
+`_run_cycle()`.
 """
 
 from __future__ import annotations

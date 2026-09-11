@@ -100,3 +100,139 @@ async def test_top_sql_aggregates_execution_count_and_wait_time(
     assert body[0]["total_wait_time_ms"] == 200
     assert body[0]["predominant_wait_type"] == WaitCategory.IO.value
     assert body[0]["instance_id"] == str(test_instance.id)
+
+
+async def test_list_databases_aggregates_by_database_name(
+    client: AsyncClient, db_session: AsyncSession, test_instance: Instance
+) -> None:
+    repo = QuerySamplesRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-db-a",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_a",
+                wait_time_ms=100,
+            ),
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-db-b",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_b",
+                wait_time_ms=50,
+            ),
+        ]
+    )
+
+    response = await client.get(f"/api/v1/queries/databases/{test_instance.id}")
+
+    assert response.status_code == 200
+    body = response.json()
+    by_database = {row["database_name"]: row for row in body}
+    assert set(by_database) == {"db_a", "db_b"}
+    assert by_database["db_a"]["execution_count"] == 1
+    assert by_database["db_a"]["total_wait_time_ms"] == 100
+    assert by_database["db_b"]["total_wait_time_ms"] == 50
+
+
+async def test_top_sql_filters_by_database_name_query_param(
+    client: AsyncClient, db_session: AsyncSession, test_instance: Instance
+) -> None:
+    repo = QuerySamplesRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-shared",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_a",
+                wait_time_ms=100,
+            ),
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-shared",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_b",
+                wait_time_ms=200,
+            ),
+        ]
+    )
+
+    response = await client.get(
+        f"/api/v1/queries/top-sql/{test_instance.id}", params={"database_name": "db_a"}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 1
+    assert body[0]["sql_hash"] == "hash-shared"
+    assert body[0]["database_name"] == "db_a"
+    assert body[0]["execution_count"] == 1
+    assert body[0]["total_wait_time_ms"] == 100
+
+
+async def test_get_query_detail_returns_raw_samples(
+    client: AsyncClient, db_session: AsyncSession, test_instance: Instance
+) -> None:
+    repo = QuerySamplesRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-detail",
+                sql_name="query-detail",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_a",
+                session_id="1",
+                wait_time_ms=10,
+            ),
+            NormalizedQuerySample(
+                # No PASSADO (nao `now + ...`) — o endpoint usa a janela padrao (`until` = agora
+                # no momento da requisicao, alguns milissegundos depois deste `now`); ver
+                # comentario identico em `test_top_sql_aggregates_execution_count_and_wait_time`.
+                time=now - timedelta(seconds=1),
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-detail",
+                sql_name="query-detail",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_a",
+                session_id="2",
+                wait_time_ms=20,
+            ),
+        ]
+    )
+
+    response = await client.get(f"/api/v1/queries/detail/{test_instance.id}/hash-detail")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["instance_id"] == str(test_instance.id)
+    assert body["sql_hash"] == "hash-detail"
+    assert body["sql_name"] == "query-detail"
+    assert body["database_name"] == "db_a"
+    assert len(body["samples"]) == 2
+    session_ids = {s["session_id"] for s in body["samples"]}
+    assert session_ids == {"1", "2"}
+
+
+async def test_get_query_detail_returns_404_when_no_samples(
+    client: AsyncClient, test_instance: Instance
+) -> None:
+    response = await client.get(f"/api/v1/queries/detail/{test_instance.id}/hash-does-not-exist")
+
+    assert response.status_code == 404
