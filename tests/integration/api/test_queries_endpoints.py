@@ -289,7 +289,7 @@ async def test_list_databases_by_day_groups_by_utc_day(
 
     assert response.status_code == 200
     body = response.json()
-    by_day = {entry["day"][:10]: entry for entry in body}
+    by_day = {entry["bucket_start"][:10]: entry for entry in body}
     assert by_day["2026-09-01"]["label"] == "db_a"
     assert by_day["2026-09-01"]["total_wait_time_ms"] == 100
     assert by_day["2026-09-02"]["total_wait_time_ms"] == 50
@@ -319,6 +319,85 @@ async def test_list_top_sql_by_day_groups_by_utc_day(
         params={
             "from": (day1 - timedelta(days=1)).isoformat(),
             "to": (day1 + timedelta(days=1)).isoformat(),
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 1
+    assert body[0]["label"] == "hash-a"
+    assert body[0]["total_wait_time_ms"] == 100
+
+
+async def test_list_databases_by_hour_groups_by_utc_hour(
+    client: AsyncClient, db_session: AsyncSession, test_instance: Instance
+) -> None:
+    repo = QuerySamplesRepository(db_session)
+    hour10 = datetime(2026, 9, 1, 10, 0, tzinfo=UTC)
+    hour11 = datetime(2026, 9, 1, 11, 0, tzinfo=UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=hour10,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-a",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_a",
+                wait_time_ms=100,
+            ),
+            NormalizedQuerySample(
+                time=hour11,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-b",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_b",
+                wait_time_ms=20,
+            ),
+        ]
+    )
+
+    response = await client.get(
+        f"/api/v1/queries/databases-by-hour/{test_instance.id}",
+        params={
+            "from": (hour10 - timedelta(hours=1)).isoformat(),
+            "to": (hour11 + timedelta(hours=1)).isoformat(),
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    by_hour = {entry["bucket_start"][:13]: entry for entry in body}
+    assert by_hour["2026-09-01T10"]["label"] == "db_a"
+    assert by_hour["2026-09-01T10"]["total_wait_time_ms"] == 100
+    assert by_hour["2026-09-01T11"]["label"] == "db_b"
+
+
+async def test_list_top_sql_by_hour_groups_by_utc_hour(
+    client: AsyncClient, db_session: AsyncSession, test_instance: Instance
+) -> None:
+    repo = QuerySamplesRepository(db_session)
+    hour10 = datetime(2026, 9, 1, 10, 0, tzinfo=UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=hour10,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-a",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_a",
+                wait_time_ms=100,
+            ),
+        ]
+    )
+
+    response = await client.get(
+        f"/api/v1/queries/top-sql-by-hour/{test_instance.id}",
+        params={
+            "from": (hour10 - timedelta(hours=1)).isoformat(),
+            "to": (hour10 + timedelta(hours=1)).isoformat(),
         },
     )
 

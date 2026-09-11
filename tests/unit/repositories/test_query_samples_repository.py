@@ -447,11 +447,11 @@ async def test_wait_breakdown_by_sql_hash_groups_by_native_wait_type(
     }
 
 
-async def test_wait_time_by_day_and_database_groups_by_utc_day(
+async def test_wait_time_by_bucket_and_database_groups_by_utc_day(
     db_session: AsyncSession, test_instance: Instance
 ) -> None:
-    """`wait_time_by_day_and_database` agrupa por dia calendario UTC + banco — visao historica
-    "Tudo" do nivel 1 (um dia por barra, empilhada por banco)."""
+    """`wait_time_by_bucket_and_database` (bucket="day", default) agrupa por dia calendario UTC +
+    banco — visao historica "Tudo" do nivel 1 (um dia por barra, empilhada por banco)."""
     repo = QuerySamplesRepository(db_session)
     day1 = datetime(2026, 9, 1, 10, 0, tzinfo=UTC)
     day2 = datetime(2026, 9, 2, 10, 0, tzinfo=UTC)
@@ -487,25 +487,25 @@ async def test_wait_time_by_day_and_database_groups_by_utc_day(
         ]
     )
 
-    rows = await repo.wait_time_by_day_and_database(
+    rows = await repo.wait_time_by_bucket_and_database(
         test_instance.id,
         since=day1 - timedelta(days=1),
         until=day2 + timedelta(days=1),
         limit=10,
     )
 
-    by_key = {(row.day.date(), row.database_name): row.total_wait_time_ms for row in rows}
+    by_key = {(row.bucket_start.date(), row.database_name): row.total_wait_time_ms for row in rows}
     assert by_key[(day1.date(), "db_a")] == 100
     assert by_key[(day1.date(), "db_b")] == 20
     assert by_key[(day2.date(), "db_a")] == 50
 
 
-async def test_wait_time_by_day_and_sql_hash_groups_by_utc_day(
+async def test_wait_time_by_bucket_and_sql_hash_groups_by_utc_day(
     db_session: AsyncSession, test_instance: Instance
 ) -> None:
-    """`wait_time_by_day_and_sql_hash` agrupa por dia calendario UTC + `sql_hash` — visao
-    historica "Tudo" do nivel 2 (um dia por barra, empilhada por query), com filtro opcional de
-    `database_name` (mesmo padrao de `top_sql()`)."""
+    """`wait_time_by_bucket_and_sql_hash` (bucket="day", default) agrupa por dia calendario UTC +
+    `sql_hash` — visao historica "Tudo" do nivel 2 (um dia por barra, empilhada por query), com
+    filtro opcional de `database_name` (mesmo padrao de `top_sql()`)."""
     repo = QuerySamplesRepository(db_session)
     day1 = datetime(2026, 9, 1, 10, 0, tzinfo=UTC)
     await repo.insert_batch(
@@ -531,18 +531,18 @@ async def test_wait_time_by_day_and_sql_hash_groups_by_utc_day(
         ]
     )
 
-    rows = await repo.wait_time_by_day_and_sql_hash(
+    rows = await repo.wait_time_by_bucket_and_sql_hash(
         test_instance.id,
         since=day1 - timedelta(days=1),
         until=day1 + timedelta(days=1),
         limit=10,
     )
-    assert {(row.day.date(), row.sql_hash, row.total_wait_time_ms) for row in rows} == {
+    assert {(row.bucket_start.date(), row.sql_hash, row.total_wait_time_ms) for row in rows} == {
         (day1.date(), "hash-a", 100),
         (day1.date(), "hash-b", 20),
     }
 
-    filtered = await repo.wait_time_by_day_and_sql_hash(
+    filtered = await repo.wait_time_by_bucket_and_sql_hash(
         test_instance.id,
         since=day1 - timedelta(days=1),
         until=day1 + timedelta(days=1),
@@ -550,6 +550,67 @@ async def test_wait_time_by_day_and_sql_hash_groups_by_utc_day(
         database_name="db_b",
     )
     assert {(row.sql_hash, row.total_wait_time_ms) for row in filtered} == {("hash-b", 20)}
+
+
+async def test_wait_time_by_bucket_and_database_groups_by_utc_hour(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """`wait_time_by_bucket_and_database(bucket="hour")` agrupa por hora UTC + banco —
+    detalhamento por hora dentro de um dia (passo intermediario entre "Tudo" e o grafico de um
+    dia inteiro)."""
+    repo = QuerySamplesRepository(db_session)
+    hour10 = datetime(2026, 9, 1, 10, 0, tzinfo=UTC)
+    hour11 = datetime(2026, 9, 1, 11, 0, tzinfo=UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=hour10,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-a",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_a",
+                wait_time_ms=100,
+            ),
+            NormalizedQuerySample(
+                time=hour10 + timedelta(minutes=30),
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-a",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_a",
+                wait_time_ms=20,
+            ),
+            NormalizedQuerySample(
+                time=hour11,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-b",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_b",
+                wait_time_ms=50,
+            ),
+        ]
+    )
+
+    rows = await repo.wait_time_by_bucket_and_database(
+        test_instance.id,
+        since=hour10 - timedelta(hours=1),
+        until=hour11 + timedelta(hours=1),
+        limit=10,
+        bucket="hour",
+    )
+
+    # Regressao: `bucket_start` tem que ser timezone-aware, senao o FastAPI serializa sem `Z` e o
+    # navegador interpreta o instante como fuso local (bug real ja encontrado nesta feature).
+    assert all(row.bucket_start.tzinfo is not None for row in rows)
+
+    # `bucket_start` volta como timestamptz aware (UTC) — o `AT TIME ZONE 'UTC'` externo da query
+    # reconverte o timestamp naive intermediario, garantindo que o JSON saia com `Z`/offset (sem
+    # isso, `new Date(...)` no navegador interpretaria o instante como fuso local).
+    by_key = {(row.bucket_start, row.database_name): row.total_wait_time_ms for row in rows}
+    assert by_key[(hour10, "db_a")] == 120
+    assert by_key[(hour11, "db_b")] == 50
 
 
 async def test_top_sql_filters_by_database_name(

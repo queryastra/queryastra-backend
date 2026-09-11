@@ -15,6 +15,10 @@ agregado por `sql_hash` de sempre, agora filtravel por banco) e `GET /detail/{in
 Visao historica "Tudo" (um dia por barra, equivalente ao grafico multi-dia de ferramentas de
 referencia): `GET /databases-by-day/{instance_id}` (nivel 1) e `GET /top-sql-by-day/{instance_id}`
 (nivel 2) — mesma hierarquia, granularidade de dia em vez de agregado unico do periodo.
+
+Detalhamento por hora dentro de um dia (passo intermediario entre "Tudo" e o grafico de um dia
+inteiro, equivalente ao "Interval: 1 hour" de ferramentas de referencia): `GET
+/databases-by-hour/{instance_id}` (nivel 1) e `GET /top-sql-by-hour/{instance_id}` (nivel 2).
 """
 
 from __future__ import annotations
@@ -88,13 +92,15 @@ class DatabaseSummaryResponse(BaseModel):
     wait_breakdown: list[WaitBreakdownEntryResponse]
 
 
-class DayEntryResponse(BaseModel):
-    """Uma fatia (dia, entidade) do grafico historico "Tudo" — `day` e sempre meia-noite UTC
-    daquele dia calendario (`date_trunc('day', time AT TIME ZONE 'UTC')`); `label` e
-    `database_name` em `/databases-by-day` ou `sql_hash` em `/top-sql-by-day`. Retornado plano (nao
-    agrupado por dia) — o cliente agrupa por `day` para montar a barra empilhada daquele dia."""
+class BucketEntryResponse(BaseModel):
+    """Uma fatia (bucket de tempo, entidade) dos graficos historicos por periodo — usado tanto
+    pela visao "Tudo" (`bucket_start` e meia-noite UTC de um dia calendario, um dia por barra)
+    quanto pelo detalhamento por hora dentro de um dia (`bucket_start` e o inicio de uma hora
+    UTC). `label` e `database_name` nas rotas `*databases*` ou `sql_hash` nas rotas `*top-sql*`.
+    Retornado plano (nao agrupado) — o cliente agrupa por `bucket_start` para montar cada barra
+    empilhada."""
 
-    day: datetime
+    bucket_start: datetime
     label: str
     total_wait_time_ms: int
 
@@ -250,13 +256,13 @@ async def list_databases(
     ]
 
 
-@router.get("/databases-by-day/{instance_id}", response_model=list[DayEntryResponse])
+@router.get("/databases-by-day/{instance_id}", response_model=list[BucketEntryResponse])
 async def list_databases_by_day(
     instance_id: UUID,
     repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
     since: Annotated[datetime | None, Query(alias="from")] = None,
     until: Annotated[datetime | None, Query(alias="to")] = None,
-) -> list[DayEntryResponse]:
+) -> list[BucketEntryResponse]:
     """Visao historica "Tudo" do nivel 1 (Instancia -> Banco -> Query): um dia por barra,
     empilhada por banco de dados — equivalente ao grafico multi-dia de ferramentas de
     referencia (ex.: SolarWinds DPA "Top SQL" por periodo). `label` e `database_name`."""
@@ -264,25 +270,27 @@ async def list_databases_by_day(
     resolved_since, resolved_until = resolve_time_window(
         since, until, timedelta(seconds=settings.api_read_default_lookback_seconds)
     )
-    rows = await repository.wait_time_by_day_and_database(
-        instance_id, resolved_since, resolved_until, settings.api_read_max_rows
+    rows = await repository.wait_time_by_bucket_and_database(
+        instance_id, resolved_since, resolved_until, settings.api_read_max_rows, bucket="day"
     )
     return [
-        DayEntryResponse(
-            day=row.day, label=row.database_name, total_wait_time_ms=row.total_wait_time_ms
+        BucketEntryResponse(
+            bucket_start=row.bucket_start,
+            label=row.database_name,
+            total_wait_time_ms=row.total_wait_time_ms,
         )
         for row in rows
     ]
 
 
-@router.get("/top-sql-by-day/{instance_id}", response_model=list[DayEntryResponse])
+@router.get("/top-sql-by-day/{instance_id}", response_model=list[BucketEntryResponse])
 async def list_top_sql_by_day(
     instance_id: UUID,
     repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
     since: Annotated[datetime | None, Query(alias="from")] = None,
     until: Annotated[datetime | None, Query(alias="to")] = None,
     database_name: Annotated[str | None, Query()] = None,
-) -> list[DayEntryResponse]:
+) -> list[BucketEntryResponse]:
     """Visao historica "Tudo" do nivel 2 (Instancia -> Banco -> Query): um dia por barra,
     empilhada por query — mesmo `database_name` opcional de `top_sql()`. `label` e `sql_hash`
     (o cliente resolve o rotulo curto/nome, esta rota nao traz `sql_name`/`sql_text_masked` —
@@ -291,15 +299,80 @@ async def list_top_sql_by_day(
     resolved_since, resolved_until = resolve_time_window(
         since, until, timedelta(seconds=settings.api_read_default_lookback_seconds)
     )
-    rows = await repository.wait_time_by_day_and_sql_hash(
+    rows = await repository.wait_time_by_bucket_and_sql_hash(
         instance_id,
         resolved_since,
         resolved_until,
         settings.api_read_max_rows,
         database_name=database_name,
+        bucket="day",
     )
     return [
-        DayEntryResponse(day=row.day, label=row.sql_hash, total_wait_time_ms=row.total_wait_time_ms)
+        BucketEntryResponse(
+            bucket_start=row.bucket_start,
+            label=row.sql_hash,
+            total_wait_time_ms=row.total_wait_time_ms,
+        )
+        for row in rows
+    ]
+
+
+@router.get("/databases-by-hour/{instance_id}", response_model=list[BucketEntryResponse])
+async def list_databases_by_hour(
+    instance_id: UUID,
+    repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
+    since: Annotated[datetime | None, Query(alias="from")] = None,
+    until: Annotated[datetime | None, Query(alias="to")] = None,
+) -> list[BucketEntryResponse]:
+    """Detalhamento por hora do nivel 1, dentro de um dia especifico (`from`/`to` = o dia inteiro
+    escolhido pelo filtro de um unico dia) — passo intermediario entre a visao "Tudo" (um dia por
+    barra) e o grafico por banco de um dia inteiro, equivalente ao "Interval: 1 hour" de
+    ferramentas de referencia (ex.: SolarWinds DPA "Top SQL"). `label` e `database_name`."""
+    settings = get_settings()
+    resolved_since, resolved_until = resolve_time_window(
+        since, until, timedelta(seconds=settings.api_read_default_lookback_seconds)
+    )
+    rows = await repository.wait_time_by_bucket_and_database(
+        instance_id, resolved_since, resolved_until, settings.api_read_max_rows, bucket="hour"
+    )
+    return [
+        BucketEntryResponse(
+            bucket_start=row.bucket_start,
+            label=row.database_name,
+            total_wait_time_ms=row.total_wait_time_ms,
+        )
+        for row in rows
+    ]
+
+
+@router.get("/top-sql-by-hour/{instance_id}", response_model=list[BucketEntryResponse])
+async def list_top_sql_by_hour(
+    instance_id: UUID,
+    repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
+    since: Annotated[datetime | None, Query(alias="from")] = None,
+    until: Annotated[datetime | None, Query(alias="to")] = None,
+    database_name: Annotated[str | None, Query()] = None,
+) -> list[BucketEntryResponse]:
+    """Detalhamento por hora do nivel 2, dentro de um dia especifico — mesma ideia de
+    `list_databases_by_hour`, empilhado por query em vez de banco. `label` e `sql_hash`."""
+    settings = get_settings()
+    resolved_since, resolved_until = resolve_time_window(
+        since, until, timedelta(seconds=settings.api_read_default_lookback_seconds)
+    )
+    rows = await repository.wait_time_by_bucket_and_sql_hash(
+        instance_id,
+        resolved_since,
+        resolved_until,
+        settings.api_read_max_rows,
+        database_name=database_name,
+        bucket="hour",
+    )
+    return [
+        BucketEntryResponse(
+            bucket_start=row.bucket_start,
+            label=row.sql_hash,
+            total_wait_time_ms=row.total_wait_time_ms,
+        )
         for row in rows
     ]
 

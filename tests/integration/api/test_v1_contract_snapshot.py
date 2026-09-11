@@ -31,6 +31,8 @@ EXPECTED_REST_PATHS = {
     "/api/v1/queries/detail/{instance_id}/{sql_hash}",
     "/api/v1/queries/databases-by-day/{instance_id}",
     "/api/v1/queries/top-sql-by-day/{instance_id}",
+    "/api/v1/queries/databases-by-hour/{instance_id}",
+    "/api/v1/queries/top-sql-by-hour/{instance_id}",
     "/api/v1/waits-blocking/blocking/{instance_id}",
     "/api/v1/waits-blocking/waits/{instance_id}",
     "/api/v1/alerts/rules",

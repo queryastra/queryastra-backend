@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 import sqlalchemy as sa
@@ -262,57 +263,79 @@ class QuerySamplesRepository(BaseRepository):
         )
         return list(result.fetchall())
 
-    async def wait_time_by_day_and_database(
-        self, instance_id: UUID, since: datetime, until: datetime, limit: int
+    async def wait_time_by_bucket_and_database(
+        self,
+        instance_id: UUID,
+        since: datetime,
+        until: datetime,
+        limit: int,
+        bucket: Literal["day", "hour"] = "day",
     ) -> list[sa.Row]:
-        """Agrega `query_samples` por (dia, `database_name`) — visao historica "Tudo" do nivel 1
-        do drill-down (um dia calendario por barra, empilhada por banco), equivalente ao grafico
-        multi-dia do "Top SQL" de ferramentas de referencia como o SolarWinds DPA. Dia sempre em
-        UTC (`time AT TIME ZONE 'UTC'`), independente do timezone de sessao do Postgres — corte de
-        escopo deliberado (nao alinha com o dia local do navegador, que so importa no filtro de um
-        unico dia, ja resolvido no frontend). Sem filtro de `since`/`until` restritivo o suficiente,
-        isto varre o historico inteiro de `query_samples` (sem retention policy hoje) — aceitavel
-        no volume atual, mas pode exigir paginacao/particionamento se o historico crescer muito."""
+        """Agrega `query_samples` por (`bucket` de tempo, `database_name`) — visao historica
+        "Tudo" do nivel 1 do drill-down quando `bucket="day"` (um dia calendario por barra,
+        equivalente ao grafico multi-dia do "Top SQL" de ferramentas de referencia como o
+        SolarWinds DPA), ou o detalhamento por hora DENTRO de um dia especifico quando
+        `bucket="hour"` (mesmo `since`/`until` do filtro de um dia unico). `bucket` sempre em UTC
+        (`time AT TIME ZONE 'UTC'`), independente do timezone de sessao do Postgres. O `AT TIME
+        ZONE 'UTC'` externo (envolvendo o `date_trunc` inteiro) converte o timestamp NAIVE de
+        volta pra `timestamptz` — sem isso, asyncpg devolve um datetime Python naive e o FastAPI
+        serializa sem sufixo de fuso (`"2026-09-11T14:00:00"`, sem `Z`/offset), o que faz
+        `new Date(...)` no navegador interpretar o instante como fuso LOCAL em vez de UTC (bug
+        real encontrado ao implementar o `HourBarChart` do frontend — corrigido aqui, na fonte).
+        Sem filtro de `since`/`until` restritivo o suficiente (bucket="day" tipicamente varre
+        tudo), isto pode varrer o historico inteiro de `query_samples` (sem retention policy
+        hoje) — aceitavel no volume atual, mas pode exigir paginacao/particionamento se o
+        historico crescer muito."""
         stmt = sa.text("""
             SELECT
-                date_trunc('day', time AT TIME ZONE 'UTC') AS day,
+                (date_trunc(:bucket, time AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') AS bucket_start,
                 COALESCE(database_name, 'desconhecido') AS database_name,
                 coalesce(sum(wait_time_ms), 0) AS total_wait_time_ms
             FROM query_samples
             WHERE instance_id = :instance_id AND time >= :since AND time <= :until
             GROUP BY
-                date_trunc('day', time AT TIME ZONE 'UTC'),
+                date_trunc(:bucket, time AT TIME ZONE 'UTC'),
                 COALESCE(database_name, 'desconhecido')
-            ORDER BY day, total_wait_time_ms DESC
+            ORDER BY bucket_start, total_wait_time_ms DESC
             LIMIT :limit
         """)
         result = await self._session.execute(
-            stmt, {"instance_id": instance_id, "since": since, "until": until, "limit": limit}
+            stmt,
+            {
+                "instance_id": instance_id,
+                "since": since,
+                "until": until,
+                "limit": limit,
+                "bucket": bucket,
+            },
         )
         return list(result.fetchall())
 
-    async def wait_time_by_day_and_sql_hash(
+    async def wait_time_by_bucket_and_sql_hash(
         self,
         instance_id: UUID,
         since: datetime,
         until: datetime,
         limit: int,
         database_name: str | None = None,
+        bucket: Literal["day", "hour"] = "day",
     ) -> list[sa.Row]:
-        """Agrega `query_samples` por (dia, `sql_hash`) — visao historica "Tudo" do nivel 2 do
-        drill-down (um dia por barra, empilhada por query). Mesmas ressalvas de
-        `wait_time_by_day_and_database` (dia em UTC, sem limite de historico); aceita o mesmo
-        filtro opcional `database_name` de `top_sql()`/`wait_breakdown_by_sql_hash()`."""
+        """Agrega `query_samples` por (`bucket` de tempo, `sql_hash`) — visao historica "Tudo" do
+        nivel 2 do drill-down (`bucket="day"`) ou detalhamento por hora dentro de um dia
+        (`bucket="hour"`). Mesmas ressalvas de `wait_time_by_bucket_and_database` (`bucket_start`
+        convertido de volta pra `timestamptz` via `AT TIME ZONE 'UTC'` externo, pra sair com `Z`
+        no JSON); aceita o mesmo filtro opcional `database_name` de
+        `top_sql()`/`wait_breakdown_by_sql_hash()`."""
         stmt = sa.text("""
             SELECT
-                date_trunc('day', time AT TIME ZONE 'UTC') AS day,
+                (date_trunc(:bucket, time AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') AS bucket_start,
                 sql_hash,
                 coalesce(sum(wait_time_ms), 0) AS total_wait_time_ms
             FROM query_samples
             WHERE instance_id = :instance_id AND time >= :since AND time <= :until
                 AND (CAST(:database_name AS text) IS NULL OR database_name = :database_name)
-            GROUP BY date_trunc('day', time AT TIME ZONE 'UTC'), sql_hash
-            ORDER BY day, total_wait_time_ms DESC
+            GROUP BY date_trunc(:bucket, time AT TIME ZONE 'UTC'), sql_hash
+            ORDER BY bucket_start, total_wait_time_ms DESC
             LIMIT :limit
         """)
         result = await self._session.execute(
@@ -323,6 +346,7 @@ class QuerySamplesRepository(BaseRepository):
                 "until": until,
                 "limit": limit,
                 "database_name": database_name,
+                "bucket": bucket,
             },
         )
         return list(result.fetchall())
