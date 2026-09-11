@@ -270,9 +270,7 @@ async def test_collect_missing_index_suggestions_iterates_per_database(
     do cluster (nao so o banco de manutencao "postgres" usado por `collect()`/
     `check_capabilities()`), ao contrario do resto do coletor, cluster-wide via `pg_stat_activity`/
     `pg_stat_database`."""
-    bootstrap_conn = _FakeMissingIndexConnection(
-        rows=[{"datname": "db_a"}, {"datname": "db_b"}]
-    )
+    bootstrap_conn = _FakeMissingIndexConnection(rows=[{"datname": "db_a"}, {"datname": "db_b"}])
     db_a_conn = _FakeMissingIndexConnection(
         rows=[
             {
@@ -320,9 +318,7 @@ async def test_collect_missing_index_suggestions_skips_database_that_fails_to_co
 ) -> None:
     """Falha de conexao/permissao num banco especifico do cluster nao aborta a checagem dos
     demais bancos — so aquele banco fica sem sugestao."""
-    bootstrap_conn = _FakeMissingIndexConnection(
-        rows=[{"datname": "db_a"}, {"datname": "db_b"}]
-    )
+    bootstrap_conn = _FakeMissingIndexConnection(rows=[{"datname": "db_a"}, {"datname": "db_b"}])
     db_b_conn = _FakeMissingIndexConnection(
         rows=[
             {

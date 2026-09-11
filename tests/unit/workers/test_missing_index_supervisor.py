@@ -7,7 +7,7 @@ Mesmo padrao de fakes de `tests/unit/workers/test_polling_supervisor.py` — sem
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import datetime
 from uuid import uuid4
 
 from app.models.instance import Instance

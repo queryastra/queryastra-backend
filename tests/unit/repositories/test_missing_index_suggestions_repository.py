@@ -41,9 +41,7 @@ async def test_upsert_batch_inserts_new_suggestion(
     assert row.last_seen_at == observed_at
 
     await db_session.execute(
-        delete(MissingIndexSuggestion).where(
-            MissingIndexSuggestion.instance_id == test_instance.id
-        )
+        delete(MissingIndexSuggestion).where(MissingIndexSuggestion.instance_id == test_instance.id)
     )
     await db_session.commit()
 
@@ -87,9 +85,7 @@ async def test_upsert_batch_preserves_first_seen_at_and_updates_rest(
     assert row.detail == {"user_seeks": 100, "user_scans": 5}
 
     await db_session.execute(
-        delete(MissingIndexSuggestion).where(
-            MissingIndexSuggestion.instance_id == test_instance.id
-        )
+        delete(MissingIndexSuggestion).where(MissingIndexSuggestion.instance_id == test_instance.id)
     )
     await db_session.commit()
 
@@ -132,8 +128,6 @@ async def test_list_for_instance_orders_by_impact_score_desc(
     assert [row.table_name for row in rows] == ["public.high_impact", "public.low_impact"]
 
     await db_session.execute(
-        delete(MissingIndexSuggestion).where(
-            MissingIndexSuggestion.instance_id == test_instance.id
-        )
+        delete(MissingIndexSuggestion).where(MissingIndexSuggestion.instance_id == test_instance.id)
     )
     await db_session.commit()

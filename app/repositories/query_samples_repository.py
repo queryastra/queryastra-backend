@@ -61,13 +61,58 @@ class QuerySamplesRepository(BaseRepository):
     janela `[since, until]` pedida — a primeira amostra de uma sessao dentro da janela sempre conta
     o valor cheio, mesmo que seja continuacao de uma espera que comecou ANTES de `since`. Afeta so
     a borda inicial da janela, nao o volume agregado como um todo.
+
+    ## `_BENIGN_WAIT_EVENT_NATIVE` — filtro de waits benignos/de background (2026-09-11)
+
+    Mesmo com `effective_wait_ms`, comparando lado a lado com o SolarWinds DPA na mesma
+    instancia/janela (`Autklinux20`, 16h-17h) o `WAITFOR` de um job do SQL Agent em loop
+    (`AB_DEBITOPARCELAS`/etc.) ainda dominava o total (1.363s de 3.600s na janela, ~38% do
+    tempo) — e o DPA nem mostra `WAITFOR` no grafico de Top Waits. Confirmado via pesquisa que a
+    DPA exclui um conjunto de wait types "benignos"/de infraestrutura por padrao do calculo de
+    wait time (BROKER_EVENTHANDLER, CLR_MANUAL_EVENT, SLEEP_BPOOL_FLUSH, SLEEP_TASK, WAITFOR —
+    THWACK, forum oficial da SolarWinds); a mesma logica documentada por Paul Randal
+    (sqlskills.com, referencia amplamente citada na comunidade de DBAs de SQL Server, cuja lista
+    completa e bem maior — inclui coisas como LAZYWRITER_SLEEP, CHECKPOINT_QUEUE etc.). **NAO
+    usamos a lista completa do Randal**: ela inclui `PREEMPTIVE_OS_FLUSHFILEBUFFERS`, que e
+    justamente o wait tipo #1 no grafico real do DPA (~2.200s na mesma janela) — a DPA claramente
+    NAO ignora esse (nem `WRITELOG`/`PAGEIOLATCH_EX`/`PAGEIOLATCH_SH`, tambem mostrados). Por
+    isso `_BENIGN_WAIT_EVENT_NATIVE` fica restrito ao subconjunto confirmado para a DPA
+    especificamente, mais `BROKER_RECEIVE_WAITFOR` (variante Service Broker do mesmo padrao de
+    job em loop, mesmo mecanismo do `WAITFOR`).
+
+    Zerado (nao removido) dentro de `effective_wait_ms` — uma amostra com wait benigno ainda
+    conta em `execution_count` (a query realmente executou), so nao contribui pro total de wait
+    time, exatamente como uma sessao "rodando" sem espera ativa. Nos metodos que agrupam POR
+    `wait_event_native` (`top_wait_types`, `wait_breakdown_by_database`,
+    `wait_breakdown_by_sql_hash`, `wait_time_by_bucket_and_wait_type`), a linha e excluida do
+    `GROUP BY` inteiramente (nao aparece como "WAITFOR: 0ms" poluindo a lista).
+
+    **Limitacao que este filtro NAO resolve** (documentada, nao corrigida): mesmo depois deste
+    filtro, esperas de I/O curtas e frequentes (`PAGEIOLATCH_EX`/`_SH`, `WRITELOG`,
+    `PREEMPTIVE_OS_FLUSHFILEBUFFERS`) ainda aparecem com magnitude bem menor aqui do que no DPA —
+    o DPA amostra a 1Hz (1x/segundo), enquanto o intervalo de poll padrao aqui e ~10s; esperas
+    breves (poucos ms a poucos segundos) tem uma chance proporcionalmente menor de serem
+    capturadas por um poll a cada 10s do que por um a cada 1s. E uma limitacao estrutural de
+    resolucao de amostragem, nao um bug de agregacao — reduzir `polling_interval_seconds` da
+    instancia (ja configuravel) aproximaria mais os numeros, ao custo de mais overhead na
+    instancia monitorada (ARCHITECTURE_SPEC.md Q3).
     """
+
+    _BENIGN_WAIT_EVENT_NATIVE: tuple[str, ...] = (
+        "WAITFOR",
+        "BROKER_RECEIVE_WAITFOR",
+        "SLEEP_TASK",
+        "CLR_MANUAL_EVENT",
+        "BROKER_EVENTHANDLER",
+        "SLEEP_BPOOL_FLUSH",
+    )
 
     _EFFECTIVE_WAIT_SELECT = """
         SELECT
             time, session_id, sql_hash, sql_name, sql_text_masked, database_name,
             wait_type, wait_event_native,
             CASE
+                WHEN wait_event_native = ANY(:benign_wait_types) THEN 0
                 WHEN session_id IS NOT NULL
                  AND wait_event_native IS NOT NULL
                  AND wait_time_ms IS NOT NULL
@@ -86,7 +131,20 @@ class QuerySamplesRepository(BaseRepository):
     Filtro de `database_name` (quando existe) e aplicado FORA desta CTE (na query externa), nunca
     aqui dentro — a continuidade de uma espera e uma propriedade da sessao fisica, independente de
     banco de dados; filtrar `database_name` antes do `LAG` cortaria a amostra anterior da mesma
-    espera sempre que ela (impossivelmente, mas por seguranca) aparecesse com outro banco."""
+    espera sempre que ela (impossivelmente, mas por seguranca) aparecesse com outro banco. Todo
+    metodo que usa esta CTE deve incluir `"benign_wait_types": list(self._BENIGN_WAIT_EVENT_NATIVE)`
+    no dict de params."""
+
+    _NOT_BENIGN_WAIT_FILTER = (
+        "(wait_event_native IS NULL OR wait_event_native <> ALL(:benign_wait_types))"
+    )
+    """Fragmento de `WHERE` usado pelos metodos que agrupam POR `wait_event_native`
+    (`top_wait_types`, `wait_breakdown_by_database`, `wait_breakdown_by_sql_hash`,
+    `wait_time_by_bucket_and_wait_type`) — exclui a linha do `GROUP BY` inteiramente em vez de so
+    zerar `effective_wait_ms` (que a CTE `effective` ja faz), pra nao poluir a lista com uma
+    entrada "WAITFOR: 0ms". `wait_event_native IS NULL` precisa ser tratado explicitamente:
+    `NULL <> ALL(array)` avalia pra `NULL` (nao `TRUE`), o que um `WHERE` trataria como exclusao —
+    sem essa clausula extra, toda amostra sem wait ativo desapareceria da lista."""
 
     async def insert_batch(self, samples: list[NormalizedQuerySample]) -> None:
         if not samples:
@@ -205,7 +263,7 @@ class QuerySamplesRepository(BaseRepository):
             wait_counts AS (
                 SELECT sql_hash, wait_type, count(*) AS wait_count
                 FROM filtered
-                WHERE wait_type IS NOT NULL
+                WHERE wait_type IS NOT NULL AND {self._NOT_BENIGN_WAIT_FILTER}
                 GROUP BY sql_hash, wait_type
             ),
             wait_mode AS (
@@ -231,6 +289,7 @@ class QuerySamplesRepository(BaseRepository):
                 "until": until,
                 "limit": limit,
                 "database_name": database_name,
+                "benign_wait_types": list(self._BENIGN_WAIT_EVENT_NATIVE),
             },
         )
         return list(result.fetchall())
@@ -258,7 +317,14 @@ class QuerySamplesRepository(BaseRepository):
         """
         )
         result = await self._session.execute(
-            stmt, {"instance_id": instance_id, "since": since, "until": until, "limit": limit}
+            stmt,
+            {
+                "instance_id": instance_id,
+                "since": since,
+                "until": until,
+                "limit": limit,
+                "benign_wait_types": list(self._BENIGN_WAIT_EVENT_NATIVE),
+            },
         )
         return list(result.fetchall())
 
@@ -270,7 +336,9 @@ class QuerySamplesRepository(BaseRepository):
         dimensao (um tipo de espera nao se decompoe em mais nada, ao contrario de banco/query, que
         se decompoem por wait nativo). `wait_event_native` NULL vira 'desconhecido' (COALESCE),
         nunca descartado. `total_wait_time_ms`/`avg_wait_time_ms` somam/promediam
-        `effective_wait_ms` (delta real por amostra) — ver docstring da classe."""
+        `effective_wait_ms` (delta real por amostra) — ver docstring da classe. Waits benignos/de
+        background (`_BENIGN_WAIT_EVENT_NATIVE`) sao excluidos do `GROUP BY` inteiramente (nao
+        aparecem como "WAITFOR: 0ms")."""
         stmt = sa.text(
             f"""
             WITH effective AS ({self._EFFECTIVE_WAIT_SELECT})
@@ -280,13 +348,21 @@ class QuerySamplesRepository(BaseRepository):
                 coalesce(sum(effective_wait_ms), 0) AS total_wait_time_ms,
                 coalesce(avg(effective_wait_ms), 0) AS avg_wait_time_ms
             FROM effective
+            WHERE {self._NOT_BENIGN_WAIT_FILTER}
             GROUP BY COALESCE(wait_event_native, 'desconhecido')
             ORDER BY total_wait_time_ms DESC
             LIMIT :limit
         """
         )
         result = await self._session.execute(
-            stmt, {"instance_id": instance_id, "since": since, "until": until, "limit": limit}
+            stmt,
+            {
+                "instance_id": instance_id,
+                "since": since,
+                "until": until,
+                "limit": limit,
+                "benign_wait_types": list(self._BENIGN_WAIT_EVENT_NATIVE),
+            },
         )
         return list(result.fetchall())
 
@@ -301,7 +377,8 @@ class QuerySamplesRepository(BaseRepository):
         banco, nao so a categoria agregada. `database_name`/`wait_event_native`
         NULL viram 'desconhecido' (COALESCE), nunca descartados — mesmo padrao de
         `top_sql_by_database`. `total_wait_time_ms` soma `effective_wait_ms` (delta real por
-        amostra) — ver docstring da classe."""
+        amostra) — ver docstring da classe. Waits benignos/de background excluidos do `GROUP BY`
+        inteiramente (ver `_NOT_BENIGN_WAIT_FILTER`)."""
         stmt = sa.text(
             f"""
             WITH effective AS ({self._EFFECTIVE_WAIT_SELECT})
@@ -310,6 +387,7 @@ class QuerySamplesRepository(BaseRepository):
                 COALESCE(wait_event_native, 'desconhecido') AS wait_event_native,
                 coalesce(sum(effective_wait_ms), 0) AS total_wait_time_ms
             FROM effective
+            WHERE {self._NOT_BENIGN_WAIT_FILTER}
             GROUP BY
                 COALESCE(database_name, 'desconhecido'),
                 COALESCE(wait_event_native, 'desconhecido')
@@ -318,7 +396,14 @@ class QuerySamplesRepository(BaseRepository):
         """
         )
         result = await self._session.execute(
-            stmt, {"instance_id": instance_id, "since": since, "until": until, "limit": limit}
+            stmt,
+            {
+                "instance_id": instance_id,
+                "since": since,
+                "until": until,
+                "limit": limit,
+                "benign_wait_types": list(self._BENIGN_WAIT_EVENT_NATIVE),
+            },
         )
         return list(result.fetchall())
 
@@ -336,7 +421,8 @@ class QuerySamplesRepository(BaseRepository):
         `database_name`; aceita o mesmo filtro opcional `database_name` de `top_sql()` (nivel 2
         so quer a decomposicao das queries daquele banco). `database_name` e filtrado apos a CTE
         `effective` (nao antes, ver docstring da classe). `total_wait_time_ms` soma
-        `effective_wait_ms` (delta real por amostra)."""
+        `effective_wait_ms` (delta real por amostra). Waits benignos/de background excluidos do
+        `GROUP BY` inteiramente (ver `_NOT_BENIGN_WAIT_FILTER`)."""
         stmt = sa.text(
             f"""
             WITH effective AS ({self._EFFECTIVE_WAIT_SELECT})
@@ -346,6 +432,7 @@ class QuerySamplesRepository(BaseRepository):
                 coalesce(sum(effective_wait_ms), 0) AS total_wait_time_ms
             FROM effective
             WHERE (CAST(:database_name AS text) IS NULL OR database_name = :database_name)
+                AND {self._NOT_BENIGN_WAIT_FILTER}
             GROUP BY sql_hash, COALESCE(wait_event_native, 'desconhecido')
             ORDER BY sql_hash, total_wait_time_ms DESC
             LIMIT :limit
@@ -359,6 +446,7 @@ class QuerySamplesRepository(BaseRepository):
                 "until": until,
                 "limit": limit,
                 "database_name": database_name,
+                "benign_wait_types": list(self._BENIGN_WAIT_EVENT_NATIVE),
             },
         )
         return list(result.fetchall())
@@ -412,6 +500,7 @@ class QuerySamplesRepository(BaseRepository):
                 "until": until,
                 "limit": limit,
                 "bucket": bucket,
+                "benign_wait_types": list(self._BENIGN_WAIT_EVENT_NATIVE),
             },
         )
         return list(result.fetchall())
@@ -456,6 +545,7 @@ class QuerySamplesRepository(BaseRepository):
                 "limit": limit,
                 "database_name": database_name,
                 "bucket": bucket,
+                "benign_wait_types": list(self._BENIGN_WAIT_EVENT_NATIVE),
             },
         )
         return list(result.fetchall())
@@ -473,7 +563,8 @@ class QuerySamplesRepository(BaseRepository):
         (`bucket="hour"`). Mesmas ressalvas de `wait_time_by_bucket_and_database` (`bucket_start`
         convertido de volta pra `timestamptz` via `AT TIME ZONE 'UTC'` externo).
         `total_wait_time_ms` soma `effective_wait_ms` (delta real por amostra) — ver docstring da
-        classe."""
+        classe. Waits benignos/de background excluidos do `GROUP BY` inteiramente (ver
+        `_NOT_BENIGN_WAIT_FILTER`)."""
         stmt = sa.text(
             f"""
             WITH effective AS ({self._EFFECTIVE_WAIT_SELECT})
@@ -482,6 +573,7 @@ class QuerySamplesRepository(BaseRepository):
                 COALESCE(wait_event_native, 'desconhecido') AS wait_event_native,
                 coalesce(sum(effective_wait_ms), 0) AS total_wait_time_ms
             FROM effective
+            WHERE {self._NOT_BENIGN_WAIT_FILTER}
             GROUP BY
                 date_trunc(:bucket, time AT TIME ZONE 'UTC'),
                 COALESCE(wait_event_native, 'desconhecido')
@@ -497,6 +589,7 @@ class QuerySamplesRepository(BaseRepository):
                 "until": until,
                 "limit": limit,
                 "bucket": bucket,
+                "benign_wait_types": list(self._BENIGN_WAIT_EVENT_NATIVE),
             },
         )
         return list(result.fetchall())
@@ -542,7 +635,13 @@ class QuerySamplesRepository(BaseRepository):
         """
         )
         result = await self._session.execute(
-            stmt, {"instance_id": instance_id, "since": since, "until": until}
+            stmt,
+            {
+                "instance_id": instance_id,
+                "since": since,
+                "until": until,
+                "benign_wait_types": list(self._BENIGN_WAIT_EVENT_NATIVE),
+            },
         )
         return list(result.fetchall())
 

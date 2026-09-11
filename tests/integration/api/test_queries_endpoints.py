@@ -421,7 +421,7 @@ async def test_list_wait_types_aggregates_by_wait_event_native(
                 engine="sqlserver",
                 sql_hash="hash-a",
                 sql_text_masked="SELECT ? FROM t",
-                wait_event_native="WAITFOR",
+                wait_event_native="ASYNC_NETWORK_IO",
                 wait_time_ms=100,
             ),
             NormalizedQuerySample(
@@ -441,8 +441,8 @@ async def test_list_wait_types_aggregates_by_wait_event_native(
     assert response.status_code == 200
     body = response.json()
     by_type = {row["wait_event_native"]: row for row in body}
-    assert set(by_type) == {"WAITFOR", "PAGEIOLATCH_SH"}
-    assert by_type["WAITFOR"]["total_wait_time_ms"] == 100
+    assert set(by_type) == {"ASYNC_NETWORK_IO", "PAGEIOLATCH_SH"}
+    assert by_type["ASYNC_NETWORK_IO"]["total_wait_time_ms"] == 100
     assert by_type["PAGEIOLATCH_SH"]["total_wait_time_ms"] == 50
 
 
@@ -459,7 +459,7 @@ async def test_list_wait_types_by_day_groups_by_utc_day(
                 engine="sqlserver",
                 sql_hash="hash-a",
                 sql_text_masked="SELECT ? FROM t",
-                wait_event_native="WAITFOR",
+                wait_event_native="ASYNC_NETWORK_IO",
                 wait_time_ms=100,
             ),
         ]
@@ -476,7 +476,7 @@ async def test_list_wait_types_by_day_groups_by_utc_day(
     assert response.status_code == 200
     body = response.json()
     assert len(body) == 1
-    assert body[0]["label"] == "WAITFOR"
+    assert body[0]["label"] == "ASYNC_NETWORK_IO"
     assert body[0]["total_wait_time_ms"] == 100
     assert body[0]["bucket_start"].endswith("Z") or "+" in body[0]["bucket_start"]
 
@@ -494,7 +494,7 @@ async def test_list_wait_types_by_hour_groups_by_utc_hour(
                 engine="sqlserver",
                 sql_hash="hash-a",
                 sql_text_masked="SELECT ? FROM t",
-                wait_event_native="WAITFOR",
+                wait_event_native="ASYNC_NETWORK_IO",
                 wait_time_ms=100,
             ),
         ]
@@ -511,5 +511,5 @@ async def test_list_wait_types_by_hour_groups_by_utc_hour(
     assert response.status_code == 200
     body = response.json()
     assert len(body) == 1
-    assert body[0]["label"] == "WAITFOR"
+    assert body[0]["label"] == "ASYNC_NETWORK_IO"
     assert body[0]["total_wait_time_ms"] == 100

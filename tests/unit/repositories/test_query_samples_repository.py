@@ -298,7 +298,7 @@ async def test_top_wait_types_groups_by_wait_event_native(
                 engine="sqlserver",
                 sql_hash="hash-a",
                 sql_text_masked="SELECT ? FROM t",
-                wait_event_native="WAITFOR",
+                wait_event_native="ASYNC_NETWORK_IO",
                 wait_time_ms=100,
             ),
             NormalizedQuerySample(
@@ -307,7 +307,7 @@ async def test_top_wait_types_groups_by_wait_event_native(
                 engine="sqlserver",
                 sql_hash="hash-b",
                 sql_text_masked="SELECT ? FROM t",
-                wait_event_native="WAITFOR",
+                wait_event_native="ASYNC_NETWORK_IO",
                 wait_time_ms=50,
             ),
             NormalizedQuerySample(
@@ -330,9 +330,9 @@ async def test_top_wait_types_groups_by_wait_event_native(
     )
 
     by_type = {row.wait_event_native: row for row in rows}
-    assert set(by_type) == {"WAITFOR", "PAGEIOLATCH_SH"}
-    assert by_type["WAITFOR"].execution_count == 2
-    assert by_type["WAITFOR"].total_wait_time_ms == 150
+    assert set(by_type) == {"ASYNC_NETWORK_IO", "PAGEIOLATCH_SH"}
+    assert by_type["ASYNC_NETWORK_IO"].execution_count == 2
+    assert by_type["ASYNC_NETWORK_IO"].total_wait_time_ms == 150
     assert by_type["PAGEIOLATCH_SH"].total_wait_time_ms == 30
 
 
@@ -351,7 +351,7 @@ async def test_wait_time_by_bucket_and_wait_type_groups_by_utc_day(
                 engine="sqlserver",
                 sql_hash="hash-a",
                 sql_text_masked="SELECT ? FROM t",
-                wait_event_native="WAITFOR",
+                wait_event_native="ASYNC_NETWORK_IO",
                 wait_time_ms=100,
             ),
             NormalizedQuerySample(
@@ -375,7 +375,7 @@ async def test_wait_time_by_bucket_and_wait_type_groups_by_utc_day(
 
     assert all(row.bucket_start.tzinfo is not None for row in rows)
     by_type = {row.wait_event_native: row.total_wait_time_ms for row in rows}
-    assert by_type["WAITFOR"] == 100
+    assert by_type["ASYNC_NETWORK_IO"] == 100
     assert by_type["PAGEIOLATCH_SH"] == 20
 
 
@@ -839,7 +839,7 @@ async def test_top_sql_sums_effective_wait_delta_for_continuous_wait_same_sessio
                 sql_hash="hash-continuous",
                 sql_text_masked="SELECT ? FROM t",
                 session_id="sess-1",
-                wait_event_native="WAITFOR",
+                wait_event_native="PAGEIOLATCH_SH",
                 wait_time_ms=100,
             ),
             NormalizedQuerySample(
@@ -849,7 +849,7 @@ async def test_top_sql_sums_effective_wait_delta_for_continuous_wait_same_sessio
                 sql_hash="hash-continuous",
                 sql_text_masked="SELECT ? FROM t",
                 session_id="sess-1",
-                wait_event_native="WAITFOR",
+                wait_event_native="PAGEIOLATCH_SH",
                 wait_time_ms=250,
             ),
             NormalizedQuerySample(
@@ -859,7 +859,7 @@ async def test_top_sql_sums_effective_wait_delta_for_continuous_wait_same_sessio
                 sql_hash="hash-continuous",
                 sql_text_masked="SELECT ? FROM t",
                 session_id="sess-1",
-                wait_event_native="WAITFOR",
+                wait_event_native="PAGEIOLATCH_SH",
                 wait_time_ms=400,
             ),
         ]
@@ -894,7 +894,7 @@ async def test_top_sql_counts_full_value_when_wait_resets_or_changes_type(
                 sql_hash="hash-reset",
                 sql_text_masked="SELECT ? FROM t",
                 session_id="sess-2",
-                wait_event_native="WAITFOR",
+                wait_event_native="LCK_M_S",
                 wait_time_ms=9000,
             ),
             # Wait_time_ms caiu — a espera de 9000ms terminou, uma nova comecou do zero.
@@ -905,7 +905,7 @@ async def test_top_sql_counts_full_value_when_wait_resets_or_changes_type(
                 sql_hash="hash-reset",
                 sql_text_masked="SELECT ? FROM t",
                 session_id="sess-2",
-                wait_event_native="WAITFOR",
+                wait_event_native="LCK_M_S",
                 wait_time_ms=500,
             ),
             # Mesmo crescendo, o tipo de espera mudou — nao e continuacao da anterior.
@@ -994,7 +994,7 @@ async def test_wait_breakdown_by_database_sums_effective_wait_delta(
                 sql_text_masked="SELECT ?",
                 database_name="db_a",
                 session_id="sess-4",
-                wait_event_native="WAITFOR",
+                wait_event_native="PAGEIOLATCH_SH",
                 wait_time_ms=3000,
             ),
             NormalizedQuerySample(
@@ -1005,7 +1005,7 @@ async def test_wait_breakdown_by_database_sums_effective_wait_delta(
                 sql_text_masked="SELECT ?",
                 database_name="db_a",
                 session_id="sess-4",
-                wait_event_native="WAITFOR",
+                wait_event_native="PAGEIOLATCH_SH",
                 wait_time_ms=6500,
             ),
         ]
@@ -1020,7 +1020,7 @@ async def test_wait_breakdown_by_database_sums_effective_wait_delta(
 
     by_key = {(row.database_name, row.wait_event_native): row.total_wait_time_ms for row in rows}
     # 3000 (1a amostra) + 3500 (6500-3000) = 6500 — nao 9500.
-    assert by_key[("db_a", "WAITFOR")] == 6500
+    assert by_key[("db_a", "PAGEIOLATCH_SH")] == 6500
 
 
 async def test_latest_by_session_returns_most_recent_row(
@@ -1057,3 +1057,127 @@ async def test_latest_by_session_returns_most_recent_row(
 
     assert result["session-1"].sql_hash == "hash-new"
     assert result["session-1"].db_user == "new_user"
+
+
+async def test_top_wait_types_excludes_benign_wait_from_group_by(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """`WAITFOR` (job de polling do SQL Agent em loop) e um wait benigno/de background — nao deve
+    aparecer no resultado (nem como linha "WAITFOR: 0ms"), so o wait real."""
+    repo = QuerySamplesRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-a",
+                sql_text_masked="SELECT ? FROM t",
+                wait_event_native="WAITFOR",
+                wait_time_ms=999_999,
+            ),
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-b",
+                sql_text_masked="SELECT ? FROM t",
+                wait_event_native="PAGEIOLATCH_SH",
+                wait_time_ms=30,
+            ),
+        ]
+    )
+
+    rows = await repo.top_wait_types(
+        test_instance.id,
+        since=now - timedelta(minutes=1),
+        until=now + timedelta(minutes=1),
+        limit=10,
+    )
+
+    by_type = {row.wait_event_native: row for row in rows}
+    assert set(by_type) == {"PAGEIOLATCH_SH"}
+
+
+async def test_top_sql_zeroes_wait_time_for_benign_wait_but_keeps_execution_count(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """Uma amostra com wait benigno ainda conta em `execution_count` (a query realmente
+    executou) — so nao contribui pro total de wait time."""
+    repo = QuerySamplesRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-benign",
+                sql_text_masked="SELECT ? FROM t",
+                wait_event_native="WAITFOR",
+                wait_time_ms=500_000,
+            ),
+            NormalizedQuerySample(
+                time=now + timedelta(seconds=1),
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-benign",
+                sql_text_masked="SELECT ? FROM t",
+                wait_event_native="PAGEIOLATCH_SH",
+                wait_time_ms=42,
+            ),
+        ]
+    )
+
+    rows = await repo.top_sql(
+        test_instance.id,
+        since=now - timedelta(minutes=1),
+        until=now + timedelta(minutes=1),
+        limit=10,
+    )
+
+    assert len(rows) == 1
+    assert rows[0].execution_count == 2
+    assert rows[0].total_wait_time_ms == 42
+
+
+async def test_wait_breakdown_by_database_excludes_benign_wait(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    repo = QuerySamplesRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-a",
+                sql_text_masked="SELECT ?",
+                database_name="db_a",
+                wait_event_native="BROKER_RECEIVE_WAITFOR",
+                wait_time_ms=123_456,
+            ),
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-b",
+                sql_text_masked="SELECT ?",
+                database_name="db_a",
+                wait_event_native="WRITELOG",
+                wait_time_ms=77,
+            ),
+        ]
+    )
+
+    rows = await repo.wait_breakdown_by_database(
+        test_instance.id,
+        since=now - timedelta(minutes=1),
+        until=now + timedelta(minutes=1),
+        limit=10,
+    )
+
+    by_key = {(row.database_name, row.wait_event_native): row.total_wait_time_ms for row in rows}
+    assert set(by_key) == {("db_a", "WRITELOG")}
