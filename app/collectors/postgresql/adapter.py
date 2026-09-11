@@ -273,7 +273,6 @@ class PostgreSQLCollector:
             )
 
         start = time.perf_counter()
-        collected_at = self._now()
         settings = get_settings()
 
         conn = await asyncio.wait_for(
@@ -285,6 +284,12 @@ class PostgreSQLCollector:
             session_rows = await self._fetch_rows(
                 conn, _SESSION_ACTIVITY_QUERY, settings.collection_query_timeout_seconds
             )
+            # Carimbado logo apos o fetch de `pg_stat_activity` (nao antes de abrir a conexao,
+            # como era antes) - e o instante que corresponde de fato ao `query_start` que acabamos
+            # de ler dali. Carimbar antes da conexao/`_fetch_version` (que juntos levam ~100-300ms)
+            # fazia `duration_ms = collected_at - query_start` sair negativo sempre que uma sessao
+            # comecava uma query nesse intervalo (query_start ficava depois de collected_at).
+            collected_at = self._now()
             session_rows = session_rows[: settings.collection_max_rows]
 
             blocking_rows = await self._fetch_rows(
@@ -355,7 +360,13 @@ class PostgreSQLCollector:
             sql_hash = hashlib.sha256(masked.encode("utf-8")).hexdigest()
             query_start = row["query_start"]
             duration_ms = (
-                int((collected_at - query_start).total_seconds() * 1000)
+                # `max(0, ...)`: rede residual entre o servidor executar o snapshot de
+                # `pg_stat_activity` e este processo carimbar `collected_at` ainda pode deixar
+                # uma query iniciada nesse intervalo alguns ms "no futuro" - clamp evita duracao
+                # negativa nesse caso raro (a causa principal do problema, o carimbo tirado antes
+                # de sequer abrir a conexao, foi corrigida acima, movendo `collected_at` pra logo
+                # apos este fetch).
+                max(0, int((collected_at - query_start).total_seconds() * 1000))
                 if query_start is not None
                 else None
             )
@@ -405,7 +416,9 @@ class PostgreSQLCollector:
             )
             query_start = blocked_session["query_start"] if blocked_session is not None else None
             wait_time_ms = (
-                int((collected_at - query_start).total_seconds() * 1000)
+                # `max(0, ...)`: mesma razao do clamp em `_build_query_samples` — residual de rede
+                # entre o snapshot no servidor e o carimbo de `collected_at` neste processo.
+                max(0, int((collected_at - query_start).total_seconds() * 1000))
                 if query_start is not None
                 else 0
             )

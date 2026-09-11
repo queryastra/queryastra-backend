@@ -314,6 +314,72 @@ async def test_top_sql_by_database_groups_null_database_name_as_desconhecido(
     assert rows[0].execution_count == 1
 
 
+async def test_wait_breakdown_by_database_groups_by_native_wait_type(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """`wait_breakdown_by_database` decompoe o wait time de cada banco pelo tipo de espera NATIVO
+    (`wait_event_native`) — granularidade maior que o bucket canonico de 9 categorias usado em
+    `wait_summary()` (ex.: `PAGEIOLATCH_SH` continua `PAGEIOLATCH_SH`, nao vira so `IO`)."""
+    repo = QuerySamplesRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-a",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_a",
+                wait_event_native="PAGEIOLATCH_SH",
+                wait_time_ms=100,
+            ),
+            NormalizedQuerySample(
+                time=now + timedelta(seconds=1),
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-b",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_a",
+                wait_event_native="PAGEIOLATCH_SH",
+                wait_time_ms=50,
+            ),
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-c",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_a",
+                wait_event_native="ASYNC_NETWORK_IO",
+                wait_time_ms=30,
+            ),
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-d",
+                sql_text_masked="SELECT ?",
+                database_name="db_b",
+                wait_event_native=None,
+                wait_time_ms=10,
+            ),
+        ]
+    )
+
+    rows = await repo.wait_breakdown_by_database(
+        test_instance.id,
+        since=now - timedelta(minutes=1),
+        until=now + timedelta(minutes=1),
+        limit=10,
+    )
+
+    by_key = {(row.database_name, row.wait_event_native): row.total_wait_time_ms for row in rows}
+    assert by_key[("db_a", "PAGEIOLATCH_SH")] == 150
+    assert by_key[("db_a", "ASYNC_NETWORK_IO")] == 30
+    assert by_key[("db_b", "desconhecido")] == 10
+
+
 async def test_top_sql_filters_by_database_name(
     db_session: AsyncSession, test_instance: Instance
 ) -> None:

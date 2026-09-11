@@ -63,6 +63,14 @@ class TopSqlEntryResponse(BaseModel):
     predominant_wait_type: str | None
 
 
+class DatabaseWaitBreakdownEntryResponse(BaseModel):
+    """Fatia do wait time de um banco, por tipo de espera NATIVO do engine (nao o bucket
+    canonico cross-engine de 9 categorias — granularidade maior, a pedido explicito)."""
+
+    wait_event_native: str
+    total_wait_time_ms: int
+
+
 class DatabaseSummaryResponse(BaseModel):
     """Linha agregada por banco de dados — nivel 1 do drill-down hierarquico (Instancia ->
     Banco -> Query)."""
@@ -71,6 +79,7 @@ class DatabaseSummaryResponse(BaseModel):
     execution_count: int
     total_wait_time_ms: int
     avg_wait_time_ms: float
+    wait_breakdown: list[DatabaseWaitBreakdownEntryResponse]
 
 
 class QuerySampleDetailResponse(BaseModel):
@@ -171,7 +180,11 @@ async def list_databases(
 ) -> list[DatabaseSummaryResponse]:
     """Nivel 1 do drill-down hierarquico (Instancia -> Banco -> Query): agrega `query_samples`
     por `database_name` (GROUP BY database_name), calculado em tempo real. Amostras sem
-    `database_name` sao agrupadas sob a label 'desconhecido', nunca descartadas."""
+    `database_name` sao agrupadas sob a label 'desconhecido', nunca descartadas.
+
+    Cada banco vem com `wait_breakdown`: a mesma soma de wait time decomposta por tipo de espera
+    NATIVO do engine (`wait_event_native`) — para o gráfico de barra empilhada por banco mostrar
+    exatamente quais waits (ex.: `PAGEIOLATCH_SH`, `WAITFOR`) compoem o total daquele banco."""
     settings = get_settings()
     resolved_since, resolved_until = resolve_time_window(
         since, until, timedelta(seconds=settings.api_read_default_lookback_seconds)
@@ -179,7 +192,23 @@ async def list_databases(
     rows = await repository.top_sql_by_database(
         instance_id, resolved_since, resolved_until, settings.api_read_max_rows
     )
-    return [DatabaseSummaryResponse(**row._mapping) for row in rows]
+    breakdown_rows = await repository.wait_breakdown_by_database(
+        instance_id, resolved_since, resolved_until, settings.api_read_max_rows
+    )
+    breakdown_by_database: dict[str, list[DatabaseWaitBreakdownEntryResponse]] = {}
+    for row in breakdown_rows:
+        breakdown_by_database.setdefault(row.database_name, []).append(
+            DatabaseWaitBreakdownEntryResponse(
+                wait_event_native=row.wait_event_native,
+                total_wait_time_ms=row.total_wait_time_ms,
+            )
+        )
+    return [
+        DatabaseSummaryResponse(
+            **row._mapping, wait_breakdown=breakdown_by_database.get(row.database_name, [])
+        )
+        for row in rows
+    ]
 
 
 @router.get("/detail/{instance_id}/{sql_hash}", response_model=QueryDetailResponse)

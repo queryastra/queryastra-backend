@@ -8,7 +8,7 @@ conforme `Docs/collector-queries.md` §1, §2, §5.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -210,6 +210,25 @@ async def test_collect_skips_row_with_null_query(monkeypatch: pytest.MonkeyPatch
 
     assert len(result.query_samples) == 1
     assert result.query_samples[0].session_id == "301"
+
+
+async def test_collect_clamps_duration_ms_to_zero_when_query_start_is_ahead_of_collected_at(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regressao: `collected_at` e carimbado logo apos o fetch de `pg_stat_activity` (dentro de
+    `collect()`), mas ainda pode ficar, por uma margem de rede residual, ligeiramente atras de um
+    `query_start` observado pelo proprio servidor no mesmo instante do snapshot — o que sem clamp
+    produziria `duration_ms` negativo (bug real encontrado em producao antes desta correcao)."""
+    future_query_start = datetime.now(UTC) + timedelta(milliseconds=500)
+    session_rows = [_session_row(pid=400, query="SELECT 1", query_start=future_query_start)]
+    fake_conn = _FakeConnection(version_num=170000, session_rows=session_rows, blocking_rows=[])
+    _patch_connect(monkeypatch, fake_conn)
+
+    collector = PostgreSQLCollector(connection=_CONNECTION, instance_id=uuid4())
+    result = await collector.collect()
+
+    assert len(result.query_samples) == 1
+    assert result.query_samples[0].duration_ms == 0
 
 
 async def test_collect_raises_value_error_without_instance_id() -> None:

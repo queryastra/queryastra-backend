@@ -196,6 +196,35 @@ class QuerySamplesRepository(BaseRepository):
         )
         return list(result.fetchall())
 
+    async def wait_breakdown_by_database(
+        self, instance_id: UUID, since: datetime, until: datetime, limit: int
+    ) -> list[sa.Row]:
+        """Agrega `query_samples` por (`database_name`, `wait_event_native`) — decomposicao do
+        wait time de cada banco (nivel 1 do drill-down) pelo tipo de espera NATIVO do engine (ex.:
+        `PAGEIOLATCH_SH`, `ASYNC_NETWORK_IO` no SQL Server; nomes de `pg_stat_activity.wait_event`
+        no PostgreSQL) — granularidade maior que os 9 buckets canonicos cross-engine de
+        `wait_type` (usados em `wait_summary()`/`WaitTimeBarChart`), a pedido explicito de ver o
+        wait nativo por banco, nao so a categoria agregada. `database_name`/`wait_event_native`
+        NULL viram 'desconhecido' (COALESCE), nunca descartados — mesmo padrao de
+        `top_sql_by_database`."""
+        stmt = sa.text("""
+            SELECT
+                COALESCE(database_name, 'desconhecido') AS database_name,
+                COALESCE(wait_event_native, 'desconhecido') AS wait_event_native,
+                coalesce(sum(wait_time_ms), 0) AS total_wait_time_ms
+            FROM query_samples
+            WHERE instance_id = :instance_id AND time >= :since AND time <= :until
+            GROUP BY
+                COALESCE(database_name, 'desconhecido'),
+                COALESCE(wait_event_native, 'desconhecido')
+            ORDER BY database_name, total_wait_time_ms DESC
+            LIMIT :limit
+        """)
+        result = await self._session.execute(
+            stmt, {"instance_id": instance_id, "since": since, "until": until, "limit": limit}
+        )
+        return list(result.fetchall())
+
     async def query_detail(
         self, instance_id: UUID, sql_hash: str, since: datetime, until: datetime, limit: int
     ) -> list[sa.Row]:

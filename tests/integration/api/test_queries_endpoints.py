@@ -116,6 +116,7 @@ async def test_list_databases_aggregates_by_database_name(
                 sql_hash="hash-db-a",
                 sql_text_masked="SELECT ? FROM t",
                 database_name="db_a",
+                wait_event_native="IO done",
                 wait_time_ms=100,
             ),
             NormalizedQuerySample(
@@ -139,6 +140,13 @@ async def test_list_databases_aggregates_by_database_name(
     assert by_database["db_a"]["execution_count"] == 1
     assert by_database["db_a"]["total_wait_time_ms"] == 100
     assert by_database["db_b"]["total_wait_time_ms"] == 50
+    # Decomposicao por wait nativo (nao o bucket canonico de 9 categorias).
+    assert by_database["db_a"]["wait_breakdown"] == [
+        {"wait_event_native": "IO done", "total_wait_time_ms": 100}
+    ]
+    assert by_database["db_b"]["wait_breakdown"] == [
+        {"wait_event_native": "desconhecido", "total_wait_time_ms": 50}
+    ]
 
 
 async def test_top_sql_filters_by_database_name_query_param(
