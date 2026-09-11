@@ -203,8 +203,8 @@ class QuerySamplesRepository(BaseRepository):
         wait time de cada banco (nivel 1 do drill-down) pelo tipo de espera NATIVO do engine (ex.:
         `PAGEIOLATCH_SH`, `ASYNC_NETWORK_IO` no SQL Server; nomes de `pg_stat_activity.wait_event`
         no PostgreSQL) — granularidade maior que os 9 buckets canonicos cross-engine de
-        `wait_type` (usados em `wait_summary()`/`WaitTimeBarChart`), a pedido explicito de ver o
-        wait nativo por banco, nao so a categoria agregada. `database_name`/`wait_event_native`
+        `wait_type` (usados em `wait_summary()`), a pedido explicito de ver o wait nativo por
+        banco, nao so a categoria agregada. `database_name`/`wait_event_native`
         NULL viram 'desconhecido' (COALESCE), nunca descartados — mesmo padrao de
         `top_sql_by_database`."""
         stmt = sa.text("""
@@ -222,6 +222,108 @@ class QuerySamplesRepository(BaseRepository):
         """)
         result = await self._session.execute(
             stmt, {"instance_id": instance_id, "since": since, "until": until, "limit": limit}
+        )
+        return list(result.fetchall())
+
+    async def wait_breakdown_by_sql_hash(
+        self,
+        instance_id: UUID,
+        since: datetime,
+        until: datetime,
+        limit: int,
+        database_name: str | None = None,
+    ) -> list[sa.Row]:
+        """Agrega `query_samples` por (`sql_hash`, `wait_event_native`) — decomposicao do wait
+        time de cada query (nivel 2 do drill-down) pelo tipo de espera NATIVO do engine. Mesma
+        ideia de `wait_breakdown_by_database`, granularidade `sql_hash` em vez de
+        `database_name`; aceita o mesmo filtro opcional `database_name` de `top_sql()` (nivel 2
+        so quer a decomposicao das queries daquele banco)."""
+        stmt = sa.text("""
+            SELECT
+                sql_hash,
+                COALESCE(wait_event_native, 'desconhecido') AS wait_event_native,
+                coalesce(sum(wait_time_ms), 0) AS total_wait_time_ms
+            FROM query_samples
+            WHERE instance_id = :instance_id AND time >= :since AND time <= :until
+                AND (CAST(:database_name AS text) IS NULL OR database_name = :database_name)
+            GROUP BY sql_hash, COALESCE(wait_event_native, 'desconhecido')
+            ORDER BY sql_hash, total_wait_time_ms DESC
+            LIMIT :limit
+        """)
+        result = await self._session.execute(
+            stmt,
+            {
+                "instance_id": instance_id,
+                "since": since,
+                "until": until,
+                "limit": limit,
+                "database_name": database_name,
+            },
+        )
+        return list(result.fetchall())
+
+    async def wait_time_by_day_and_database(
+        self, instance_id: UUID, since: datetime, until: datetime, limit: int
+    ) -> list[sa.Row]:
+        """Agrega `query_samples` por (dia, `database_name`) — visao historica "Tudo" do nivel 1
+        do drill-down (um dia calendario por barra, empilhada por banco), equivalente ao grafico
+        multi-dia do "Top SQL" de ferramentas de referencia como o SolarWinds DPA. Dia sempre em
+        UTC (`time AT TIME ZONE 'UTC'`), independente do timezone de sessao do Postgres — corte de
+        escopo deliberado (nao alinha com o dia local do navegador, que so importa no filtro de um
+        unico dia, ja resolvido no frontend). Sem filtro de `since`/`until` restritivo o suficiente,
+        isto varre o historico inteiro de `query_samples` (sem retention policy hoje) — aceitavel
+        no volume atual, mas pode exigir paginacao/particionamento se o historico crescer muito."""
+        stmt = sa.text("""
+            SELECT
+                date_trunc('day', time AT TIME ZONE 'UTC') AS day,
+                COALESCE(database_name, 'desconhecido') AS database_name,
+                coalesce(sum(wait_time_ms), 0) AS total_wait_time_ms
+            FROM query_samples
+            WHERE instance_id = :instance_id AND time >= :since AND time <= :until
+            GROUP BY
+                date_trunc('day', time AT TIME ZONE 'UTC'),
+                COALESCE(database_name, 'desconhecido')
+            ORDER BY day, total_wait_time_ms DESC
+            LIMIT :limit
+        """)
+        result = await self._session.execute(
+            stmt, {"instance_id": instance_id, "since": since, "until": until, "limit": limit}
+        )
+        return list(result.fetchall())
+
+    async def wait_time_by_day_and_sql_hash(
+        self,
+        instance_id: UUID,
+        since: datetime,
+        until: datetime,
+        limit: int,
+        database_name: str | None = None,
+    ) -> list[sa.Row]:
+        """Agrega `query_samples` por (dia, `sql_hash`) — visao historica "Tudo" do nivel 2 do
+        drill-down (um dia por barra, empilhada por query). Mesmas ressalvas de
+        `wait_time_by_day_and_database` (dia em UTC, sem limite de historico); aceita o mesmo
+        filtro opcional `database_name` de `top_sql()`/`wait_breakdown_by_sql_hash()`."""
+        stmt = sa.text("""
+            SELECT
+                date_trunc('day', time AT TIME ZONE 'UTC') AS day,
+                sql_hash,
+                coalesce(sum(wait_time_ms), 0) AS total_wait_time_ms
+            FROM query_samples
+            WHERE instance_id = :instance_id AND time >= :since AND time <= :until
+                AND (CAST(:database_name AS text) IS NULL OR database_name = :database_name)
+            GROUP BY date_trunc('day', time AT TIME ZONE 'UTC'), sql_hash
+            ORDER BY day, total_wait_time_ms DESC
+            LIMIT :limit
+        """)
+        result = await self._session.execute(
+            stmt,
+            {
+                "instance_id": instance_id,
+                "since": since,
+                "until": until,
+                "limit": limit,
+                "database_name": database_name,
+            },
         )
         return list(result.fetchall())
 

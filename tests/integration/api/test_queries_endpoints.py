@@ -100,6 +100,10 @@ async def test_top_sql_aggregates_execution_count_and_wait_time(
     assert body[0]["total_wait_time_ms"] == 200
     assert body[0]["predominant_wait_type"] == WaitCategory.IO.value
     assert body[0]["instance_id"] == str(test_instance.id)
+    # Decomposicao por wait nativo (nenhum informado nas 2 amostras -> agrupa em "desconhecido").
+    assert body[0]["wait_breakdown"] == [
+        {"wait_event_native": "desconhecido", "total_wait_time_ms": 200}
+    ]
 
 
 async def test_list_databases_aggregates_by_database_name(
@@ -244,3 +248,82 @@ async def test_get_query_detail_returns_404_when_no_samples(
     response = await client.get(f"/api/v1/queries/detail/{test_instance.id}/hash-does-not-exist")
 
     assert response.status_code == 404
+
+
+async def test_list_databases_by_day_groups_by_utc_day(
+    client: AsyncClient, db_session: AsyncSession, test_instance: Instance
+) -> None:
+    repo = QuerySamplesRepository(db_session)
+    day1 = datetime(2026, 9, 1, 10, 0, tzinfo=UTC)
+    day2 = datetime(2026, 9, 2, 10, 0, tzinfo=UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=day1,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-a",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_a",
+                wait_time_ms=100,
+            ),
+            NormalizedQuerySample(
+                time=day2,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-a",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_a",
+                wait_time_ms=50,
+            ),
+        ]
+    )
+
+    response = await client.get(
+        f"/api/v1/queries/databases-by-day/{test_instance.id}",
+        params={
+            "from": (day1 - timedelta(days=1)).isoformat(),
+            "to": (day2 + timedelta(days=1)).isoformat(),
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    by_day = {entry["day"][:10]: entry for entry in body}
+    assert by_day["2026-09-01"]["label"] == "db_a"
+    assert by_day["2026-09-01"]["total_wait_time_ms"] == 100
+    assert by_day["2026-09-02"]["total_wait_time_ms"] == 50
+
+
+async def test_list_top_sql_by_day_groups_by_utc_day(
+    client: AsyncClient, db_session: AsyncSession, test_instance: Instance
+) -> None:
+    repo = QuerySamplesRepository(db_session)
+    day1 = datetime(2026, 9, 1, 10, 0, tzinfo=UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=day1,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-a",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_a",
+                wait_time_ms=100,
+            ),
+        ]
+    )
+
+    response = await client.get(
+        f"/api/v1/queries/top-sql-by-day/{test_instance.id}",
+        params={
+            "from": (day1 - timedelta(days=1)).isoformat(),
+            "to": (day1 + timedelta(days=1)).isoformat(),
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 1
+    assert body[0]["label"] == "hash-a"
+    assert body[0]["total_wait_time_ms"] == 100

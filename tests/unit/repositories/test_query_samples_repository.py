@@ -380,6 +380,178 @@ async def test_wait_breakdown_by_database_groups_by_native_wait_type(
     assert by_key[("db_b", "desconhecido")] == 10
 
 
+async def test_wait_breakdown_by_sql_hash_groups_by_native_wait_type(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """`wait_breakdown_by_sql_hash` decompoe o wait time de cada query pelo tipo de espera NATIVO
+    — mesma ideia de `wait_breakdown_by_database`, granularidade `sql_hash`."""
+    repo = QuerySamplesRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-a",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_a",
+                wait_event_native="PAGEIOLATCH_SH",
+                wait_time_ms=100,
+            ),
+            NormalizedQuerySample(
+                time=now + timedelta(seconds=1),
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-a",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_a",
+                wait_event_native="ASYNC_NETWORK_IO",
+                wait_time_ms=30,
+            ),
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-b",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_b",
+                wait_event_native="PAGEIOLATCH_SH",
+                wait_time_ms=10,
+            ),
+        ]
+    )
+
+    rows = await repo.wait_breakdown_by_sql_hash(
+        test_instance.id,
+        since=now - timedelta(minutes=1),
+        until=now + timedelta(minutes=1),
+        limit=10,
+    )
+
+    by_key = {(row.sql_hash, row.wait_event_native): row.total_wait_time_ms for row in rows}
+    assert by_key[("hash-a", "PAGEIOLATCH_SH")] == 100
+    assert by_key[("hash-a", "ASYNC_NETWORK_IO")] == 30
+    assert by_key[("hash-b", "PAGEIOLATCH_SH")] == 10
+
+    # Filtro opcional por database_name (nivel 2 do drill-down so quer as queries daquele banco).
+    filtered = await repo.wait_breakdown_by_sql_hash(
+        test_instance.id,
+        since=now - timedelta(minutes=1),
+        until=now + timedelta(minutes=1),
+        limit=10,
+        database_name="db_b",
+    )
+    assert {(row.sql_hash, row.wait_event_native) for row in filtered} == {
+        ("hash-b", "PAGEIOLATCH_SH")
+    }
+
+
+async def test_wait_time_by_day_and_database_groups_by_utc_day(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """`wait_time_by_day_and_database` agrupa por dia calendario UTC + banco — visao historica
+    "Tudo" do nivel 1 (um dia por barra, empilhada por banco)."""
+    repo = QuerySamplesRepository(db_session)
+    day1 = datetime(2026, 9, 1, 10, 0, tzinfo=UTC)
+    day2 = datetime(2026, 9, 2, 10, 0, tzinfo=UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=day1,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-a",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_a",
+                wait_time_ms=100,
+            ),
+            NormalizedQuerySample(
+                time=day1 + timedelta(hours=2),
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-b",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_b",
+                wait_time_ms=20,
+            ),
+            NormalizedQuerySample(
+                time=day2,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-a",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_a",
+                wait_time_ms=50,
+            ),
+        ]
+    )
+
+    rows = await repo.wait_time_by_day_and_database(
+        test_instance.id,
+        since=day1 - timedelta(days=1),
+        until=day2 + timedelta(days=1),
+        limit=10,
+    )
+
+    by_key = {(row.day.date(), row.database_name): row.total_wait_time_ms for row in rows}
+    assert by_key[(day1.date(), "db_a")] == 100
+    assert by_key[(day1.date(), "db_b")] == 20
+    assert by_key[(day2.date(), "db_a")] == 50
+
+
+async def test_wait_time_by_day_and_sql_hash_groups_by_utc_day(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """`wait_time_by_day_and_sql_hash` agrupa por dia calendario UTC + `sql_hash` — visao
+    historica "Tudo" do nivel 2 (um dia por barra, empilhada por query), com filtro opcional de
+    `database_name` (mesmo padrao de `top_sql()`)."""
+    repo = QuerySamplesRepository(db_session)
+    day1 = datetime(2026, 9, 1, 10, 0, tzinfo=UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=day1,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-a",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_a",
+                wait_time_ms=100,
+            ),
+            NormalizedQuerySample(
+                time=day1 + timedelta(hours=1),
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-b",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_b",
+                wait_time_ms=20,
+            ),
+        ]
+    )
+
+    rows = await repo.wait_time_by_day_and_sql_hash(
+        test_instance.id,
+        since=day1 - timedelta(days=1),
+        until=day1 + timedelta(days=1),
+        limit=10,
+    )
+    assert {(row.day.date(), row.sql_hash, row.total_wait_time_ms) for row in rows} == {
+        (day1.date(), "hash-a", 100),
+        (day1.date(), "hash-b", 20),
+    }
+
+    filtered = await repo.wait_time_by_day_and_sql_hash(
+        test_instance.id,
+        since=day1 - timedelta(days=1),
+        until=day1 + timedelta(days=1),
+        limit=10,
+        database_name="db_b",
+    )
+    assert {(row.sql_hash, row.total_wait_time_ms) for row in filtered} == {("hash-b", 20)}
+
+
 async def test_top_sql_filters_by_database_name(
     db_session: AsyncSession, test_instance: Instance
 ) -> None:

@@ -11,6 +11,10 @@ Drill-down hierarquico (Instancia -> Banco -> Query): `GET /databases/{instance_
 agrega por `database_name`), `GET /top-sql/{instance_id}?database_name=X` (nivel 2, mesmo
 agregado por `sql_hash` de sempre, agora filtravel por banco) e `GET /detail/{instance_id}/
 {sql_hash}` (nivel 3/folha, amostras brutas daquele hash).
+
+Visao historica "Tudo" (um dia por barra, equivalente ao grafico multi-dia de ferramentas de
+referencia): `GET /databases-by-day/{instance_id}` (nivel 1) e `GET /top-sql-by-day/{instance_id}`
+(nivel 2) — mesma hierarquia, granularidade de dia em vez de agregado unico do periodo.
 """
 
 from __future__ import annotations
@@ -49,6 +53,15 @@ class QuerySampleResponse(BaseModel):
     machine: str | None
 
 
+class WaitBreakdownEntryResponse(BaseModel):
+    """Fatia de wait time por tipo de espera NATIVO do engine (nao o bucket canonico cross-engine
+    de 9 categorias — granularidade maior, a pedido explicito). Reutilizado tanto para decompor o
+    wait time de um banco (nivel 1) quanto o de uma query (nivel 2)."""
+
+    wait_event_native: str
+    total_wait_time_ms: int
+
+
 class TopSqlEntryResponse(BaseModel):
     """Linha agregada de "Top SQL", calculada em tempo real sobre `query_samples`."""
 
@@ -61,14 +74,7 @@ class TopSqlEntryResponse(BaseModel):
     total_wait_time_ms: int
     avg_wait_time_ms: float
     predominant_wait_type: str | None
-
-
-class DatabaseWaitBreakdownEntryResponse(BaseModel):
-    """Fatia do wait time de um banco, por tipo de espera NATIVO do engine (nao o bucket
-    canonico cross-engine de 9 categorias — granularidade maior, a pedido explicito)."""
-
-    wait_event_native: str
-    total_wait_time_ms: int
+    wait_breakdown: list[WaitBreakdownEntryResponse]
 
 
 class DatabaseSummaryResponse(BaseModel):
@@ -79,7 +85,18 @@ class DatabaseSummaryResponse(BaseModel):
     execution_count: int
     total_wait_time_ms: int
     avg_wait_time_ms: float
-    wait_breakdown: list[DatabaseWaitBreakdownEntryResponse]
+    wait_breakdown: list[WaitBreakdownEntryResponse]
+
+
+class DayEntryResponse(BaseModel):
+    """Uma fatia (dia, entidade) do grafico historico "Tudo" — `day` e sempre meia-noite UTC
+    daquele dia calendario (`date_trunc('day', time AT TIME ZONE 'UTC')`); `label` e
+    `database_name` em `/databases-by-day` ou `sql_hash` em `/top-sql-by-day`. Retornado plano (nao
+    agrupado por dia) — o cliente agrupa por `day` para montar a barra empilhada daquele dia."""
+
+    day: datetime
+    label: str
+    total_wait_time_ms: int
 
 
 class QuerySampleDetailResponse(BaseModel):
@@ -167,8 +184,30 @@ async def top_sql(
         settings.api_read_max_rows,
         database_name=database_name,
     )
+    breakdown_rows = await repository.wait_breakdown_by_sql_hash(
+        instance_id,
+        resolved_since,
+        resolved_until,
+        settings.api_read_max_rows,
+        database_name=database_name,
+    )
+    breakdown_by_hash: dict[str, list[WaitBreakdownEntryResponse]] = {}
+    for row in breakdown_rows:
+        breakdown_by_hash.setdefault(row.sql_hash, []).append(
+            WaitBreakdownEntryResponse(
+                wait_event_native=row.wait_event_native,
+                total_wait_time_ms=row.total_wait_time_ms,
+            )
+        )
     # Aqui a query de `top_sql` nao seleciona `instance_id` — sem colisao ao passar explicito.
-    return [TopSqlEntryResponse(instance_id=instance_id, **row._mapping) for row in rows]
+    return [
+        TopSqlEntryResponse(
+            instance_id=instance_id,
+            **row._mapping,
+            wait_breakdown=breakdown_by_hash.get(row.sql_hash, []),
+        )
+        for row in rows
+    ]
 
 
 @router.get("/databases/{instance_id}", response_model=list[DatabaseSummaryResponse])
@@ -195,10 +234,10 @@ async def list_databases(
     breakdown_rows = await repository.wait_breakdown_by_database(
         instance_id, resolved_since, resolved_until, settings.api_read_max_rows
     )
-    breakdown_by_database: dict[str, list[DatabaseWaitBreakdownEntryResponse]] = {}
+    breakdown_by_database: dict[str, list[WaitBreakdownEntryResponse]] = {}
     for row in breakdown_rows:
         breakdown_by_database.setdefault(row.database_name, []).append(
-            DatabaseWaitBreakdownEntryResponse(
+            WaitBreakdownEntryResponse(
                 wait_event_native=row.wait_event_native,
                 total_wait_time_ms=row.total_wait_time_ms,
             )
@@ -207,6 +246,60 @@ async def list_databases(
         DatabaseSummaryResponse(
             **row._mapping, wait_breakdown=breakdown_by_database.get(row.database_name, [])
         )
+        for row in rows
+    ]
+
+
+@router.get("/databases-by-day/{instance_id}", response_model=list[DayEntryResponse])
+async def list_databases_by_day(
+    instance_id: UUID,
+    repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
+    since: Annotated[datetime | None, Query(alias="from")] = None,
+    until: Annotated[datetime | None, Query(alias="to")] = None,
+) -> list[DayEntryResponse]:
+    """Visao historica "Tudo" do nivel 1 (Instancia -> Banco -> Query): um dia por barra,
+    empilhada por banco de dados — equivalente ao grafico multi-dia de ferramentas de
+    referencia (ex.: SolarWinds DPA "Top SQL" por periodo). `label` e `database_name`."""
+    settings = get_settings()
+    resolved_since, resolved_until = resolve_time_window(
+        since, until, timedelta(seconds=settings.api_read_default_lookback_seconds)
+    )
+    rows = await repository.wait_time_by_day_and_database(
+        instance_id, resolved_since, resolved_until, settings.api_read_max_rows
+    )
+    return [
+        DayEntryResponse(
+            day=row.day, label=row.database_name, total_wait_time_ms=row.total_wait_time_ms
+        )
+        for row in rows
+    ]
+
+
+@router.get("/top-sql-by-day/{instance_id}", response_model=list[DayEntryResponse])
+async def list_top_sql_by_day(
+    instance_id: UUID,
+    repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
+    since: Annotated[datetime | None, Query(alias="from")] = None,
+    until: Annotated[datetime | None, Query(alias="to")] = None,
+    database_name: Annotated[str | None, Query()] = None,
+) -> list[DayEntryResponse]:
+    """Visao historica "Tudo" do nivel 2 (Instancia -> Banco -> Query): um dia por barra,
+    empilhada por query — mesmo `database_name` opcional de `top_sql()`. `label` e `sql_hash`
+    (o cliente resolve o rotulo curto/nome, esta rota nao traz `sql_name`/`sql_text_masked` —
+    corte de escopo deliberado, o overview historico nao precisa do texto completo da query)."""
+    settings = get_settings()
+    resolved_since, resolved_until = resolve_time_window(
+        since, until, timedelta(seconds=settings.api_read_default_lookback_seconds)
+    )
+    rows = await repository.wait_time_by_day_and_sql_hash(
+        instance_id,
+        resolved_since,
+        resolved_until,
+        settings.api_read_max_rows,
+        database_name=database_name,
+    )
+    return [
+        DayEntryResponse(day=row.day, label=row.sql_hash, total_wait_time_ms=row.total_wait_time_ms)
         for row in rows
     ]
 
