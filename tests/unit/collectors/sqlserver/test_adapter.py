@@ -6,6 +6,7 @@ Usa um fake de `pymssql.connect`/cursor (`as_dict=True`), sem I/O de rede real, 
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 from uuid import uuid4
 
@@ -25,7 +26,11 @@ def _request_row(
     blocking_session_id: int | None = 0,
     wait_type: str | None = None,
     wait_time: int = 0,
+    full_query_text: str | None = None,
 ) -> dict[str, Any]:
+    """`query_text` simula o `SUBSTRING` ja fatiado pelo statement em execucao (o que a query
+    real devolve); `full_query_text` simula `t.text` cru (o batch/procedure inteiro) — por
+    padrao igual a `query_text`, quando o teste nao se importa com a distincao entre os dois."""
     return {
         "session_id": session_id,
         "status": "running",
@@ -46,6 +51,7 @@ def _request_row(
         "program_name": "sqlcmd",
         "database_name": "app_db",
         "query_text": query_text,
+        "full_query_text": full_query_text if full_query_text is not None else query_text,
     }
 
 
@@ -204,6 +210,45 @@ async def test_collect_skips_row_with_null_query_text(monkeypatch: pytest.Monkey
 
     assert len(result.query_samples) == 1
     assert result.query_samples[0].session_id == "71"
+
+
+async def test_collect_uses_statement_text_for_hash_not_full_procedure_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regressao: `sql_hash`/`sql_text_masked` tem que vir do STATEMENT em execucao (o que a
+    query real fatia via `statement_start_offset`/`statement_end_offset`), nao do texto cru de
+    `sys.dm_exec_sql_text` — que, para uma sessao dentro de uma stored procedure, e a
+    `CREATE PROCEDURE ...` inteira (bug real encontrado em producao). `sql_text_full_masked`
+    continua guardando o contexto completo (a procedure inteira), so pra tela de detalhe."""
+    full_procedure_text = (
+        "CREATE PROCEDURE dbo.sp_example AS BEGIN EXEC dbo.sp_cdc_scan @maxtrans = 1 END"
+    )
+    session_rows = [
+        _request_row(
+            session_id=80,
+            query_text="EXEC dbo.sp_cdc_scan @maxtrans = 1",
+            full_query_text=full_procedure_text,
+        ),
+    ]
+    _patch_connect(
+        monkeypatch,
+        version_row={"product_version": "16.0.1000.6"},
+        session_rows=session_rows,
+        counter_rows=[],
+    )
+
+    collector = SQLServerCollector(connection=_CONNECTION, instance_id=uuid4())
+    result = await collector.collect()
+
+    assert len(result.query_samples) == 1
+    sample = result.query_samples[0]
+    assert sample.sql_text_masked == "EXEC dbo.sp_cdc_scan @maxtrans = ?"
+    assert "CREATE PROCEDURE" not in sample.sql_text_masked
+    assert (
+        sample.sql_text_full_masked
+        == "CREATE PROCEDURE dbo.sp_example AS BEGIN EXEC dbo.sp_cdc_scan @maxtrans = ? END"
+    )
+    assert sample.sql_hash == hashlib.sha256(sample.sql_text_masked.encode("utf-8")).hexdigest()
 
 
 async def test_collect_raises_value_error_without_instance_id() -> None:

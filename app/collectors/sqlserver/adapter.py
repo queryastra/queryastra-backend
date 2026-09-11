@@ -17,6 +17,10 @@ linhas truncado em Python apos o fetch (`settings.collection_max_rows`):
       ativa (collector-queries.md §1), normalizada em `NormalizedQuerySample`. Cuidado com
       queries paralelas (dop>1): so a coordinator thread aparece, `reads`/`writes`/
       `logical_reads` nao atualizam nessa linha (nao tratado especificamente nesta feature).
+      Texto fatiado por `statement_start_offset`/`statement_end_offset` (padrao oficial da
+      Microsoft) em `sql_text_masked` — sem isso, uma sessao dentro de uma stored procedure
+      mostraria a `CREATE PROCEDURE ...` inteira em vez do statement em execucao; o texto
+      completo do batch/procedure fica em `sql_text_full_masked`, so pra tela de detalhe.
     - `sys.dm_exec_requests.blocking_session_id` — deteccao de bloqueio de **nivel direto
       apenas** (collector-queries.md §2); NAO implementa a CTE recursiva completa (corte de
       escopo desta feature). Sentinela negativo (-2 a -5) = bloqueador nao determinavel — NAO
@@ -81,6 +85,13 @@ _SERVER_STATE_PERMISSIONS = {"VIEW SERVER STATE", "VIEW SERVER PERFORMANCE STATE
 # significa "sem bloqueio" nem e um erro (collector-queries.md §2).
 _BLOCKING_SESSION_REAL_BLOCK_MIN = 1
 
+# `sys.dm_exec_sql_text(r.sql_handle)` devolve o texto do BATCH/PROCEDURE inteiro associado ao
+# sql_handle, nao so o statement em execucao agora — para uma sessao dentro de uma stored
+# procedure, isso e a `CREATE PROCEDURE ...` inteira (Docs/collector-queries.md §1, nuance de
+# texto). `statement_start_offset`/`statement_end_offset` (em bytes, texto e nvarchar -> dividir
+# por 2) fatiam so o statement atual - padrao oficial da Microsoft para "o que esta sessao esta
+# executando agora". `query_text` (fatiado) vira `sql_hash`/`sql_text_masked`; `full_query_text`
+# (batch/procedure inteiro) vira `sql_text_full_masked`, so pra tela de detalhe.
 _SESSION_ACTIVITY_QUERY = """
     SELECT r.session_id, r.status, r.command, r.start_time,
            r.total_elapsed_time / 1000.00 AS elapsed_seconds,
@@ -90,7 +101,17 @@ _SESSION_ACTIVITY_QUERY = """
            r.blocking_session_id, r.wait_type, r.wait_time,
            s.login_name, s.host_name, s.program_name,
            DB_NAME(r.database_id) AS database_name,
-           t.text AS query_text
+           t.text AS full_query_text,
+           SUBSTRING(
+               t.text,
+               (r.statement_start_offset / 2) + 1,
+               (
+                   (CASE r.statement_end_offset
+                        WHEN -1 THEN DATALENGTH(t.text)
+                        ELSE r.statement_end_offset
+                    END - r.statement_start_offset) / 2
+               ) + 1
+           ) AS query_text
     FROM sys.dm_exec_requests AS r
     INNER JOIN sys.dm_exec_sessions AS s ON r.session_id = s.session_id
     CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) AS t
@@ -244,11 +265,16 @@ def _build_query_samples(
 ) -> list[NormalizedQuerySample]:
     samples: list[NormalizedQuerySample] = []
     for row in session_rows:
-        query_text = row["query_text"]
+        # `query_text` (fatiado por offset) pode sair vazio em cenarios raros (ex.:
+        # statement_start_offset/end_offset zerados por um plano em cache atipico) mesmo com
+        # full_query_text preenchido — cai pro texto completo em vez de descartar a amostra.
+        query_text = row["query_text"] or row["full_query_text"]
         if not query_text:
             continue
         masked = mask_sql_literals(query_text)
         sql_hash = hashlib.sha256(masked.encode("utf-8")).hexdigest()
+        full_query_text = row["full_query_text"]
+        masked_full = mask_sql_literals(full_query_text) if full_query_text else masked
         samples.append(
             NormalizedQuerySample(
                 time=collected_at,
@@ -256,6 +282,7 @@ def _build_query_samples(
                 engine="sqlserver",
                 sql_hash=sql_hash,
                 sql_text_masked=masked,
+                sql_text_full_masked=masked_full,
                 wait_type=map_wait_event("sqlserver", row["wait_type"]),
                 wait_event_native=row["wait_type"],
                 wait_time_ms=row["wait_time"],

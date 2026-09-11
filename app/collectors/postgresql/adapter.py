@@ -378,6 +378,9 @@ class PostgreSQLCollector:
                     engine="postgresql",
                     sql_hash=sql_hash,
                     sql_text_masked=masked,
+                    # `pg_stat_activity.query` ja e so o statement atual (sem a distincao
+                    # batch/procedure do SQL Server) — os dois campos coincidem aqui.
+                    sql_text_full_masked=masked,
                     wait_type=map_wait_event("postgresql", row["wait_event_type"]),
                     wait_event_native=row["wait_event"],
                     # Postgres nao expoe duracao de espera do backend diretamente.

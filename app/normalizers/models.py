@@ -45,9 +45,14 @@ class NormalizedQuerySample(BaseModel):
     """Amostra de query ativa normalizada — destino: hypertable `query_samples`.
 
     `sql_text_masked` e o texto ja mascarado (`app/masking/sql_masking.py`, obrigatorio antes de
-    persistir — `Docs/rules/03-sql-privacy.md`). `wait_type` e a categoria canonica
-    (`app/normalizers/wait_taxonomy.py`); `wait_event_native` preserva o valor bruto do motor
-    para nao perder detalhe no drill-down.
+    persistir — `Docs/rules/03-sql-privacy.md`) do STATEMENT em execucao — no SQL Server, isso e
+    um `SUBSTRING` de `sys.dm_exec_sql_text` via `statement_start_offset`/`statement_end_offset`
+    (`Docs/collector-queries.md` §1), nao o batch/procedure inteiro. `sql_text_full_masked` guarda
+    o contexto completo mascarado (o batch/procedure de onde o statement veio), usado so na tela
+    de detalhe pra destacar o statement dentro do texto inteiro — no PostgreSQL, onde
+    `pg_stat_activity.query` ja e so o statement, os dois campos recebem o mesmo texto. `wait_type`
+    e a categoria canonica (`app/normalizers/wait_taxonomy.py`); `wait_event_native` preserva o
+    valor bruto do motor para nao perder detalhe no drill-down.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -59,6 +64,7 @@ class NormalizedQuerySample(BaseModel):
     sql_hash: str
     sql_name: str | None = None
     sql_text_masked: str
+    sql_text_full_masked: str | None = None
     # Texto original cifrado so e preenchido quando a politica de privacidade da instancia
     # permitir manter o nativo (Docs/rules/03-sql-privacy.md) — nunca em texto puro aqui.
     sql_text_encrypted: bytes | None = None

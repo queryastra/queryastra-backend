@@ -67,6 +67,7 @@ class QuerySamplesRepository(BaseRepository):
                 "sql_hash": s.sql_hash,
                 "sql_name": s.sql_name,
                 "sql_text_masked": s.sql_text_masked,
+                "sql_text_full_masked": s.sql_text_full_masked,
                 "sql_text_encrypted": s.sql_text_encrypted,
                 "wait_type": s.wait_type.value if s.wait_type is not None else None,
                 "wait_event_native": s.wait_event_native,

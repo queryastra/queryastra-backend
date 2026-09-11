@@ -33,6 +33,7 @@ query_samples_table = sa.Table(
     sa.Column("sql_hash", sa.Text(), nullable=False),
     sa.Column("sql_name", sa.Text(), nullable=True),
     sa.Column("sql_text_masked", sa.Text(), nullable=False),
+    sa.Column("sql_text_full_masked", sa.Text(), nullable=True),
     sa.Column("sql_text_encrypted", sa.LargeBinary(), nullable=True),
     sa.Column("wait_type", sa.Text(), nullable=True),
     sa.Column("wait_event_native", sa.Text(), nullable=True),

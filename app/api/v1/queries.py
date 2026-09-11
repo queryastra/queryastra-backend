@@ -137,12 +137,19 @@ class QuerySampleDetailResponse(BaseModel):
 
 
 class QueryDetailResponse(BaseModel):
-    """Detalhe de um `sql_hash` especifico — nivel 3 (folha) do drill-down hierarquico."""
+    """Detalhe de um `sql_hash` especifico — nivel 3 (folha) do drill-down hierarquico.
+
+    `sql_text_masked` e so o STATEMENT em execucao (usado no hash); `sql_text_full_masked` e o
+    contexto completo (o batch/procedure inteiro de onde o statement veio, quando o motor faz
+    essa distincao — SQL Server sim, PostgreSQL nao) — a UI destaca `sql_text_masked` dentro de
+    `sql_text_full_masked`. `None` quando a amostra e anterior a essa distincao existir (coluna
+    adicionada depois) ou quando os dois coincidem."""
 
     instance_id: UUID
     sql_hash: str
     sql_name: str | None
     sql_text_masked: str
+    sql_text_full_masked: str | None
     database_name: str | None
     samples: list[QuerySampleDetailResponse]
 
@@ -494,6 +501,7 @@ async def get_query_detail(
         sql_hash=sql_hash,
         sql_name=first.sql_name,
         sql_text_masked=first.sql_text_masked,
+        sql_text_full_masked=first.sql_text_full_masked,
         database_name=first.database_name,
         samples=[
             QuerySampleDetailResponse(
