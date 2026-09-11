@@ -116,15 +116,19 @@ async def list_blocking_events(
     blocking_repo: Annotated[BlockingEventsRepository, Depends(get_blocking_events_repository)],
     query_repo: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
     since: Annotated[datetime | None, Query(alias="from")] = None,
+    until: Annotated[datetime | None, Query(alias="to")] = None,
 ) -> list[BlockingTreeNodeResponse]:
     """Arvore de bloqueio do ultimo ciclo que registrou bloqueio dentro da janela (nao uma
-    janela deslizante inteira — bloqueios ja resolvidos nao aparecem junto dos atuais)."""
+    janela deslizante inteira — bloqueios ja resolvidos nao aparecem junto dos atuais). `to`
+    (opcional, aditivo) permite delimitar um dia calendario especifico no passado (`DayFilter`
+    do frontend); sem ele, `resolve_time_window` resolve pra "agora", o que na pratica nunca
+    exclui nada (nenhum evento e gravado com `time` no futuro)."""
     settings = get_settings()
-    resolved_since, _ = resolve_time_window(
-        since, None, timedelta(seconds=settings.api_read_default_lookback_seconds)
+    resolved_since, resolved_until = resolve_time_window(
+        since, until, timedelta(seconds=settings.api_read_default_lookback_seconds)
     )
     events = await blocking_repo.list_latest_snapshot(
-        instance_id, resolved_since, settings.api_read_max_rows
+        instance_id, resolved_since, settings.api_read_max_rows, until=resolved_until
     )
     session_ids = {e.blocker_session_id for e in events} | {e.blocked_session_id for e in events}
     enrichment = await query_repo.latest_by_session(instance_id, list(session_ids), resolved_since)

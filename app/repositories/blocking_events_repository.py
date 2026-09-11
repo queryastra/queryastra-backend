@@ -39,15 +39,19 @@ class BlockingEventsRepository(BaseRepository):
         await self._session.commit()
 
     async def list_latest_snapshot(
-        self, instance_id: UUID, since: datetime, limit: int
+        self, instance_id: UUID, since: datetime, limit: int, until: datetime | None = None
     ) -> list[sa.Row]:
         """So o ultimo ciclo que registrou bloqueio — snapshot no timestamp mais recente dentro
         da janela, NAO uma janela deslizante inteira (misturaria bloqueios ja resolvidos com os
-        atuais)."""
+        atuais). `until` (opcional, aditivo) delimita um dia calendario especifico no passado
+        (`DayFilter` do frontend) — `None` mantem o comportamento historico de "desde `since`, o
+        mais recente", sem limite superior."""
         latest_time_stmt = sa.select(sa.func.max(blocking_events_table.c.time)).where(
             blocking_events_table.c.instance_id == instance_id,
             blocking_events_table.c.time >= since,
         )
+        if until is not None:
+            latest_time_stmt = latest_time_stmt.where(blocking_events_table.c.time <= until)
         latest_time = (await self._session.execute(latest_time_stmt)).scalar_one_or_none()
         if latest_time is None:
             return []

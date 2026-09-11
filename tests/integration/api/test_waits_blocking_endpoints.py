@@ -85,6 +85,52 @@ async def test_list_blocking_events_empty_when_no_events(
     assert response.json() == []
 
 
+async def test_list_blocking_events_respects_to_upper_bound(
+    client: AsyncClient, db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """`to` (opcional, aditivo — usado pelo `DayFilter` do frontend pra delimitar um dia
+    calendario especifico) exclui um snapshot mais recente fora da janela pedida."""
+    now = datetime.now(UTC)
+    within_window_time = now - timedelta(hours=2)
+
+    blocking_repo = BlockingEventsRepository(db_session)
+    await blocking_repo.insert_batch(
+        [
+            NormalizedBlockingEvent(
+                time=within_window_time,
+                instance_id=test_instance.id,
+                blocker_session_id="within-window-blocker",
+                blocked_session_id="within-window-blocked",
+                wait_time_ms=300,
+            )
+        ]
+    )
+    await blocking_repo.insert_batch(
+        [
+            NormalizedBlockingEvent(
+                time=now,
+                instance_id=test_instance.id,
+                blocker_session_id="after-window-blocker",
+                blocked_session_id="after-window-blocked",
+                wait_time_ms=100,
+            )
+        ]
+    )
+
+    response = await client.get(
+        f"/api/v1/waits-blocking/blocking/{test_instance.id}",
+        params={
+            "from": (now - timedelta(hours=6)).isoformat(),
+            "to": (now - timedelta(hours=1)).isoformat(),
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 1
+    assert body[0]["session_id"] == "within-window-blocker"
+
+
 async def test_list_wait_summary_groups_total_wait_time_by_category(
     client: AsyncClient, db_session: AsyncSession, test_instance: Instance
 ) -> None:
