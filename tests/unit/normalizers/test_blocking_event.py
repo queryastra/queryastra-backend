@@ -52,3 +52,42 @@ def test_blocking_event_optional_sql_hashes_can_be_set() -> None:
     event = _make_event(blocker_sql_hash="abc", blocked_sql_hash="def")
     assert event.blocker_sql_hash == "abc"
     assert event.blocked_sql_hash == "def"
+
+
+def test_blocking_event_enrichment_fields_default_to_none() -> None:
+    """Etapa 9 — todos os campos de enriquecimento (identidade/wait/recurso) sao opcionais,
+    aditivos: um evento antigo (ou um coletor que nao os preencheu) fica so com None."""
+    event = _make_event()
+    assert event.blocker_db_user is None
+    assert event.blocker_program is None
+    assert event.blocker_machine is None
+    assert event.blocker_wait_event_native is None
+    assert event.blocked_db_user is None
+    assert event.blocked_program is None
+    assert event.blocked_machine is None
+    assert event.blocked_wait_event_native is None
+    assert event.blocked_wait_resource is None
+    assert event.blocked_object is None
+
+
+def test_blocking_event_enrichment_fields_can_be_set() -> None:
+    event = _make_event(
+        blocker_db_user="idle_user",
+        blocker_program="batch_job",
+        blocker_machine="batch-host",
+        blocked_db_user="app_user",
+        blocked_program="psql",
+        blocked_machine="10.0.0.5",
+        blocked_wait_event_native="relation",
+        blocked_wait_resource="relation/AccessShareLock",
+        blocked_object="t",
+    )
+    assert event.blocker_db_user == "idle_user"
+    assert event.blocker_program == "batch_job"
+    assert event.blocker_machine == "batch-host"
+    assert event.blocked_db_user == "app_user"
+    assert event.blocked_program == "psql"
+    assert event.blocked_machine == "10.0.0.5"
+    assert event.blocked_wait_event_native == "relation"
+    assert event.blocked_wait_resource == "relation/AccessShareLock"
+    assert event.blocked_object == "t"

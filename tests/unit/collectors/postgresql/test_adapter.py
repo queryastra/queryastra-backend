@@ -83,10 +83,17 @@ class _FakeConnection:
         version_num: int,
         session_rows: list[dict[str, Any]],
         blocking_rows: list[dict[str, Any]],
+        all_session_rows: list[dict[str, Any]] | None = None,
+        blocked_object_rows: list[dict[str, Any]] | None = None,
     ) -> None:
         self._version_num = version_num
         self._session_rows = session_rows
         self._blocking_rows = blocking_rows
+        # Default: mesma identidade de `session_rows` (suficiente pra a maioria dos testes, que
+        # nao focam no caso do bloqueador ocioso). `blocked_object_rows` default vazio — sem
+        # `pg_locks` correspondente, `blocked_object`/`wait_resource` ficam None.
+        self._all_session_rows = all_session_rows if all_session_rows is not None else session_rows
+        self._blocked_object_rows = blocked_object_rows if blocked_object_rows is not None else []
         self.closed = False
         self.checkpointer_queried = False
         self.bgwriter_queried = False
@@ -97,10 +104,14 @@ class _FakeConnection:
         raise AssertionError(f"fetchval inesperado: {query}")
 
     async def fetch(self, query: str, *args: object) -> list[dict[str, Any]]:
+        if "pg_locks" in query:
+            return self._blocked_object_rows
         if "blocked_by" in query:
             return self._blocking_rows
-        if "pg_stat_activity" in query:
+        if "WHERE state" in query:
             return self._session_rows
+        if "pg_stat_activity" in query:
+            return self._all_session_rows
         raise AssertionError(f"fetch inesperado: {query}")
 
     async def fetchrow(self, query: str, *args: object) -> dict[str, Any]:
@@ -204,6 +215,99 @@ async def test_collect_expands_multiple_blockers_into_multiple_events(
     for event in result.blocking_events:
         assert event.blocked_session_id == "200"
         assert event.wait_time_ms >= 0
+
+
+async def test_collect_reduces_transitive_blockers_to_direct_edges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Etapa 9 — `pg_blocking_pids()` devolve o fecho TRANSITIVO: se A(500) bloqueia B(501) e
+    B(501) bloqueia C(502), `blocked_by` de C ja vem como `[500, 501]`, nao so `[501]`. Sem a
+    reducao (`_reduce_to_direct_edges`), C ficaria ligado tanto a A quanto a B na arvore —
+    achatando a cadeia real A -> B -> C. Com a reducao, C so liga a B (o bloqueador mais
+    proximo), e B liga a A."""
+    session_rows = [
+        _session_row(pid=500, query="UPDATE t SET a = 1"),
+        _session_row(pid=501, query="UPDATE t SET a = 2"),
+        _session_row(pid=502, query="SELECT 1"),
+    ]
+    blocking_rows = [
+        {"pid": 501, "blocked_by": [500], "query": "UPDATE t SET a = 2"},
+        {"pid": 502, "blocked_by": [500, 501], "query": "SELECT 1"},
+    ]
+    fake_conn = _FakeConnection(
+        version_num=170000, session_rows=session_rows, blocking_rows=blocking_rows
+    )
+    _patch_connect(monkeypatch, fake_conn)
+
+    collector = PostgreSQLCollector(connection=_CONNECTION, instance_id=uuid4())
+    result = await collector.collect()
+
+    edges = {(e.blocker_session_id, e.blocked_session_id) for e in result.blocking_events}
+    assert edges == {("500", "501"), ("501", "502")}
+
+
+async def test_collect_enriches_idle_blocker_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Etapa 9 — um bloqueador OCIOSO (transacao aberta segurando lock, sem `state` ativo) nao
+    aparece em `_SESSION_ACTIVITY_QUERY` (`WHERE state != 'idle'`), entao fica sem identidade se
+    so olharmos `session_rows`. `_ALL_SESSIONS_QUERY` (todas as sessoes conectadas) fecha esse
+    gap."""
+    session_rows = [_session_row(pid=601, query="SELECT 1")]  # so o bloqueado tem request ativa
+    blocking_rows = [{"pid": 601, "blocked_by": [600], "query": "SELECT 1"}]
+    all_session_rows = [
+        *session_rows,
+        {
+            "pid": 600,
+            "usename": "idle_blocker_user",
+            "application_name": "batch_job",
+            "client_addr": "10.0.0.9",
+        },
+    ]
+    fake_conn = _FakeConnection(
+        version_num=170000,
+        session_rows=session_rows,
+        blocking_rows=blocking_rows,
+        all_session_rows=all_session_rows,
+    )
+    _patch_connect(monkeypatch, fake_conn)
+
+    collector = PostgreSQLCollector(connection=_CONNECTION, instance_id=uuid4())
+    result = await collector.collect()
+
+    assert len(result.blocking_events) == 1
+    event = result.blocking_events[0]
+    assert event.blocker_db_user == "idle_blocker_user"
+    assert event.blocker_program == "batch_job"
+    assert event.blocker_machine == "10.0.0.9"
+
+
+async def test_collect_populates_blocked_object_from_pg_locks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Etapa 9 — `blocked_object`/`blocked_wait_resource` vem de `pg_locks` (so pro lado
+    BLOQUEADO, que e quem esta de fato esperando por um recurso)."""
+    session_rows = [
+        _session_row(pid=700, query="UPDATE t SET a = 1"),
+        _session_row(pid=701, query="SELECT * FROM t"),
+    ]
+    blocking_rows = [{"pid": 701, "blocked_by": [700], "query": "SELECT * FROM t"}]
+    blocked_object_rows = [
+        {"pid": 701, "locktype": "relation", "mode": "AccessShareLock", "blocked_object": "t"}
+    ]
+    fake_conn = _FakeConnection(
+        version_num=170000,
+        session_rows=session_rows,
+        blocking_rows=blocking_rows,
+        blocked_object_rows=blocked_object_rows,
+    )
+    _patch_connect(monkeypatch, fake_conn)
+
+    collector = PostgreSQLCollector(connection=_CONNECTION, instance_id=uuid4())
+    result = await collector.collect()
+
+    assert len(result.blocking_events) == 1
+    event = result.blocking_events[0]
+    assert event.blocked_object == "t"
+    assert event.blocked_wait_resource == "relation/AccessShareLock"
 
 
 async def test_collect_skips_row_with_null_query(monkeypatch: pytest.MonkeyPatch) -> None:

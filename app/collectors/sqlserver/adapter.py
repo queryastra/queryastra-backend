@@ -21,10 +21,14 @@ linhas truncado em Python apos o fetch (`settings.collection_max_rows`):
       Microsoft) em `sql_text_masked` — sem isso, uma sessao dentro de uma stored procedure
       mostraria a `CREATE PROCEDURE ...` inteira em vez do statement em execucao; o texto
       completo do batch/procedure fica em `sql_text_full_masked`, so pra tela de detalhe.
-    - `sys.dm_exec_requests.blocking_session_id` — deteccao de bloqueio de **nivel direto
-      apenas** (collector-queries.md §2); NAO implementa a CTE recursiva completa (corte de
-      escopo desta feature). Sentinela negativo (-2 a -5) = bloqueador nao determinavel — NAO
-      tratado como erro, so ignorado (nenhum `NormalizedBlockingEvent` gerado para essa linha).
+    - `sys.dm_exec_requests.blocking_session_id` — deteccao de bloqueio de nivel direto
+      (collector-queries.md §2); a arvore completa (Etapa 9) e reconstruida no app encadeando as
+      arestas de um mesmo snapshot (`app.api.v1.waits_blocking`), nao via CTE recursiva ao vivo
+      contra o servidor monitorado. Sentinela negativo (-2 a -5) = bloqueador nao determinavel —
+      NAO tratado como erro, so ignorado (nenhum `NormalizedBlockingEvent` gerado para essa
+      linha). `_ALL_SESSIONS_QUERY` identifica bloqueadores OCIOSOS (sem request ativa);
+      `_BLOCKED_OBJECT_QUERY` (`sys.dm_tran_locks`/`sys.partitions`) resolve o objeto bloqueado,
+      melhor esforco.
     - `sys.dm_os_wait_stats`/`sys.dm_exec_session_wait_stats` (cumulativo, via `LAG()`): **nao
       implementado** (corte de escopo) — so o `wait_type`/`wait_time` instantaneo de
       `sys.dm_exec_requests` por sessao ativa.
@@ -105,7 +109,7 @@ _SESSION_ACTIVITY_QUERY = """
            r.total_elapsed_time,
            r.cpu_time AS cpu_time_ms,
            r.reads, r.writes, r.logical_reads, r.row_count,
-           r.blocking_session_id, r.wait_type, r.wait_time,
+           r.blocking_session_id, r.wait_type, r.wait_time, r.wait_resource,
            s.login_name, s.host_name, s.program_name,
            DB_NAME(r.database_id) AS database_name,
            t.text AS full_query_text,
@@ -124,6 +128,42 @@ _SESSION_ACTIVITY_QUERY = """
     CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) AS t
     WHERE r.session_id <> @@SPID
     ORDER BY r.start_time DESC
+"""
+
+# Etapa 9 (arvore completa de bloqueio) — identidade de TODAS as sessoes conectadas, nao so as
+# com request ativa. Necessaria pro caso do "bloqueador ocioso": uma sessao que abriu transacao e
+# segura lock sem estar rodando nada agora nunca aparece em `_SESSION_ACTIVITY_QUERY` (que faz
+# INNER JOIN com `sys.dm_exec_requests`), entao sem isso ela ficaria sem usuario/programa/maquina
+# na arvore — so o `session_id`. `is_user_process = 1` exclui sessoes de sistema/background.
+_ALL_SESSIONS_QUERY = """
+    SELECT session_id, login_name, host_name, program_name
+    FROM sys.dm_exec_sessions
+    WHERE is_user_process = 1
+"""
+
+# Etapa 9 — resolve o OBJETO bloqueado (nao so o recurso bruto de `wait_resource`, ja selecionado
+# em `_SESSION_ACTIVITY_QUERY`) pra sessoes atualmente esperando por um lock (`request_status =
+# 'WAIT'`). Padrao oficial da Microsoft: pra `resource_type = 'OBJECT'`,
+# `resource_associated_entity_id` JA E o `object_id` (usavel direto em `OBJECT_NAME`); pra
+# `'PAGE'/'KEY'/'RID'`, e o `hobt_id` — precisa de `sys.partitions` pra achar o `object_id`.
+# `sys.partitions` e uma view POR BANCO (so enxerga o banco atual da conexao) — o join com
+# `resource_database_id = DB_ID()` deliberadamente so resolve `blocked_object` quando o lock e no
+# mesmo banco da conexao; bloqueio cross-database (banco monitorado != banco da conexao) fica com
+# `blocked_object = NULL`, so o `wait_resource` bruto (corte de escopo documentado, nao um bug).
+_BLOCKED_OBJECT_QUERY = """
+    SELECT
+        l.request_session_id AS session_id,
+        l.resource_type,
+        CASE l.resource_type
+            WHEN 'OBJECT' THEN OBJECT_NAME(l.resource_associated_entity_id, l.resource_database_id)
+            ELSE OBJECT_NAME(p.object_id, l.resource_database_id)
+        END AS blocked_object
+    FROM sys.dm_tran_locks AS l
+    LEFT JOIN sys.partitions AS p
+        ON l.resource_type IN ('PAGE', 'KEY', 'RID')
+        AND l.resource_database_id = DB_ID()
+        AND p.hobt_id = l.resource_associated_entity_id
+    WHERE l.request_status = 'WAIT'
 """
 
 # So contadores RAW (`cntr_type=65792`) — delta/razao (§5, corte de escopo) nao implementados.
@@ -150,6 +190,7 @@ _MISSING_INDEX_QUERY = """
         mid.statement AS table_name,
         migs.avg_total_user_cost * migs.avg_user_impact
             * (migs.user_seeks + migs.user_scans) AS impact_score,
+        migs.avg_total_user_cost, migs.avg_user_impact,
         mid.equality_columns, mid.inequality_columns, mid.included_columns,
         migs.user_seeks, migs.user_scans
     FROM sys.dm_db_missing_index_group_stats AS migs
@@ -283,6 +324,12 @@ def _connect_and_collect(
         cursor.execute(_SESSION_ACTIVITY_QUERY)
         session_rows = list(cursor.fetchall())[:max_rows]
 
+        cursor.execute(_ALL_SESSIONS_QUERY)
+        all_session_rows = list(cursor.fetchall())[:max_rows]
+
+        cursor.execute(_BLOCKED_OBJECT_QUERY)
+        blocked_object_rows = list(cursor.fetchall())[:max_rows]
+
         cursor.execute(_PERFORMANCE_COUNTERS_QUERY)
         counter_rows = list(cursor.fetchall())[:max_rows]
 
@@ -291,7 +338,9 @@ def _connect_and_collect(
         conn.close()
 
     query_samples = _build_query_samples(session_rows, instance_id, collected_at)
-    blocking_events = _build_blocking_events(session_rows, instance_id, collected_at)
+    blocking_events = _build_blocking_events(
+        session_rows, all_session_rows, blocked_object_rows, instance_id, collected_at
+    )
     metric_samples = _build_metric_samples(session_rows, counter_rows, instance_id, collected_at)
     return metric_samples, query_samples, blocking_events, product_version, version_major
 
@@ -349,6 +398,16 @@ def _build_missing_index_suggestions(
                     "included_columns": row["included_columns"],
                     "user_seeks": row["user_seeks"],
                     "user_scans": row["user_scans"],
+                    "avg_total_user_cost": (
+                        float(row["avg_total_user_cost"])
+                        if row.get("avg_total_user_cost") is not None
+                        else None
+                    ),
+                    "avg_user_impact": (
+                        float(row["avg_user_impact"])
+                        if row.get("avg_user_impact") is not None
+                        else None
+                    ),
                 },
             )
         )
@@ -436,14 +495,38 @@ def _build_query_samples(
 
 
 def _build_blocking_events(
-    session_rows: list[dict], instance_id: UUID, collected_at: datetime
+    session_rows: list[dict],
+    all_session_rows: list[dict],
+    blocked_object_rows: list[dict],
+    instance_id: UUID,
+    collected_at: datetime,
 ) -> list[NormalizedBlockingEvent]:
-    """Nivel direto apenas (`blocking_session_id`), sem arvore recursiva completa (corte de
-    escopo). Sentinela negativo (-2 a -5) = bloqueador nao determinavel, tratado como "sem
-    evento" — NUNCA como erro. O bloqueador pode nao ter request ativa (sessao ociosa segurando
-    lock) — nesse caso `blocker_sql_hash=None`, mas o evento ainda e registrado.
+    """Nivel direto apenas (`blocking_session_id`) — a arvore completa (Etapa 9) e reconstruida
+    no app encadeando as arestas de um mesmo snapshot (`app.api.v1.waits_blocking`). Sentinela
+    negativo (-2 a -5) = bloqueador nao determinavel, tratado como "sem evento" — NUNCA como
+    erro.
+
+    Identidade (usuario/programa/maquina) vem PRIMEIRO de `session_rows` (que ja carrega
+    login_name/host_name/program_name via join com `sys.dm_exec_sessions` para sessoes com
+    request ativa) e cai pra `all_session_rows` (identidade de QUALQUER sessao conectada) quando
+    a sessao nao tem request ativa — o caso do bloqueador ocioso, que de outra forma ficaria sem
+    nenhuma identidade. `blocked_object`/`blocked_wait_resource` sao melhor esforco (ver
+    `_BLOCKED_OBJECT_QUERY`/docstring de `NormalizedBlockingEvent`) — so preenchidos pro lado
+    BLOQUEADO (e quem esta de fato esperando por um recurso).
     """
     sessions_by_id = {row["session_id"]: row for row in session_rows}
+    identity_by_id = {row["session_id"]: row for row in all_session_rows}
+    blocked_object_by_id = {row["session_id"]: row for row in blocked_object_rows}
+
+    def _identity(session_id: int) -> tuple[str | None, str | None, str | None]:
+        active_row = sessions_by_id.get(session_id)
+        if active_row is not None:
+            return active_row["login_name"], active_row["program_name"], active_row["host_name"]
+        idle_row = identity_by_id.get(session_id)
+        if idle_row is not None:
+            return idle_row["login_name"], idle_row["program_name"], idle_row["host_name"]
+        return None, None, None
+
     events: list[NormalizedBlockingEvent] = []
     for row in session_rows:
         blocking_session_id = row["blocking_session_id"]
@@ -453,6 +536,9 @@ def _build_blocking_events(
         blocker_sql_hash = (
             _hash_query_text(blocker_row["query_text"]) if blocker_row is not None else None
         )
+        blocker_login, blocker_program, blocker_machine = _identity(blocking_session_id)
+        blocked_login, blocked_program, blocked_machine = _identity(row["session_id"])
+        blocked_object_row = blocked_object_by_id.get(row["session_id"])
         events.append(
             NormalizedBlockingEvent(
                 time=collected_at,
@@ -462,6 +548,20 @@ def _build_blocking_events(
                 blocker_sql_hash=blocker_sql_hash,
                 blocked_sql_hash=_hash_query_text(row["query_text"]),
                 wait_time_ms=row["wait_time"] or 0,
+                blocker_db_user=blocker_login,
+                blocker_program=blocker_program,
+                blocker_machine=blocker_machine,
+                blocker_wait_event_native=(
+                    blocker_row["wait_type"] if blocker_row is not None else None
+                ),
+                blocked_db_user=blocked_login,
+                blocked_program=blocked_program,
+                blocked_machine=blocked_machine,
+                blocked_wait_event_native=row["wait_type"],
+                blocked_wait_resource=row["wait_resource"] or None,
+                blocked_object=(
+                    blocked_object_row["blocked_object"] if blocked_object_row is not None else None
+                ),
             )
         )
     return events

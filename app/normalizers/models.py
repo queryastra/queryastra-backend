@@ -91,9 +91,30 @@ class NormalizedQuerySample(BaseModel):
 class NormalizedBlockingEvent(BaseModel):
     """Evento de bloqueio normalizado — destino: hypertable `blocking_events`.
 
-    Nivel direto apenas (`blocking_session_id`/`pg_blocking_pids`), sem arvore recursiva
-    completa (corte de escopo). `wait_time_ms` sempre preenchido (nunca None) mesmo quando o
-    motor nao expoe duracao de espera diretamente.
+    Uma linha por aresta DIRETA (bloqueador imediato -> bloqueado) — a arvore completa de
+    bloqueio (Etapa 9) e reconstruida no app (`app.api.v1.waits_blocking._build_blocking_tree`)
+    encadeando as arestas de um mesmo snapshot, nao via CTE recursiva ao vivo contra o servidor
+    monitorado. Pro PostgreSQL, `pg_blocking_pids()` devolve o fecho TRANSITIVO de bloqueadores
+    (nao so o direto) — o adaptador reduz isso pra arestas diretas antes de gerar os eventos (ver
+    `app.collectors.postgresql.adapter._reduce_to_direct_edges`), entao mesmo aqui cada linha
+    continua representando so um par direto. `wait_time_ms` sempre preenchido (nunca None) mesmo
+    quando o motor nao expoe duracao de espera diretamente (aproximacao documentada no PostgreSQL).
+
+    Campos de enriquecimento (`blocker_*`/`blocked_*` abaixo) sao capturados no MOMENTO da coleta,
+    nao reconstruidos depois via join contra `query_samples` — e o unico jeito de identificar um
+    bloqueador OCIOSO (sessao que segura lock sem ter request ativa, portanto sem nenhuma linha em
+    `query_samples` naquele ciclo). Todos opcionais/melhor-esforco:
+    - `blocker_db_user`/`blocker_program`/`blocker_machine`: identidade do bloqueador, vinda de
+      TODAS as sessoes conectadas (nao so as com request ativa) — unico jeito de identificar um
+      bloqueador ocioso.
+    - `blocker_wait_event_native`/`blocked_wait_event_native`: o wait nativo de cada lado, quando
+      aquela sessao tambem estiver esperando por algo (None pra um bloqueador puro/ocioso).
+    - `blocked_wait_resource`: recurso bruto que o lado bloqueado esta esperando (SQL Server:
+      `sys.dm_exec_requests.wait_resource`; PostgreSQL: `locktype`/`mode` de `pg_locks`).
+    - `blocked_object`: nome resolvido do objeto bloqueado quando possivel (SQL Server via
+      `sys.dm_tran_locks JOIN sys.partitions` + `OBJECT_NAME()`; PostgreSQL via
+      `pg_locks.relation::regclass`) — None quando nao resolvivel (ex. lock de metadado) ou a
+      linha ja foi liberada entre a consulta de bloqueio e a de recurso no mesmo ciclo.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -105,6 +126,16 @@ class NormalizedBlockingEvent(BaseModel):
     blocker_sql_hash: str | None = None
     blocked_sql_hash: str | None = None
     wait_time_ms: int
+    blocker_db_user: str | None = None
+    blocker_program: str | None = None
+    blocker_machine: str | None = None
+    blocker_wait_event_native: str | None = None
+    blocked_db_user: str | None = None
+    blocked_program: str | None = None
+    blocked_machine: str | None = None
+    blocked_wait_event_native: str | None = None
+    blocked_wait_resource: str | None = None
+    blocked_object: str | None = None
 
 
 class NormalizedMissingIndexSuggestion(BaseModel):

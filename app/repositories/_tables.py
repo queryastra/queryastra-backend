@@ -57,6 +57,21 @@ blocking_events_table = sa.Table(
     sa.Column("blocker_sql_hash", sa.Text(), nullable=True),
     sa.Column("blocked_sql_hash", sa.Text(), nullable=True),
     sa.Column("wait_time_ms", sa.BigInteger(), nullable=False),
+    # Enriquecimento (Etapa 9 — arvore completa de bloqueio): capturado no momento da coleta,
+    # nao reconstruido depois via join contra query_samples — unico jeito de identificar um
+    # bloqueador OCIOSO (sem request ativa, portanto sem linha em query_samples). Todas aditivas
+    # e nullable; blocked_wait_resource/blocked_object sao melhor esforco (ver _tables docstring
+    # e app/normalizers/models.py::NormalizedBlockingEvent).
+    sa.Column("blocker_db_user", sa.Text(), nullable=True),
+    sa.Column("blocker_program", sa.Text(), nullable=True),
+    sa.Column("blocker_machine", sa.Text(), nullable=True),
+    sa.Column("blocker_wait_event_native", sa.Text(), nullable=True),
+    sa.Column("blocked_db_user", sa.Text(), nullable=True),
+    sa.Column("blocked_program", sa.Text(), nullable=True),
+    sa.Column("blocked_machine", sa.Text(), nullable=True),
+    sa.Column("blocked_wait_event_native", sa.Text(), nullable=True),
+    sa.Column("blocked_wait_resource", sa.Text(), nullable=True),
+    sa.Column("blocked_object", sa.Text(), nullable=True),
 )
 
 sql_exclusions_table = sa.Table(

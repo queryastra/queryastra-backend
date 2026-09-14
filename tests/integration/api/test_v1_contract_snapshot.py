@@ -40,6 +40,7 @@ EXPECTED_REST_PATHS = {
     "/api/v1/queries/wait-types-by-day/{instance_id}",
     "/api/v1/queries/wait-types-by-hour/{instance_id}",
     "/api/v1/waits-blocking/blocking/{instance_id}",
+    "/api/v1/waits-blocking/blocking/{instance_id}/session/{session_id}",
     "/api/v1/waits-blocking/waits/{instance_id}",
     "/api/v1/alerts/rules",
     "/api/v1/alerts",

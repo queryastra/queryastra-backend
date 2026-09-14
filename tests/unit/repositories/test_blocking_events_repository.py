@@ -23,6 +23,9 @@ async def test_insert_batch_persists_rows(
             blocker_session_id="1",
             blocked_session_id="2",
             wait_time_ms=100,
+            blocker_db_user="idle_user",
+            blocked_program="psql",
+            blocked_object="t",
         )
     ]
     repo = BlockingEventsRepository(db_session)
@@ -38,6 +41,11 @@ async def test_insert_batch_persists_rows(
     assert rows[0].blocker_session_id == "1"
     assert rows[0].blocked_session_id == "2"
     assert rows[0].wait_time_ms == 100
+    # Etapa 9 — colunas de enriquecimento persistem (o resto fica NULL quando nao informado).
+    assert rows[0].blocker_db_user == "idle_user"
+    assert rows[0].blocked_program == "psql"
+    assert rows[0].blocked_object == "t"
+    assert rows[0].blocker_program is None
 
 
 async def test_insert_batch_noop_for_empty_list(

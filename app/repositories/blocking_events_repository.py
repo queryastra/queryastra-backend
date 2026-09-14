@@ -1,8 +1,11 @@
 """Repositorio da hypertable `blocking_events`.
 
 `blocking_events` (`Docs/database-schema.md` §3) e hypertable, criada por
-`migrations/versions/66ae4664300c_hypertables.py`. Nivel direto apenas (sem arvore recursiva
-completa de bloqueio — corte de escopo, ver `app.normalizers.models.NormalizedBlockingEvent`).
+`migrations/versions/66ae4664300c_hypertables.py`, colunas de enriquecimento adicionadas por
+`migrations/versions/0607d7592ff6_add_blocking_event_enrichment_columns.py`. Uma linha por aresta
+DIRETA (bloqueador imediato -> bloqueado) — a arvore completa de bloqueio e reconstruida no app
+(`app.api.v1.waits_blocking._build_blocking_tree`) encadeando as arestas de um mesmo snapshot, ver
+`app.normalizers.models.NormalizedBlockingEvent`.
 """
 
 from __future__ import annotations
@@ -32,6 +35,16 @@ class BlockingEventsRepository(BaseRepository):
                 "blocker_sql_hash": e.blocker_sql_hash,
                 "blocked_sql_hash": e.blocked_sql_hash,
                 "wait_time_ms": e.wait_time_ms,
+                "blocker_db_user": e.blocker_db_user,
+                "blocker_program": e.blocker_program,
+                "blocker_machine": e.blocker_machine,
+                "blocker_wait_event_native": e.blocker_wait_event_native,
+                "blocked_db_user": e.blocked_db_user,
+                "blocked_program": e.blocked_program,
+                "blocked_machine": e.blocked_machine,
+                "blocked_wait_event_native": e.blocked_wait_event_native,
+                "blocked_wait_resource": e.blocked_wait_resource,
+                "blocked_object": e.blocked_object,
             }
             for e in events
         ]

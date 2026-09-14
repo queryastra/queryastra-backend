@@ -802,13 +802,18 @@ class QuerySamplesRepository(BaseRepository):
     async def latest_by_session(
         self, instance_id: UUID, session_ids: Sequence[str], since: datetime
     ) -> dict[str, sa.Row]:
-        """Amostra mais recente por `session_id` — usada so para enriquecer nos da arvore de
-        bloqueio com sql_text_masked/db_user (`blocking_events` nao guarda esses campos, so
-        sql_hash)."""
+        """Amostra mais recente por `session_id` — usada pra enriquecer a arvore/detalhe de
+        bloqueio com o TEXTO do comando (`blocking_events` nao guarda isso, so o hash — o resto
+        do enriquecimento, identidade/wait/recurso, vem denormalizado no proprio evento, ver
+        `app.normalizers.models.NormalizedBlockingEvent`). `sql_text_full_masked` e usado pela
+        tela de detalhe de sessao (Etapa 9), reaproveitando `HighlightedSqlText` do frontend —
+        sessao sem NENHUMA amostra recente (bloqueador ocioso que nunca rodou nada) simplesmente
+        nao entra no dict, nao inventa dado."""
         if not session_ids:
             return {}
         stmt = sa.text("""
-            SELECT DISTINCT ON (session_id) session_id, sql_hash, sql_text_masked, db_user
+            SELECT DISTINCT ON (session_id)
+                session_id, sql_hash, sql_text_masked, sql_text_full_masked, db_user
             FROM query_samples
             WHERE instance_id = :instance_id AND session_id = ANY(:session_ids) AND time >= :since
             ORDER BY session_id, time DESC

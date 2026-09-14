@@ -29,6 +29,7 @@ def _request_row(
     wait_time: int = 0,
     full_query_text: str | None = None,
     cpu_time_ms: int = 500,
+    wait_resource: str | None = None,
 ) -> dict[str, Any]:
     """`query_text` simula o `SUBSTRING` ja fatiado pelo statement em execucao (o que a query
     real devolve); `full_query_text` simula `t.text` cru (o batch/procedure inteiro) — por
@@ -48,6 +49,7 @@ def _request_row(
         "blocking_session_id": blocking_session_id,
         "wait_type": wait_type,
         "wait_time": wait_time,
+        "wait_resource": wait_resource,
         "login_name": "monitoring_user",
         "host_name": "app-server-1",
         "program_name": "sqlcmd",
@@ -58,10 +60,19 @@ def _request_row(
 
 
 class _FakeCursor:
-    def __init__(self, version_row: dict[str, Any], session_rows: list, counter_rows: list) -> None:
+    def __init__(
+        self,
+        version_row: dict[str, Any],
+        session_rows: list,
+        counter_rows: list,
+        all_session_rows: list,
+        blocked_object_rows: list,
+    ) -> None:
         self._version_row = version_row
         self._session_rows = session_rows
         self._counter_rows = counter_rows
+        self._all_session_rows = all_session_rows
+        self._blocked_object_rows = blocked_object_rows
         self._pending: list[dict[str, Any]] = []
 
     def execute(self, query: str) -> None:
@@ -69,6 +80,10 @@ class _FakeCursor:
             self._pending = [self._version_row]
         elif "dm_exec_requests" in query:
             self._pending = self._session_rows
+        elif "dm_tran_locks" in query:
+            self._pending = self._blocked_object_rows
+        elif "dm_exec_sessions" in query:
+            self._pending = self._all_session_rows
         elif "dm_os_performance_counters" in query:
             self._pending = self._counter_rows
         else:
@@ -85,15 +100,30 @@ class _FakeCursor:
 
 
 class _FakeConnection:
-    def __init__(self, version_row: dict[str, Any], session_rows: list, counter_rows: list) -> None:
+    def __init__(
+        self,
+        version_row: dict[str, Any],
+        session_rows: list,
+        counter_rows: list,
+        all_session_rows: list,
+        blocked_object_rows: list,
+    ) -> None:
         self._version_row = version_row
         self._session_rows = session_rows
         self._counter_rows = counter_rows
+        self._all_session_rows = all_session_rows
+        self._blocked_object_rows = blocked_object_rows
         self.closed = False
 
     def cursor(self, as_dict: bool = False) -> _FakeCursor:
         assert as_dict is True
-        return _FakeCursor(self._version_row, self._session_rows, self._counter_rows)
+        return _FakeCursor(
+            self._version_row,
+            self._session_rows,
+            self._counter_rows,
+            self._all_session_rows,
+            self._blocked_object_rows,
+        )
 
     def close(self) -> None:
         self.closed = True
@@ -104,8 +134,29 @@ def _patch_connect(
     version_row: dict[str, Any],
     session_rows: list,
     counter_rows: list,
+    all_session_rows: list | None = None,
+    blocked_object_rows: list | None = None,
 ) -> _FakeConnection:
-    fake_conn = _FakeConnection(version_row, session_rows, counter_rows)
+    # `all_session_rows` default: identidade equivalente a `session_rows` (converte cada linha de
+    # request pras 4 colunas de `_ALL_SESSIONS_QUERY`) — suficiente pra maioria dos testes, que
+    # nao focam no caso do bloqueador ocioso (sem request ativa).
+    if all_session_rows is None:
+        all_session_rows = [
+            {
+                "session_id": row["session_id"],
+                "login_name": row["login_name"],
+                "host_name": row["host_name"],
+                "program_name": row["program_name"],
+            }
+            for row in session_rows
+        ]
+    fake_conn = _FakeConnection(
+        version_row,
+        session_rows,
+        counter_rows,
+        all_session_rows,
+        blocked_object_rows if blocked_object_rows is not None else [],
+    )
 
     def fake_connect(**kwargs: object) -> _FakeConnection:
         return fake_conn
@@ -171,6 +222,79 @@ async def test_collect_creates_blocking_event_for_positive_blocking_session_id(
     assert event.blocked_session_id == "61"
     assert event.wait_time_ms == 250
     assert event.blocker_sql_hash is not None
+
+
+async def test_collect_enriches_idle_blocker_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Etapa 9 — um bloqueador OCIOSO (sem request ativa) nao aparece em
+    `_SESSION_ACTIVITY_QUERY` (INNER JOIN com `sys.dm_exec_requests`), entao fica sem identidade
+    se so olharmos `session_rows`. `_ALL_SESSIONS_QUERY` (`sys.dm_exec_sessions`, todas as
+    sessoes conectadas) fecha esse gap."""
+    session_rows = [
+        _request_row(session_id=91, query_text="SELECT * FROM t", blocking_session_id=90),
+    ]
+    all_session_rows = [
+        {
+            "session_id": 91,
+            "login_name": "monitoring_user",
+            "host_name": "app-server-1",
+            "program_name": "sqlcmd",
+        },
+        {
+            "session_id": 90,
+            "login_name": "idle_blocker_user",
+            "host_name": "batch-host",
+            "program_name": "batch_job.exe",
+        },
+    ]
+    _patch_connect(
+        monkeypatch,
+        version_row={"product_version": "16.0.1000.6"},
+        session_rows=session_rows,
+        counter_rows=_COUNTER_ROWS,
+        all_session_rows=all_session_rows,
+    )
+
+    collector = SQLServerCollector(connection=_CONNECTION, instance_id=uuid4())
+    result = await collector.collect()
+
+    assert len(result.blocking_events) == 1
+    event = result.blocking_events[0]
+    assert event.blocker_db_user == "idle_blocker_user"
+    assert event.blocker_program == "batch_job.exe"
+    assert event.blocker_machine == "batch-host"
+
+
+async def test_collect_populates_blocked_object_from_dm_tran_locks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Etapa 9 — `blocked_object`/`blocked_wait_resource` vem de `wait_resource` (bruto, ja em
+    `_SESSION_ACTIVITY_QUERY`) e `sys.dm_tran_locks`/`sys.partitions` (nome resolvido) — so pro
+    lado BLOQUEADO."""
+    session_rows = [
+        _request_row(session_id=100, query_text="UPDATE t SET a=1", blocking_session_id=0),
+        _request_row(
+            session_id=101,
+            query_text="SELECT * FROM t",
+            blocking_session_id=100,
+            wait_resource="KEY: 5:72057594051690496 (ffeb27d6a833)",
+        ),
+    ]
+    blocked_object_rows = [{"session_id": 101, "resource_type": "KEY", "blocked_object": "dbo.t"}]
+    _patch_connect(
+        monkeypatch,
+        version_row={"product_version": "16.0.1000.6"},
+        session_rows=session_rows,
+        counter_rows=_COUNTER_ROWS,
+        blocked_object_rows=blocked_object_rows,
+    )
+
+    collector = SQLServerCollector(connection=_CONNECTION, instance_id=uuid4())
+    result = await collector.collect()
+
+    assert len(result.blocking_events) == 1
+    event = result.blocking_events[0]
+    assert event.blocked_object == "dbo.t"
+    assert event.blocked_wait_resource == "KEY: 5:72057594051690496 (ffeb27d6a833)"
 
 
 async def test_collect_maps_raw_counters_correctly(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -322,6 +446,8 @@ def _missing_index_row(
         "database_name": database_name,
         "table_name": table_name,
         "impact_score": impact_score,
+        "avg_total_user_cost": avg_total_user_cost,
+        "avg_user_impact": avg_user_impact,
         "equality_columns": equality_columns,
         "inequality_columns": inequality_columns,
         "included_columns": included_columns,
@@ -352,6 +478,8 @@ async def test_collect_missing_index_suggestions_builds_readable_suggestion(
     assert "valor" in suggestion.suggestion
     assert suggestion.detail["user_seeks"] == 100
     assert suggestion.detail["user_scans"] == 10
+    assert suggestion.detail["avg_total_user_cost"] == 5.0
+    assert suggestion.detail["avg_user_impact"] == 80.0
 
 
 async def test_collect_missing_index_suggestions_handles_null_columns(

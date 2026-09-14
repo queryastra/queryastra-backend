@@ -13,10 +13,14 @@ Usa `asyncpg` (Docs/database-schema.md, ARCHITECTURE_SPEC.md §4) como driver as
 fetch (`settings.collection_max_rows`) — nunca DDL/DML:
     - `pg_stat_activity` (WHERE state != 'idle') — sessao/query ativa (collector-queries.md §1),
       normalizada em `NormalizedQuerySample` (mascarada via `mask_sql_literals` antes do hash).
-    - `pg_blocking_pids(pid)` — deteccao de bloqueio de nivel direto apenas (collector-queries.md
-      §2); NAO implementa a arvore recursiva completa (corte de escopo desta feature).
-      `wait_time_ms` de `NormalizedBlockingEvent` e uma aproximacao (`collected_at - query_start`
-      da sessao bloqueada, ou `0`) — Postgres nao expoe duracao nativa de espera de lock.
+    - `pg_blocking_pids(pid)` — deteccao de bloqueio (collector-queries.md §2); devolve o fecho
+      TRANSITIVO de bloqueadores, reduzido pro(s) bloqueador(es) DIRETO(s) por
+      `_reduce_to_direct_edges` antes de virar `NormalizedBlockingEvent` — a arvore completa
+      (Etapa 9) e reconstruida no app encadeando essas arestas diretas de um mesmo snapshot
+      (`app.api.v1.waits_blocking`), nao via CTE recursiva ao vivo. `wait_time_ms` e uma
+      aproximacao (`collected_at - query_start` da sessao bloqueada, ou `0`) — Postgres nao expoe
+      duracao nativa de espera de lock. `_ALL_SESSIONS_QUERY` identifica bloqueadores OCIOSOS
+      (sem `state` ativo); `_BLOCKED_OBJECT_QUERY` (`pg_locks`) resolve o objeto bloqueado.
     - `pg_stat_database` (agregado via SUM, cluster inteiro — `ConnectionParams` nao carrega
       banco especifico) e `pg_stat_bgwriter` (< PG17) / `pg_stat_checkpointer` (>= PG17) —
       metricas de recurso/instancia (collector-queries.md §5). Versao e detectada a cada ciclo
@@ -107,6 +111,27 @@ _BLOCKING_QUERY = """
     WHERE cardinality(pg_blocking_pids(pid)) > 0
 """
 
+# Etapa 9 (arvore completa de bloqueio) — identidade de TODAS as sessoes conectadas, sem o filtro
+# `state != 'idle'` de `_SESSION_ACTIVITY_QUERY`. Necessaria pro "bloqueador ocioso": uma sessao
+# com transacao aberta segurando lock sem estar rodando nada (`state = 'idle in transaction'` ou,
+# no caso raro de lock preservado por outro motivo, mesmo `'idle'`) nao aparece em
+# `_SESSION_ACTIVITY_QUERY` — sem isso, ficaria sem usuario/programa/maquina na arvore.
+_ALL_SESSIONS_QUERY = """
+    SELECT pid, usename, application_name, client_addr
+    FROM pg_stat_activity
+"""
+
+# Etapa 9 — recurso/objeto bloqueado. `pg_locks` e uma view do sistema (sem role especial
+# exigida) — `NOT granted` filtra so os PEDIDOS de lock ainda esperando (o pid bloqueado). `mode`
+# e o modo de lock pedido (ex. "ShareLock"); `relation::regclass` resolve o nome qualificado da
+# tabela quando o lock e sobre uma relacao (NULL pra locktype sem relacao associada, ex.
+# transactionid/tuple/advisory — `blocked_object` fica NULL nesse caso, nao e erro).
+_BLOCKED_OBJECT_QUERY = """
+    SELECT pid, locktype, mode, relation::regclass::text AS blocked_object
+    FROM pg_locks
+    WHERE NOT granted
+"""
+
 _DATABASE_STATS_QUERY = """
     SELECT sum(numbackends) AS numbackends, sum(xact_commit) AS xact_commit,
            sum(xact_rollback) AS xact_rollback, sum(blks_read) AS blks_read,
@@ -158,6 +183,28 @@ _ARCHIVER_STATUS_QUERY = """
            failed_count, last_failed_wal, last_failed_time, stats_reset
     FROM pg_stat_archiver
 """
+
+
+def _reduce_to_direct_edges(blocked_by_map: dict[int, set[int]]) -> dict[int, set[int]]:
+    """Reduz o fecho transitivo de `pg_blocking_pids()` pro(s) bloqueador(es) DIRETO(s).
+
+    `pg_blocking_pids(pid)` documenta devolver todo mundo "a frente" de `pid` na fila de espera,
+    nao so quem bloqueia `pid` imediatamente — se A bloqueia B e B bloqueia C,
+    `blocked_by_map[C] == {A, B}`, nao so `{B}`. Um bloqueador `b` e mantido em `blockers(w)` so
+    se `b` NAO estiver, ele mesmo, no conjunto de bloqueadores de outro `b2` tambem presente em
+    `blockers(w)` — nesse caso `b` so bloqueia `w` INDIRETAMENTE (via `b2`), entao e removido,
+    sobrando so o(s) bloqueador(es) mais proximo(s). Sem essa reducao, a arvore reconstruida em
+    `app.api.v1.waits_blocking` ligaria C tanto em A quanto em B, achatando/duplicando a cadeia
+    real A -> B -> C.
+    """
+    direct: dict[int, set[int]] = {}
+    for waiter, blockers in blocked_by_map.items():
+        direct[waiter] = {
+            b
+            for b in blockers
+            if not any(b in blocked_by_map.get(b2, ()) for b2 in blockers if b2 != b)
+        }
+    return direct
 
 
 class PostgreSQLCollector:
@@ -339,6 +386,16 @@ class PostgreSQLCollector:
             )
             blocking_rows = blocking_rows[: settings.collection_max_rows]
 
+            all_session_rows = await self._fetch_rows(
+                conn, _ALL_SESSIONS_QUERY, settings.collection_query_timeout_seconds
+            )
+            all_session_rows = all_session_rows[: settings.collection_max_rows]
+
+            blocked_object_rows = await self._fetch_rows(
+                conn, _BLOCKED_OBJECT_QUERY, settings.collection_query_timeout_seconds
+            )
+            blocked_object_rows = blocked_object_rows[: settings.collection_max_rows]
+
             database_stats_row = await asyncio.wait_for(
                 conn.fetchrow(_DATABASE_STATS_QUERY),
                 timeout=settings.collection_query_timeout_seconds,
@@ -358,7 +415,9 @@ class PostgreSQLCollector:
             await conn.close()
 
         query_samples = self._build_query_samples(session_rows, collected_at)
-        blocking_events = self._build_blocking_events(session_rows, blocking_rows, collected_at)
+        blocking_events = self._build_blocking_events(
+            session_rows, blocking_rows, all_session_rows, blocked_object_rows, collected_at
+        )
         metric_samples = self._build_metric_samples(
             session_rows,
             database_stats_row,
@@ -443,17 +502,46 @@ class PostgreSQLCollector:
         self,
         session_rows: list[asyncpg.Record],
         blocking_rows: list[asyncpg.Record],
+        all_session_rows: list[asyncpg.Record],
+        blocked_object_rows: list[asyncpg.Record],
         collected_at: datetime,
     ) -> list[NormalizedBlockingEvent]:
-        """Constroi um evento por par (bloqueador, bloqueado) — nivel direto apenas.
+        """Constroi um evento por par (bloqueador DIRETO, bloqueado).
+
+        `pg_blocking_pids(pid)` devolve o fecho TRANSITIVO de bloqueadores (toda a fila a frente,
+        nao so o bloqueador imediato — confirmado na documentacao oficial: se A bloqueia B e B
+        bloqueia C, `pg_blocking_pids(C)` devolve `{A, B}`, nao so `{B}`). `_reduce_to_direct_edges`
+        reduz cada `blocked_by` pro(s) bloqueador(es) mais proximo(s) antes de gerar eventos — sem
+        isso, a arvore reconstruida em `app.api.v1.waits_blocking` ficaria achatada/duplicada (C
+        apareceria bloqueado por A E por B, em vez de A -> B -> C).
 
         `wait_time_ms` e uma APROXIMACAO: Postgres nao expoe duracao nativa de espera de lock,
         entao usamos `collected_at - query_start` da sessao bloqueada quando disponivel, ou `0`
-        quando `query_start` e `None`.
+        quando `query_start` e `None`. Identidade (usuario/programa/maquina) vem PRIMEIRO de
+        `session_rows` (sessao ativa) e cai pra `all_session_rows` (qualquer sessao conectada)
+        pro caso do bloqueador ocioso — mesmo padrao do adaptador SQL Server.
         """
         assert self._instance_id is not None  # garantido por collect()
         instance_id: UUID = self._instance_id
         sessions_by_pid = {row["pid"]: row for row in session_rows}
+        identity_by_pid = {row["pid"]: row for row in all_session_rows}
+        blocked_object_by_pid = {row["pid"]: row for row in blocked_object_rows}
+
+        def _identity(pid: int) -> tuple[str | None, str | None, str | None]:
+            active_row = sessions_by_pid.get(pid)
+            row = active_row if active_row is not None else identity_by_pid.get(pid)
+            if row is None:
+                return None, None, None
+            client_addr = row["client_addr"]
+            return (
+                row["usename"],
+                row["application_name"],
+                str(client_addr) if client_addr is not None else None,
+            )
+
+        blocked_by_map = {row["pid"]: set(row["blocked_by"]) for row in blocking_rows}
+        direct_edges = _reduce_to_direct_edges(blocked_by_map)
+
         events: list[NormalizedBlockingEvent] = []
         for row in blocking_rows:
             blocked_pid = row["pid"]
@@ -469,11 +557,14 @@ class PostgreSQLCollector:
                 if query_start is not None
                 else 0
             )
-            for blocker_pid in row["blocked_by"]:
+            blocked_login, blocked_program, blocked_machine = _identity(blocked_pid)
+            blocked_object_row = blocked_object_by_pid.get(blocked_pid)
+            for blocker_pid in direct_edges.get(blocked_pid, set()):
                 blocker_session = sessions_by_pid.get(blocker_pid)
                 blocker_sql_hash = self._hash_query(
                     blocker_session["query"] if blocker_session is not None else None
                 )
+                blocker_login, blocker_program, blocker_machine = _identity(blocker_pid)
                 events.append(
                     NormalizedBlockingEvent(
                         time=collected_at,
@@ -483,6 +574,28 @@ class PostgreSQLCollector:
                         blocker_sql_hash=blocker_sql_hash,
                         blocked_sql_hash=blocked_sql_hash,
                         wait_time_ms=wait_time_ms,
+                        blocker_db_user=blocker_login,
+                        blocker_program=blocker_program,
+                        blocker_machine=blocker_machine,
+                        blocker_wait_event_native=(
+                            blocker_session["wait_event"] if blocker_session is not None else None
+                        ),
+                        blocked_db_user=blocked_login,
+                        blocked_program=blocked_program,
+                        blocked_machine=blocked_machine,
+                        blocked_wait_event_native=(
+                            blocked_session["wait_event"] if blocked_session is not None else None
+                        ),
+                        blocked_wait_resource=(
+                            f"{blocked_object_row['locktype']}/{blocked_object_row['mode']}"
+                            if blocked_object_row is not None
+                            else None
+                        ),
+                        blocked_object=(
+                            blocked_object_row["blocked_object"]
+                            if blocked_object_row is not None
+                            else None
+                        ),
                     )
                 )
         return events
