@@ -429,8 +429,8 @@ async def test_top_wait_types_includes_synthetic_cpu_bucket_when_wait_time_is_ze
     )
 
     by_type = {row.wait_event_native: row for row in rows}
-    assert set(by_type) == {"CPU"}
-    assert by_type["CPU"].total_wait_time_ms == 700
+    assert set(by_type) == {"Memory/CPU"}
+    assert by_type["Memory/CPU"].total_wait_time_ms == 700
 
 
 async def test_top_wait_types_includes_synthetic_cpu_bucket(
@@ -473,8 +473,8 @@ async def test_top_wait_types_includes_synthetic_cpu_bucket(
     )
 
     by_type = {row.wait_event_native: row for row in rows}
-    assert set(by_type) == {"CPU", "LCK_M_S"}
-    assert by_type["CPU"].total_wait_time_ms == 500
+    assert set(by_type) == {"Memory/CPU", "LCK_M_S"}
+    assert by_type["Memory/CPU"].total_wait_time_ms == 500
     assert by_type["LCK_M_S"].total_wait_time_ms == 200
 
 
@@ -523,7 +523,7 @@ async def test_top_wait_types_cpu_bucket_sums_effective_delta_not_raw_cpu_time(
 
     by_type = {row.wait_event_native: row for row in rows}
     # 100 (primeira amostra, valor cheio) + (250 - 100) = 250, nao 100 + 250 = 350
-    assert by_type["CPU"].total_wait_time_ms == 250
+    assert by_type["Memory/CPU"].total_wait_time_ms == 250
 
 
 async def test_wait_time_by_bucket_and_wait_type_groups_by_utc_day(

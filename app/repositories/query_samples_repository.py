@@ -174,7 +174,7 @@ class QuerySamplesRepository(BaseRepository):
 
     _NOT_CPU_ONLY_FILTER = "NOT (wait_event_native IS NULL AND coalesce(wait_time_ms, 0) = 0)"
     """Fragmento de `WHERE` usado no lado "espera nomeada" do UNION ALL dos metodos que agora
-    incluem o bucket sintetico 'CPU' (`top_wait_types`, `wait_breakdown_by_database`,
+    incluem o bucket sintetico 'Memory/CPU' (`top_wait_types`, `wait_breakdown_by_database`,
     `wait_breakdown_by_sql_hash`) — sem isso, uma amostra sem NENHUMA espera ativa contaria DUAS
     vezes: uma como 'CPU: Xms' (correto) e outra como 'desconhecido: 0ms' (ruido). `wait_time_ms`
     diferente de zero (uma espera "sem nome conhecido") continua aparecendo normalmente como
@@ -279,7 +279,8 @@ class QuerySamplesRepository(BaseRepository):
         sem espera ativa — ver docstring de `_EFFECTIVE_WAIT_SELECT`), nao mais `wait_time_ms`
         bruto — ver docstring da classe para o porque. Somar os dois aqui (em vez de manter
         `total_wait_time_ms` só-espera) é o que faz os segmentos de `wait_breakdown` (que já
-        incluem o bucket 'CPU') somarem exatamente ao total da barra, sem estourar a largura."""
+        incluem o bucket 'Memory/CPU') somarem exatamente ao total da barra, sem estourar a
+        largura."""
         stmt = sa.text(
             f"""
             WITH effective AS ({self._EFFECTIVE_WAIT_SELECT}),
@@ -354,12 +355,12 @@ class QuerySamplesRepository(BaseRepository):
         precisa de moda/`wait_mode` como em `top_sql()` porque `filtered` ja fixa um unico
         `wait_event_native`, que mapeia sempre pra uma unica categoria canonica.
 
-        `wait_event_native == "CPU"` e um caso especial: esse label e SINTETICO (nunca gravado em
-        `query_samples` — so existe na agregacao, ver `top_wait_types`), entao filtrar por
-        igualdade literal nunca acharia nada. Filtra por `wait_event_native IS NULL` (a mesma
-        condicao usada pra gerar o bucket 'CPU') e soma `effective_cpu_ms` em vez de
+        `wait_event_native == "Memory/CPU"` e um caso especial: esse label e SINTETICO (nunca
+        gravado em `query_samples` — so existe na agregacao, ver `top_wait_types`), entao filtrar
+        por igualdade literal nunca acharia nada. Filtra por `wait_event_native IS NULL` (a mesma
+        condicao usada pra gerar o bucket 'Memory/CPU') e soma `effective_cpu_ms` em vez de
         `effective_wait_ms`."""
-        is_cpu_bucket = wait_event_native == "CPU"
+        is_cpu_bucket = wait_event_native == "Memory/CPU"
         wait_filter = (
             "wait_event_native IS NULL AND coalesce(wait_time_ms, 0) = 0"
             if is_cpu_bucket
@@ -455,7 +456,7 @@ class QuerySamplesRepository(BaseRepository):
         nunca descartado. `total_wait_time_ms`/`avg_wait_time_ms` somam/promediam
         `effective_wait_ms` (delta real por amostra) — ver docstring da classe. Waits benignos/de
         background (`_BENIGN_WAIT_EVENT_NATIVE`) sao excluidos do `GROUP BY` inteiramente (nao
-        aparecem como "WAITFOR: 0ms"). Inclui um bucket sintetico 'CPU' (`effective_cpu_ms`,
+        aparecem como "WAITFOR: 0ms"). Inclui um bucket sintetico 'Memory/CPU' (`effective_cpu_ms`,
         amostras sem nenhuma espera ativa) via UNION ALL — fecha um gap real confirmado
         comparando com o SolarWinds DPA (categoria "Memory/CPU" alem das esperas nomeadas, ver
         docstring de `_EFFECTIVE_WAIT_SELECT`)."""
@@ -468,7 +469,7 @@ class QuerySamplesRepository(BaseRepository):
                 FROM effective
                 WHERE {self._NOT_BENIGN_WAIT_FILTER} AND {self._NOT_CPU_ONLY_FILTER}
                 UNION ALL
-                SELECT 'CPU' AS wait_event_native, effective_cpu_ms AS ms
+                SELECT 'Memory/CPU' AS wait_event_native, effective_cpu_ms AS ms
                 FROM effective
                 WHERE wait_event_native IS NULL AND coalesce(wait_time_ms, 0) = 0
             )
@@ -507,8 +508,8 @@ class QuerySamplesRepository(BaseRepository):
         NULL viram 'desconhecido' (COALESCE), nunca descartados — mesmo padrao de
         `top_sql_by_database`. `total_wait_time_ms` soma `effective_wait_ms` (delta real por
         amostra) — ver docstring da classe. Waits benignos/de background excluidos do `GROUP BY`
-        inteiramente (ver `_NOT_BENIGN_WAIT_FILTER`). Inclui um bucket sintetico 'CPU' por banco
-        (`effective_cpu_ms`) via UNION ALL — mesmo gap fechado em `top_wait_types`."""
+        inteiramente (ver `_NOT_BENIGN_WAIT_FILTER`). Inclui um bucket sintetico 'Memory/CPU' por
+        banco (`effective_cpu_ms`) via UNION ALL — mesmo gap fechado em `top_wait_types`."""
         stmt = sa.text(
             f"""
             WITH effective AS ({self._EFFECTIVE_WAIT_SELECT}),
@@ -520,7 +521,7 @@ class QuerySamplesRepository(BaseRepository):
                 WHERE {self._NOT_BENIGN_WAIT_FILTER} AND {self._NOT_CPU_ONLY_FILTER}
                 UNION ALL
                 SELECT COALESCE(database_name, 'desconhecido') AS database_name,
-                       'CPU' AS wait_event_native,
+                       'Memory/CPU' AS wait_event_native,
                        effective_cpu_ms AS ms
                 FROM effective
                 WHERE wait_event_native IS NULL AND coalesce(wait_time_ms, 0) = 0
@@ -562,8 +563,8 @@ class QuerySamplesRepository(BaseRepository):
         so quer a decomposicao das queries daquele banco). `database_name` e filtrado apos a CTE
         `effective` (nao antes, ver docstring da classe). `total_wait_time_ms` soma
         `effective_wait_ms` (delta real por amostra). Waits benignos/de background excluidos do
-        `GROUP BY` inteiramente (ver `_NOT_BENIGN_WAIT_FILTER`). Inclui um bucket sintetico 'CPU'
-        por `sql_hash` (`effective_cpu_ms`) via UNION ALL — mesmo gap fechado em
+        `GROUP BY` inteiramente (ver `_NOT_BENIGN_WAIT_FILTER`). Inclui um bucket sintetico
+        'Memory/CPU' por `sql_hash` (`effective_cpu_ms`) via UNION ALL — mesmo gap fechado em
         `top_wait_types`."""
         stmt = sa.text(
             f"""
@@ -576,7 +577,7 @@ class QuerySamplesRepository(BaseRepository):
                 WHERE (CAST(:database_name AS text) IS NULL OR database_name = :database_name)
                     AND {self._NOT_BENIGN_WAIT_FILTER} AND {self._NOT_CPU_ONLY_FILTER}
                 UNION ALL
-                SELECT sql_hash, 'CPU' AS wait_event_native, effective_cpu_ms AS ms
+                SELECT sql_hash, 'Memory/CPU' AS wait_event_native, effective_cpu_ms AS ms
                 FROM effective
                 WHERE (CAST(:database_name AS text) IS NULL OR database_name = :database_name)
                     AND wait_event_native IS NULL AND coalesce(wait_time_ms, 0) = 0
