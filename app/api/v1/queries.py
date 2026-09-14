@@ -240,6 +240,53 @@ async def top_sql(
     ]
 
 
+@router.get("/top-sql-by-wait-type/{instance_id}", response_model=list[TopSqlEntryResponse])
+async def top_sql_by_wait_type(
+    instance_id: UUID,
+    repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
+    wait_event_native: Annotated[str, Query()],
+    since: Annotated[datetime | None, Query(alias="from")] = None,
+    until: Annotated[datetime | None, Query(alias="to")] = None,
+) -> list[TopSqlEntryResponse]:
+    """Drill-down a partir da folha da dimensao "Waits": quais queries mais consumiram um
+    `wait_event_native` especifico (clicar num tipo de espera no `WaitTypeBarChart` leva aqui).
+    `wait_breakdown` continua sendo o breakdown COMPLETO de cada query (todos os tipos de
+    espera, nao so o filtrado) — mesmo padrao de `top_sql()`, da mais contexto sem custo extra."""
+    settings = get_settings()
+    resolved_since, resolved_until = resolve_time_window(
+        since, until, timedelta(seconds=settings.api_read_default_lookback_seconds)
+    )
+    rows = await repository.top_sql_by_wait_type(
+        instance_id,
+        wait_event_native,
+        resolved_since,
+        resolved_until,
+        settings.api_read_max_rows,
+    )
+    breakdown_rows = await repository.wait_breakdown_by_sql_hash(
+        instance_id,
+        resolved_since,
+        resolved_until,
+        settings.api_read_max_rows,
+    )
+    breakdown_by_hash: dict[str, list[WaitBreakdownEntryResponse]] = {}
+    for row in breakdown_rows:
+        breakdown_by_hash.setdefault(row.sql_hash, []).append(
+            WaitBreakdownEntryResponse(
+                wait_event_native=row.wait_event_native,
+                total_wait_time_ms=row.total_wait_time_ms,
+            )
+        )
+    return [
+        TopSqlEntryResponse(
+            instance_id=instance_id,
+            **row._mapping,
+            wait_breakdown=breakdown_by_hash.get(row.sql_hash, []),
+        )
+        for row in rows
+    ]
+
+
 @router.get("/databases/{instance_id}", response_model=list[DatabaseSummaryResponse])
 async def list_databases(
     instance_id: UUID,

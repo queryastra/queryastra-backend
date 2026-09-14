@@ -106,6 +106,54 @@ async def test_top_sql_aggregates_execution_count_and_wait_time(
     ]
 
 
+async def test_top_sql_by_wait_type_filters_to_the_requested_native_wait(
+    client: AsyncClient, db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """Drill-down a partir da folha da dimensao "Waits" (clicar num tipo de espera no
+    `WaitTypeBarChart`) — so queries com amostra do `wait_event_native` pedido aparecem."""
+    repo = QuerySamplesRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-lck",
+                sql_name="q-lck",
+                sql_text_masked="SELECT ? FROM t",
+                wait_type=WaitCategory.LOCK,
+                wait_event_native="LCK_M_S",
+                wait_time_ms=150,
+            ),
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-io",
+                sql_name="q-io",
+                sql_text_masked="SELECT ? FROM other",
+                wait_type=WaitCategory.IO,
+                wait_event_native="PAGEIOLATCH_SH",
+                wait_time_ms=50,
+            ),
+        ]
+    )
+
+    response = await client.get(
+        f"/api/v1/queries/top-sql-by-wait-type/{test_instance.id}",
+        params={"wait_event_native": "LCK_M_S"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 1
+    assert body[0]["sql_hash"] == "hash-lck"
+    assert body[0]["total_wait_time_ms"] == 150
+    assert body[0]["predominant_wait_type"] == WaitCategory.LOCK.value
+    assert body[0]["instance_id"] == str(test_instance.id)
+
+
 async def test_list_databases_aggregates_by_database_name(
     client: AsyncClient, db_session: AsyncSession, test_instance: Instance
 ) -> None:

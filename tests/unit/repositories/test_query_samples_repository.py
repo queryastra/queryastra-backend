@@ -186,6 +186,68 @@ async def test_top_sql_aggregates_by_hash_with_predominant_wait_type(
     assert row.predominant_wait_type == WaitCategory.LOCK.value
 
 
+async def test_top_sql_by_wait_type_filters_to_queries_with_that_native_wait(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """Drill-down a partir da folha da dimensao "Waits" — so as queries com amostras do
+    `wait_event_native` filtrado aparecem, e o total refletido e so a contribuicao DESSE wait
+    (nao o total da query somando todos os tipos)."""
+    repo = QuerySamplesRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-lck",
+                sql_name="query-lck",
+                sql_text_masked="SELECT ? FROM t",
+                wait_type=WaitCategory.LOCK,
+                wait_event_native="LCK_M_S",
+                wait_time_ms=100,
+            ),
+            NormalizedQuerySample(
+                time=now + timedelta(seconds=1),
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-lck",
+                sql_name="query-lck",
+                sql_text_masked="SELECT ? FROM t",
+                wait_type=WaitCategory.IO,
+                wait_event_native="PAGEIOLATCH_SH",
+                wait_time_ms=999,
+            ),
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-other",
+                sql_name="query-other",
+                sql_text_masked="SELECT ? FROM other",
+                wait_type=WaitCategory.IO,
+                wait_event_native="PAGEIOLATCH_SH",
+                wait_time_ms=50,
+            ),
+        ]
+    )
+
+    rows = await repo.top_sql_by_wait_type(
+        test_instance.id,
+        "LCK_M_S",
+        since=now - timedelta(minutes=1),
+        until=now + timedelta(minutes=1),
+        limit=10,
+    )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.sql_hash == "hash-lck"
+    assert row.execution_count == 1
+    assert row.total_wait_time_ms == 100  # so a amostra LCK_M_S, nao soma a PAGEIOLATCH_SH
+    assert row.predominant_wait_type == WaitCategory.LOCK.value
+
+
 async def test_wait_summary_groups_by_wait_type(
     db_session: AsyncSession, test_instance: Instance
 ) -> None:

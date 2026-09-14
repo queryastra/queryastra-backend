@@ -28,6 +28,7 @@ EXPECTED_REST_PATHS = {
     "/api/v1/metrics/{target_type}/{target_id}",
     "/api/v1/queries/active/{instance_id}",
     "/api/v1/queries/top-sql/{instance_id}",
+    "/api/v1/queries/top-sql-by-wait-type/{instance_id}",
     "/api/v1/queries/databases/{instance_id}",
     "/api/v1/queries/detail/{instance_id}/{sql_hash}",
     "/api/v1/queries/databases-by-day/{instance_id}",

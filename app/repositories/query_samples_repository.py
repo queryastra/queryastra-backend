@@ -294,6 +294,66 @@ class QuerySamplesRepository(BaseRepository):
         )
         return list(result.fetchall())
 
+    async def top_sql_by_wait_type(
+        self,
+        instance_id: UUID,
+        wait_event_native: str,
+        since: datetime,
+        until: datetime,
+        limit: int,
+    ) -> list[sa.Row]:
+        """Drill-down a partir da dimensao "Waits" (folha): quais queries mais consumiram um
+        `wait_event_native` especifico, clicando num tipo de espera no `WaitTypeBarChart`. Mesmo
+        padrao de CTE de `top_sql()`, mas filtrando `filtered` por `wait_event_native` em vez de
+        `database_name` — `total_wait_time_ms`/`avg_wait_time_ms` refletem so a contribuicao
+        DESSE tipo de espera (nao o total da query em todos os tipos), ja que a CTE `filtered` so
+        contem linhas onde esse wait estava ativo. `predominant_wait_type` vem da linha mais
+        recente de `latest` (categoria CANONICA, `wait_type` — nao `wait_event_native` — mesmo
+        campo/semantica de `top_sql()`, usado pelo frontend para colorir por `WaitCategory`); nao
+        precisa de moda/`wait_mode` como em `top_sql()` porque `filtered` ja fixa um unico
+        `wait_event_native`, que mapeia sempre pra uma unica categoria canonica."""
+        stmt = sa.text(
+            f"""
+            WITH effective AS ({self._EFFECTIVE_WAIT_SELECT}),
+            filtered AS (
+                SELECT * FROM effective
+                WHERE wait_event_native = :wait_event_native
+            ),
+            agg AS (
+                SELECT sql_hash, count(*) AS execution_count,
+                       coalesce(sum(effective_wait_ms), 0) AS total_wait_time_ms,
+                       coalesce(avg(effective_wait_ms), 0) AS avg_wait_time_ms
+                FROM filtered
+                GROUP BY sql_hash
+            ),
+            latest AS (
+                SELECT DISTINCT ON (sql_hash)
+                       sql_hash, sql_name, sql_text_masked, database_name, wait_type
+                FROM filtered
+                ORDER BY sql_hash, time DESC
+            )
+            SELECT agg.sql_hash, latest.sql_name, latest.sql_text_masked, latest.database_name,
+                   agg.execution_count, agg.total_wait_time_ms, agg.avg_wait_time_ms,
+                   latest.wait_type AS predominant_wait_type
+            FROM agg
+            JOIN latest ON latest.sql_hash = agg.sql_hash
+            ORDER BY agg.total_wait_time_ms DESC
+            LIMIT :limit
+        """
+        )
+        result = await self._session.execute(
+            stmt,
+            {
+                "instance_id": instance_id,
+                "since": since,
+                "until": until,
+                "limit": limit,
+                "wait_event_native": wait_event_native,
+                "benign_wait_types": list(self._BENIGN_WAIT_EVENT_NATIVE),
+            },
+        )
+        return list(result.fetchall())
+
     async def top_sql_by_database(
         self, instance_id: UUID, since: datetime, until: datetime, limit: int
     ) -> list[sa.Row]:
