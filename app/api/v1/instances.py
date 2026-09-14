@@ -121,6 +121,9 @@ class InstanceSummaryResponse(BaseModel):
     # listagem, sem precisar de round-trip pro detalhe da instancia.
     engine_version_major: int | None
     criticality: str
+    # Aditivo — tela de Configurações (`/settings`) lista todas as instâncias com o intervalo
+    # atual, sem round-trip por instância pro detalhe completo.
+    polling_interval_seconds: int
     health_status: str
     collection_coverage: str
     active: bool
@@ -134,6 +137,23 @@ class InstanceActiveUpdateRequest(BaseModel):
     """Corpo de `PATCH /instances/{id}/active` — liga/desliga monitoramento sem apagar cadastro."""
 
     active: bool
+
+
+class InstanceSettingsUpdateRequest(BaseModel):
+    """Corpo de `PATCH /instances/{id}/settings` — tela de Configurações (ainda sem restrição de
+    acesso; será limitada por RBAC quando essa feature existir, Fase 2). Todo campo é opcional —
+    o cliente manda só o que quer mudar (sub-tela "Intervalo de Coleta" manda só
+    `polling_interval_seconds`; sub-tela "Geral" manda só `criticality`); pelo menos um precisa
+    vir preenchido."""
+
+    polling_interval_seconds: int | None = Field(default=None, ge=1)
+    criticality: str | None = Field(default=None, pattern="^(critical|standard)$")
+
+    @model_validator(mode="after")
+    def _require_at_least_one_field(self) -> InstanceSettingsUpdateRequest:
+        if self.polling_interval_seconds is None and self.criticality is None:
+            raise ValueError("informe ao menos um campo para atualizar")
+        return self
 
 
 class InstanceHealthCheckResponse(BaseModel):
@@ -287,6 +307,7 @@ async def list_instances(
                 engine_version=instance.engine_version,
                 engine_version_major=instance.engine_version_major,
                 criticality=instance.criticality,
+                polling_interval_seconds=instance.polling_interval_seconds,
                 health_status=derived.health_status,
                 collection_coverage=derived.collection_coverage,
                 active=instance.active,
@@ -336,6 +357,38 @@ async def set_instance_active(
     (ver `Docs/collector-queries.md`/supervisors) — a instancia pausada para de ser coletada e
     avaliada na proxima janela de reconciliacao, sem exigir restart do backend."""
     instance = await repository.set_active(instance_id, payload.active)
+    if instance is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Instancia nao encontrada."
+        )
+    derived = await status_service.compute(instance_id)
+    return InstanceDetailResponse(
+        **InstanceResponse.model_validate(instance).model_dump(),
+        health_status=derived.health_status,
+        collection_coverage=derived.collection_coverage,
+        capability_errors=[],
+        last_collected_at=derived.last_collected_at,
+    )
+
+
+@router.patch("/{instance_id}/settings", response_model=InstanceDetailResponse)
+async def update_instance_settings(
+    instance_id: UUID,
+    payload: InstanceSettingsUpdateRequest,
+    repository: Annotated[InstancesRepository, Depends(get_instances_repository)],
+    status_service: Annotated[
+        InstanceDerivedStatusService, Depends(get_instance_derived_status_service)
+    ],
+) -> InstanceDetailResponse:
+    """Tela de Configurações — atualiza qualquer combinação dos campos informados, sem
+    restrição de acesso hoje (será limitada por RBAC quando essa feature existir, Fase 2).
+    `PollingSupervisor` reconcilia instâncias a cada `supervisor_discovery_interval_seconds` — um
+    novo intervalo passa a valer sozinho na próxima reconciliação, sem restart do backend."""
+    instance = await repository.update_settings(
+        instance_id,
+        polling_interval_seconds=payload.polling_interval_seconds,
+        criticality=payload.criticality,
+    )
     if instance is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Instancia nao encontrada."

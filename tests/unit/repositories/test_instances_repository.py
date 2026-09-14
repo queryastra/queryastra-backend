@@ -58,6 +58,44 @@ async def test_set_active_returns_none_for_unknown_instance(db_session: AsyncSes
     assert result is None
 
 
+async def test_update_settings_changes_only_the_field_informed(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """Tela de Configurações — antes só dava pra definir `polling_interval_seconds`/
+    `criticality` no cadastro, sem jeito de editar depois. Campo não informado (`None`) não
+    deve ser tocado — sub-tela "Intervalo de Coleta" só manda `polling_interval_seconds`."""
+    repo = InstancesRepository(db_session)
+    assert test_instance.polling_interval_seconds == 10
+    assert test_instance.criticality == "standard"
+
+    updated = await repo.update_settings(test_instance.id, polling_interval_seconds=1)
+    assert updated is not None
+    assert updated.polling_interval_seconds == 1
+    assert updated.criticality == "standard"  # não informado, não mudou
+
+    reloaded = await repo.get_by_id(test_instance.id)
+    assert reloaded is not None
+    assert reloaded.polling_interval_seconds == 1
+
+
+async def test_update_settings_changes_criticality(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    repo = InstancesRepository(db_session)
+    updated = await repo.update_settings(test_instance.id, criticality="critical")
+    assert updated is not None
+    assert updated.criticality == "critical"
+    assert updated.polling_interval_seconds == 10  # não informado, não mudou
+
+
+async def test_update_settings_returns_none_for_unknown_instance(
+    db_session: AsyncSession,
+) -> None:
+    repo = InstancesRepository(db_session)
+    result = await repo.update_settings(uuid4(), polling_interval_seconds=5)
+    assert result is None
+
+
 async def test_list_all_includes_inactive_instances(
     db_session: AsyncSession, test_instance: Instance
 ) -> None:

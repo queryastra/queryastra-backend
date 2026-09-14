@@ -52,6 +52,37 @@ class InstancesRepository(BaseRepository):
         await self._session.refresh(instance)
         return instance
 
+    async def update_settings(
+        self,
+        instance_id: UUID,
+        *,
+        polling_interval_seconds: int | None = None,
+        criticality: str | None = None,
+    ) -> Instance | None:
+        """Tela de Configurações (`PATCH /instances/{id}/settings`) — atualiza só os campos
+        informados (`None` = não mexe nesse campo), sem restrição de acesso hoje (será limitada
+        por RBAC quando essa feature existir, Fase 2). Cobre por enquanto:
+
+        - `polling_interval_seconds` (sub-tela "Intervalo de Coleta") — antes só era possível
+          definir isso uma vez, no cadastro (`POST /instances`), sem jeito de editar depois.
+          `PollingSupervisor` reconcilia instâncias a cada `supervisor_discovery_interval_seconds`
+          (default 15s), então o novo intervalo passa a valer sozinho na próxima reconciliação,
+          sem restart do backend.
+        - `criticality` (sub-tela "Geral") — mesmo gap: só era definível no cadastro até agora.
+
+        Novos campos editáveis entram aqui como mais um parâmetro opcional, sem precisar de um
+        novo endpoint/rota."""
+        instance = await self.get_by_id(instance_id)
+        if instance is None:
+            return None
+        if polling_interval_seconds is not None:
+            instance.polling_interval_seconds = polling_interval_seconds
+        if criticality is not None:
+            instance.criticality = criticality
+        await self._session.commit()
+        await self._session.refresh(instance)
+        return instance
+
     async def create(self, instance: Instance) -> Instance:
         self._session.add(instance)
         await self._session.commit()

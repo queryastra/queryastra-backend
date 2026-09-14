@@ -212,3 +212,62 @@ async def test_set_instance_active_404_for_unknown_instance(client: AsyncClient)
         json={"active": False},
     )
     assert response.status_code == 404
+
+
+async def test_update_instance_settings_changes_polling_interval(
+    client: AsyncClient, test_instance: Instance
+) -> None:
+    """Tela de Configurações — antes só dava pra definir `polling_interval_seconds` no
+    cadastro; agora dá pra editar uma instância já cadastrada."""
+    assert test_instance.polling_interval_seconds == 10
+
+    response = await client.patch(
+        f"/api/v1/instances/{test_instance.id}/settings",
+        json={"polling_interval_seconds": 1},
+    )
+    assert response.status_code == 200
+    assert response.json()["polling_interval_seconds"] == 1
+
+
+async def test_update_instance_settings_rejects_non_positive_interval(
+    client: AsyncClient, test_instance: Instance
+) -> None:
+    response = await client.patch(
+        f"/api/v1/instances/{test_instance.id}/settings",
+        json={"polling_interval_seconds": 0},
+    )
+    assert response.status_code == 422
+
+
+async def test_update_instance_settings_404_for_unknown_instance(client: AsyncClient) -> None:
+    response = await client.patch(
+        "/api/v1/instances/00000000-0000-0000-0000-000000000000/settings",
+        json={"polling_interval_seconds": 5},
+    )
+    assert response.status_code == 404
+
+
+async def test_update_instance_settings_changes_criticality_only(
+    client: AsyncClient, test_instance: Instance
+) -> None:
+    """Sub-tela "Geral" — manda só `criticality`, sem tocar `polling_interval_seconds`."""
+    assert test_instance.criticality == "standard"
+
+    response = await client.patch(
+        f"/api/v1/instances/{test_instance.id}/settings",
+        json={"criticality": "critical"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["criticality"] == "critical"
+    assert body["polling_interval_seconds"] == 10  # não informado, não mudou
+
+
+async def test_update_instance_settings_rejects_empty_payload(
+    client: AsyncClient, test_instance: Instance
+) -> None:
+    response = await client.patch(
+        f"/api/v1/instances/{test_instance.id}/settings",
+        json={},
+    )
+    assert response.status_code == 422
