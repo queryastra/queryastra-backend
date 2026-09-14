@@ -72,6 +72,13 @@ class NormalizedQuerySample(BaseModel):
     wait_type: WaitCategory | None = None
     wait_event_native: str | None = None
     wait_time_ms: int | None = None
+    # CPU consumida pela request atual, em ms, desde que ela comecou (`sys.dm_exec_requests.
+    # cpu_time` no SQL Server — cumulativo por request, zera numa request nova). So SQL Server
+    # por enquanto (`Docs/collector-queries.md` §1) — PostgreSQL nao expoe um equivalente direto
+    # em `pg_stat_activity`, fica sempre None la. Usado pra fechar o gap real confirmado
+    # comparando com o SolarWinds DPA (categoria "Memory/CPU"): sem isso, tempo gasto rodando na
+    # CPU sem nenhuma espera ativa (`wait_type IS NULL`) nao contava em lugar nenhum.
+    cpu_time_ms: int | None = None
     duration_ms: int | None = None
 
     session_id: str | None = None

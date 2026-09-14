@@ -95,11 +95,15 @@ _BLOCKING_SESSION_REAL_BLOCK_MIN = 1
 # por 2) fatiam so o statement atual - padrao oficial da Microsoft para "o que esta sessao esta
 # executando agora". `query_text` (fatiado) vira `sql_hash`/`sql_text_masked`; `full_query_text`
 # (batch/procedure inteiro) vira `sql_text_full_masked`, so pra tela de detalhe.
+# `r.cpu_time` (ms cumulativos consumidos pela request atual, zera numa request nova) vira
+# `cpu_time_ms` em `NormalizedQuerySample` — antes so era buscado (como `cpu_seconds`) e
+# descartado sem uso; agora fecha o gap real confirmado comparando com o SolarWinds DPA
+# (categoria "Memory/CPU" alem das esperas nomeadas).
 _SESSION_ACTIVITY_QUERY = """
     SELECT r.session_id, r.status, r.command, r.start_time,
            r.total_elapsed_time / 1000.00 AS elapsed_seconds,
            r.total_elapsed_time,
-           r.cpu_time / 1000.00 AS cpu_seconds,
+           r.cpu_time AS cpu_time_ms,
            r.reads, r.writes, r.logical_reads, r.row_count,
            r.blocking_session_id, r.wait_type, r.wait_time,
            s.login_name, s.host_name, s.program_name,
@@ -419,6 +423,7 @@ def _build_query_samples(
                 wait_type=map_wait_event("sqlserver", row["wait_type"]),
                 wait_event_native=row["wait_type"],
                 wait_time_ms=row["wait_time"],
+                cpu_time_ms=row["cpu_time_ms"],
                 duration_ms=row["total_elapsed_time"],
                 session_id=str(row["session_id"]),
                 db_user=row["login_name"],

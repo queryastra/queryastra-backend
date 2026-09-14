@@ -38,6 +38,7 @@ query_samples_table = sa.Table(
     sa.Column("wait_type", sa.Text(), nullable=True),
     sa.Column("wait_event_native", sa.Text(), nullable=True),
     sa.Column("wait_time_ms", sa.BigInteger(), nullable=True),
+    sa.Column("cpu_time_ms", sa.BigInteger(), nullable=True),
     sa.Column("duration_ms", sa.BigInteger(), nullable=True),
     sa.Column("session_id", sa.Text(), nullable=True),
     sa.Column("db_user", sa.Text(), nullable=True),

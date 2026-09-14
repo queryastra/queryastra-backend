@@ -398,6 +398,134 @@ async def test_top_wait_types_groups_by_wait_event_native(
     assert by_type["PAGEIOLATCH_SH"].total_wait_time_ms == 30
 
 
+async def test_top_wait_types_includes_synthetic_cpu_bucket_when_wait_time_is_zero(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """Regressao real: o SQL Server de verdade reporta `wait_time = 0` (nao NULL) quando nao ha
+    espera ativa (confirmado ao vivo contra `Autklinux20`) — so testar `wait_time_ms IS NULL`
+    deixaria de fora a maioria das amostras genuinamente sem espera."""
+    repo = QuerySamplesRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-cpu-zero",
+                sql_text_masked="SELECT ? FROM t",
+                wait_event_native=None,
+                wait_time_ms=0,
+                cpu_time_ms=700,
+            ),
+        ]
+    )
+
+    rows = await repo.top_wait_types(
+        test_instance.id,
+        since=now - timedelta(minutes=1),
+        until=now + timedelta(minutes=1),
+        limit=10,
+    )
+
+    by_type = {row.wait_event_native: row for row in rows}
+    assert set(by_type) == {"CPU"}
+    assert by_type["CPU"].total_wait_time_ms == 700
+
+
+async def test_top_wait_types_includes_synthetic_cpu_bucket(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """Fecha um gap real confirmado comparando com o SolarWinds DPA (categoria "Memory/CPU"):
+    amostras sem NENHUMA espera ativa (`wait_event_native`/`wait_time_ms` ambos None) agora
+    aparecem como um bucket sintetico 'CPU', usando `cpu_time_ms`."""
+    repo = QuerySamplesRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-cpu",
+                sql_text_masked="SELECT ? FROM t",
+                wait_event_native=None,
+                wait_time_ms=None,
+                cpu_time_ms=500,
+            ),
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-lock",
+                sql_text_masked="SELECT ? FROM t",
+                wait_event_native="LCK_M_S",
+                wait_time_ms=200,
+            ),
+        ]
+    )
+
+    rows = await repo.top_wait_types(
+        test_instance.id,
+        since=now - timedelta(minutes=1),
+        until=now + timedelta(minutes=1),
+        limit=10,
+    )
+
+    by_type = {row.wait_event_native: row for row in rows}
+    assert set(by_type) == {"CPU", "LCK_M_S"}
+    assert by_type["CPU"].total_wait_time_ms == 500
+    assert by_type["LCK_M_S"].total_wait_time_ms == 200
+
+
+async def test_top_wait_types_cpu_bucket_sums_effective_delta_not_raw_cpu_time(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """`cpu_time_ms` e cumulativo por REQUEST (como `wait_time_ms` e cumulativo por espera) — o
+    bucket 'CPU' precisa somar o INCREMENTO real entre amostras da mesma sessao, nao o valor
+    bruto de cada amostra (que re-contaria a mesma CPU varias vezes, exatamente o bug que
+    `effective_wait_ms` ja corrigia pra waits)."""
+    repo = QuerySamplesRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-cpu",
+                sql_text_masked="SELECT ? FROM t",
+                session_id="session-cpu",
+                wait_event_native=None,
+                wait_time_ms=None,
+                cpu_time_ms=100,
+            ),
+            NormalizedQuerySample(
+                time=now + timedelta(seconds=10),
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-cpu",
+                sql_text_masked="SELECT ? FROM t",
+                session_id="session-cpu",
+                wait_event_native=None,
+                wait_time_ms=None,
+                cpu_time_ms=250,
+            ),
+        ]
+    )
+
+    rows = await repo.top_wait_types(
+        test_instance.id,
+        since=now - timedelta(minutes=1),
+        until=now + timedelta(minutes=1),
+        limit=10,
+    )
+
+    by_type = {row.wait_event_native: row for row in rows}
+    # 100 (primeira amostra, valor cheio) + (250 - 100) = 250, nao 100 + 250 = 350
+    assert by_type["CPU"].total_wait_time_ms == 250
+
+
 async def test_wait_time_by_bucket_and_wait_type_groups_by_utc_day(
     db_session: AsyncSession, test_instance: Instance
 ) -> None:

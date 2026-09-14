@@ -110,7 +110,7 @@ class QuerySamplesRepository(BaseRepository):
     _EFFECTIVE_WAIT_SELECT = """
         SELECT
             time, session_id, sql_hash, sql_name, sql_text_masked, database_name,
-            wait_type, wait_event_native,
+            wait_type, wait_event_native, wait_time_ms,
             CASE
                 WHEN wait_event_native = ANY(:benign_wait_types) THEN 0
                 WHEN session_id IS NOT NULL
@@ -122,18 +122,44 @@ class QuerySamplesRepository(BaseRepository):
                  AND wait_time_ms >= LAG(wait_time_ms) OVER (PARTITION BY session_id ORDER BY time)
                 THEN wait_time_ms - LAG(wait_time_ms) OVER (PARTITION BY session_id ORDER BY time)
                 ELSE wait_time_ms
-            END AS effective_wait_ms
+            END AS effective_wait_ms,
+            CASE
+                WHEN wait_event_native IS NOT NULL OR coalesce(wait_time_ms, 0) <> 0 THEN 0
+                WHEN session_id IS NOT NULL
+                 AND cpu_time_ms IS NOT NULL
+                 AND LAG(cpu_time_ms) OVER (PARTITION BY session_id ORDER BY time) IS NOT NULL
+                 AND cpu_time_ms >= LAG(cpu_time_ms) OVER (PARTITION BY session_id ORDER BY time)
+                THEN cpu_time_ms - LAG(cpu_time_ms) OVER (PARTITION BY session_id ORDER BY time)
+                ELSE coalesce(cpu_time_ms, 0)
+            END AS effective_cpu_ms
         FROM query_samples
         WHERE instance_id = :instance_id AND time >= :since AND time <= :until
     """
     """Bloco `SELECT` reutilizado dentro da CTE `effective AS (...)` de cada metodo abaixo — todas
-    as colunas usadas por alguma agregacao downstream, mais `effective_wait_ms` ja calculado.
-    Filtro de `database_name` (quando existe) e aplicado FORA desta CTE (na query externa), nunca
-    aqui dentro — a continuidade de uma espera e uma propriedade da sessao fisica, independente de
-    banco de dados; filtrar `database_name` antes do `LAG` cortaria a amostra anterior da mesma
-    espera sempre que ela (impossivelmente, mas por seguranca) aparecesse com outro banco. Todo
-    metodo que usa esta CTE deve incluir `"benign_wait_types": list(self._BENIGN_WAIT_EVENT_NATIVE)`
-    no dict de params."""
+    as colunas usadas por alguma agregacao downstream, mais `effective_wait_ms`/`effective_cpu_ms`
+    ja calculados. Filtro de `database_name` (quando existe) e aplicado FORA desta CTE (na query
+    externa), nunca aqui dentro — a continuidade de uma espera/CPU e uma propriedade da sessao
+    fisica, independente de banco de dados; filtrar `database_name` antes do `LAG` cortaria a
+    amostra anterior sempre que ela (impossivelmente, mas por seguranca) aparecesse com outro
+    banco. Todo metodo que usa esta CTE deve incluir
+    `"benign_wait_types": list(self._BENIGN_WAIT_EVENT_NATIVE)` no dict de params.
+
+    `effective_cpu_ms` — fecha um gap real confirmado comparando com o SolarWinds DPA (que tem
+    uma categoria "Memory/CPU" alem das esperas nomeadas): `sys.dm_exec_requests.cpu_time`
+    (SQL Server) e cumulativo por REQUEST (zera quando uma nova consulta comeca, nao quando o
+    wait_event_native muda dentro da mesma consulta — ao contrario do wait, que reseta por
+    mudanca de tipo de espera) — por isso o delta aqui usa so `cpu_time_ms >= LAG(...)` como sinal
+    de continuidade, sem exigir que `wait_event_native` seja o mesmo. So atribuido quando
+    `wait_event_native IS NULL AND coalesce(wait_time_ms, 0) = 0` (a amostra nao tem NENHUMA
+    espera ativa — genuinamente rodando na CPU). As duas condicoes juntas, nao so
+    `wait_event_native`, por dois motivos confirmados contra dado real: (1) um teste/fixture pode
+    legitimamente ter `wait_time_ms` preenchido sem um `wait_event_native` nomeado — "espera sem
+    nome conhecido", nao "sem espera", nao deve cair no bucket de CPU; (2) o SQL Server real
+    reporta `wait_time_ms = 0` (nao NULL) quando nao ha espera ativa (confirmado contra
+    `Autklinux20` ao vivo) — testar so `IS NULL` deixaria de fora a maioria das amostras
+    genuinamente sem espera. Quando ha espera ativa, o tempo ja e contado em `effective_wait_ms`,
+    entao contar aqui tambem duplicaria. PostgreSQL nao expoe um equivalente direto (`cpu_time_ms`
+    fica sempre `NULL` la) — `effective_cpu_ms` sai sempre 0 nesse caso, sem quebrar a soma."""
 
     _NOT_BENIGN_WAIT_FILTER = (
         "(wait_event_native IS NULL OR wait_event_native <> ALL(:benign_wait_types))"
@@ -145,6 +171,15 @@ class QuerySamplesRepository(BaseRepository):
     entrada "WAITFOR: 0ms". `wait_event_native IS NULL` precisa ser tratado explicitamente:
     `NULL <> ALL(array)` avalia pra `NULL` (nao `TRUE`), o que um `WHERE` trataria como exclusao —
     sem essa clausula extra, toda amostra sem wait ativo desapareceria da lista."""
+
+    _NOT_CPU_ONLY_FILTER = "NOT (wait_event_native IS NULL AND coalesce(wait_time_ms, 0) = 0)"
+    """Fragmento de `WHERE` usado no lado "espera nomeada" do UNION ALL dos metodos que agora
+    incluem o bucket sintetico 'CPU' (`top_wait_types`, `wait_breakdown_by_database`,
+    `wait_breakdown_by_sql_hash`) — sem isso, uma amostra sem NENHUMA espera ativa contaria DUAS
+    vezes: uma como 'CPU: Xms' (correto) e outra como 'desconhecido: 0ms' (ruido). `wait_time_ms`
+    diferente de zero (uma espera "sem nome conhecido") continua aparecendo normalmente como
+    'desconhecido: Xms' — so a combinacao exata de nenhum wait_event_native E nenhum wait_time_ms
+    de verdade (NULL OU 0 — ver docstring de `_EFFECTIVE_WAIT_SELECT`) e excluida daqui."""
 
     async def insert_batch(self, samples: list[NormalizedQuerySample]) -> None:
         if not samples:
@@ -189,6 +224,7 @@ class QuerySamplesRepository(BaseRepository):
                 "wait_type": s.wait_type.value if s.wait_type is not None else None,
                 "wait_event_native": s.wait_event_native,
                 "wait_time_ms": s.wait_time_ms,
+                "cpu_time_ms": s.cpu_time_ms,
                 "duration_ms": s.duration_ms,
                 "session_id": s.session_id,
                 "db_user": s.db_user,
@@ -239,8 +275,11 @@ class QuerySamplesRepository(BaseRepository):
         historico de agregar todos os bancos juntos sob o mesmo `sql_hash` — o filtro e aplicado
         na query externa, apos a CTE `effective` calcular `effective_wait_ms` sem restricao de
         banco (ver docstring da classe). `total_wait_time_ms`/`avg_wait_time_ms` somam/promediam
-        `effective_wait_ms` (delta real por amostra), nao mais `wait_time_ms` bruto — ver
-        docstring da classe para o porque."""
+        `effective_wait_ms + effective_cpu_ms` (delta real por amostra, incluindo o tempo de CPU
+        sem espera ativa — ver docstring de `_EFFECTIVE_WAIT_SELECT`), nao mais `wait_time_ms`
+        bruto — ver docstring da classe para o porque. Somar os dois aqui (em vez de manter
+        `total_wait_time_ms` só-espera) é o que faz os segmentos de `wait_breakdown` (que já
+        incluem o bucket 'CPU') somarem exatamente ao total da barra, sem estourar a largura."""
         stmt = sa.text(
             f"""
             WITH effective AS ({self._EFFECTIVE_WAIT_SELECT}),
@@ -250,8 +289,10 @@ class QuerySamplesRepository(BaseRepository):
             ),
             agg AS (
                 SELECT sql_hash, count(*) AS execution_count,
-                       coalesce(sum(effective_wait_ms), 0) AS total_wait_time_ms,
-                       coalesce(avg(effective_wait_ms), 0) AS avg_wait_time_ms
+                       coalesce(sum(coalesce(effective_wait_ms, 0) + effective_cpu_ms), 0)
+                           AS total_wait_time_ms,
+                       coalesce(avg(coalesce(effective_wait_ms, 0) + effective_cpu_ms), 0)
+                           AS avg_wait_time_ms
                 FROM filtered
                 GROUP BY sql_hash
             ),
@@ -311,18 +352,31 @@ class QuerySamplesRepository(BaseRepository):
         recente de `latest` (categoria CANONICA, `wait_type` — nao `wait_event_native` — mesmo
         campo/semantica de `top_sql()`, usado pelo frontend para colorir por `WaitCategory`); nao
         precisa de moda/`wait_mode` como em `top_sql()` porque `filtered` ja fixa um unico
-        `wait_event_native`, que mapeia sempre pra uma unica categoria canonica."""
+        `wait_event_native`, que mapeia sempre pra uma unica categoria canonica.
+
+        `wait_event_native == "CPU"` e um caso especial: esse label e SINTETICO (nunca gravado em
+        `query_samples` — so existe na agregacao, ver `top_wait_types`), entao filtrar por
+        igualdade literal nunca acharia nada. Filtra por `wait_event_native IS NULL` (a mesma
+        condicao usada pra gerar o bucket 'CPU') e soma `effective_cpu_ms` em vez de
+        `effective_wait_ms`."""
+        is_cpu_bucket = wait_event_native == "CPU"
+        wait_filter = (
+            "wait_event_native IS NULL AND coalesce(wait_time_ms, 0) = 0"
+            if is_cpu_bucket
+            else "wait_event_native = :wait_event_native"
+        )
+        time_column = "effective_cpu_ms" if is_cpu_bucket else "effective_wait_ms"
         stmt = sa.text(
             f"""
             WITH effective AS ({self._EFFECTIVE_WAIT_SELECT}),
             filtered AS (
                 SELECT * FROM effective
-                WHERE wait_event_native = :wait_event_native
+                WHERE {wait_filter}
             ),
             agg AS (
                 SELECT sql_hash, count(*) AS execution_count,
-                       coalesce(sum(effective_wait_ms), 0) AS total_wait_time_ms,
-                       coalesce(avg(effective_wait_ms), 0) AS avg_wait_time_ms
+                       coalesce(sum({time_column}), 0) AS total_wait_time_ms,
+                       coalesce(avg({time_column}), 0) AS avg_wait_time_ms
                 FROM filtered
                 GROUP BY sql_hash
             ),
@@ -361,15 +415,18 @@ class QuerySamplesRepository(BaseRepository):
         Instancia -> Banco -> Query). Mesmo padrao de CTE de `top_sql()`, mas agrupando por
         `database_name` em vez de `sql_hash`. Linhas com `database_name` NULL sao agrupadas sob a
         label 'desconhecido' (COALESCE), nunca descartadas. `total_wait_time_ms`/`avg_wait_time_ms`
-        somam/promediam `effective_wait_ms` (delta real por amostra) — ver docstring da classe."""
+        somam/promediam `effective_wait_ms + effective_cpu_ms` (delta real por amostra, incluindo
+        CPU sem espera ativa) — ver docstring da classe e de `_EFFECTIVE_WAIT_SELECT`."""
         stmt = sa.text(
             f"""
             WITH effective AS ({self._EFFECTIVE_WAIT_SELECT})
             SELECT
                 COALESCE(database_name, 'desconhecido') AS database_name,
                 count(*) AS execution_count,
-                coalesce(sum(effective_wait_ms), 0) AS total_wait_time_ms,
-                coalesce(avg(effective_wait_ms), 0) AS avg_wait_time_ms
+                coalesce(sum(coalesce(effective_wait_ms, 0) + effective_cpu_ms), 0)
+                    AS total_wait_time_ms,
+                coalesce(avg(coalesce(effective_wait_ms, 0) + effective_cpu_ms), 0)
+                    AS avg_wait_time_ms
             FROM effective
             GROUP BY COALESCE(database_name, 'desconhecido')
             ORDER BY total_wait_time_ms DESC
@@ -398,18 +455,30 @@ class QuerySamplesRepository(BaseRepository):
         nunca descartado. `total_wait_time_ms`/`avg_wait_time_ms` somam/promediam
         `effective_wait_ms` (delta real por amostra) — ver docstring da classe. Waits benignos/de
         background (`_BENIGN_WAIT_EVENT_NATIVE`) sao excluidos do `GROUP BY` inteiramente (nao
-        aparecem como "WAITFOR: 0ms")."""
+        aparecem como "WAITFOR: 0ms"). Inclui um bucket sintetico 'CPU' (`effective_cpu_ms`,
+        amostras sem nenhuma espera ativa) via UNION ALL — fecha um gap real confirmado
+        comparando com o SolarWinds DPA (categoria "Memory/CPU" alem das esperas nomeadas, ver
+        docstring de `_EFFECTIVE_WAIT_SELECT`)."""
         stmt = sa.text(
             f"""
-            WITH effective AS ({self._EFFECTIVE_WAIT_SELECT})
+            WITH effective AS ({self._EFFECTIVE_WAIT_SELECT}),
+            combined AS (
+                SELECT COALESCE(wait_event_native, 'desconhecido') AS wait_event_native,
+                       effective_wait_ms AS ms
+                FROM effective
+                WHERE {self._NOT_BENIGN_WAIT_FILTER} AND {self._NOT_CPU_ONLY_FILTER}
+                UNION ALL
+                SELECT 'CPU' AS wait_event_native, effective_cpu_ms AS ms
+                FROM effective
+                WHERE wait_event_native IS NULL AND coalesce(wait_time_ms, 0) = 0
+            )
             SELECT
-                COALESCE(wait_event_native, 'desconhecido') AS wait_event_native,
+                wait_event_native,
                 count(*) AS execution_count,
-                coalesce(sum(effective_wait_ms), 0) AS total_wait_time_ms,
-                coalesce(avg(effective_wait_ms), 0) AS avg_wait_time_ms
-            FROM effective
-            WHERE {self._NOT_BENIGN_WAIT_FILTER}
-            GROUP BY COALESCE(wait_event_native, 'desconhecido')
+                coalesce(sum(ms), 0) AS total_wait_time_ms,
+                coalesce(avg(ms), 0) AS avg_wait_time_ms
+            FROM combined
+            GROUP BY wait_event_native
             ORDER BY total_wait_time_ms DESC
             LIMIT :limit
         """
@@ -438,19 +507,30 @@ class QuerySamplesRepository(BaseRepository):
         NULL viram 'desconhecido' (COALESCE), nunca descartados — mesmo padrao de
         `top_sql_by_database`. `total_wait_time_ms` soma `effective_wait_ms` (delta real por
         amostra) — ver docstring da classe. Waits benignos/de background excluidos do `GROUP BY`
-        inteiramente (ver `_NOT_BENIGN_WAIT_FILTER`)."""
+        inteiramente (ver `_NOT_BENIGN_WAIT_FILTER`). Inclui um bucket sintetico 'CPU' por banco
+        (`effective_cpu_ms`) via UNION ALL — mesmo gap fechado em `top_wait_types`."""
         stmt = sa.text(
             f"""
-            WITH effective AS ({self._EFFECTIVE_WAIT_SELECT})
+            WITH effective AS ({self._EFFECTIVE_WAIT_SELECT}),
+            combined AS (
+                SELECT COALESCE(database_name, 'desconhecido') AS database_name,
+                       COALESCE(wait_event_native, 'desconhecido') AS wait_event_native,
+                       effective_wait_ms AS ms
+                FROM effective
+                WHERE {self._NOT_BENIGN_WAIT_FILTER} AND {self._NOT_CPU_ONLY_FILTER}
+                UNION ALL
+                SELECT COALESCE(database_name, 'desconhecido') AS database_name,
+                       'CPU' AS wait_event_native,
+                       effective_cpu_ms AS ms
+                FROM effective
+                WHERE wait_event_native IS NULL AND coalesce(wait_time_ms, 0) = 0
+            )
             SELECT
-                COALESCE(database_name, 'desconhecido') AS database_name,
-                COALESCE(wait_event_native, 'desconhecido') AS wait_event_native,
-                coalesce(sum(effective_wait_ms), 0) AS total_wait_time_ms
-            FROM effective
-            WHERE {self._NOT_BENIGN_WAIT_FILTER}
-            GROUP BY
-                COALESCE(database_name, 'desconhecido'),
-                COALESCE(wait_event_native, 'desconhecido')
+                database_name,
+                wait_event_native,
+                coalesce(sum(ms), 0) AS total_wait_time_ms
+            FROM combined
+            GROUP BY database_name, wait_event_native
             ORDER BY database_name, total_wait_time_ms DESC
             LIMIT :limit
         """
@@ -482,18 +562,31 @@ class QuerySamplesRepository(BaseRepository):
         so quer a decomposicao das queries daquele banco). `database_name` e filtrado apos a CTE
         `effective` (nao antes, ver docstring da classe). `total_wait_time_ms` soma
         `effective_wait_ms` (delta real por amostra). Waits benignos/de background excluidos do
-        `GROUP BY` inteiramente (ver `_NOT_BENIGN_WAIT_FILTER`)."""
+        `GROUP BY` inteiramente (ver `_NOT_BENIGN_WAIT_FILTER`). Inclui um bucket sintetico 'CPU'
+        por `sql_hash` (`effective_cpu_ms`) via UNION ALL — mesmo gap fechado em
+        `top_wait_types`."""
         stmt = sa.text(
             f"""
-            WITH effective AS ({self._EFFECTIVE_WAIT_SELECT})
+            WITH effective AS ({self._EFFECTIVE_WAIT_SELECT}),
+            combined AS (
+                SELECT sql_hash,
+                       COALESCE(wait_event_native, 'desconhecido') AS wait_event_native,
+                       effective_wait_ms AS ms
+                FROM effective
+                WHERE (CAST(:database_name AS text) IS NULL OR database_name = :database_name)
+                    AND {self._NOT_BENIGN_WAIT_FILTER} AND {self._NOT_CPU_ONLY_FILTER}
+                UNION ALL
+                SELECT sql_hash, 'CPU' AS wait_event_native, effective_cpu_ms AS ms
+                FROM effective
+                WHERE (CAST(:database_name AS text) IS NULL OR database_name = :database_name)
+                    AND wait_event_native IS NULL AND coalesce(wait_time_ms, 0) = 0
+            )
             SELECT
                 sql_hash,
-                COALESCE(wait_event_native, 'desconhecido') AS wait_event_native,
-                coalesce(sum(effective_wait_ms), 0) AS total_wait_time_ms
-            FROM effective
-            WHERE (CAST(:database_name AS text) IS NULL OR database_name = :database_name)
-                AND {self._NOT_BENIGN_WAIT_FILTER}
-            GROUP BY sql_hash, COALESCE(wait_event_native, 'desconhecido')
+                wait_event_native,
+                coalesce(sum(ms), 0) AS total_wait_time_ms
+            FROM combined
+            GROUP BY sql_hash, wait_event_native
             ORDER BY sql_hash, total_wait_time_ms DESC
             LIMIT :limit
         """

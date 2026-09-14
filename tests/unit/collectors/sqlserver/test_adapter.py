@@ -28,6 +28,7 @@ def _request_row(
     wait_type: str | None = None,
     wait_time: int = 0,
     full_query_text: str | None = None,
+    cpu_time_ms: int = 500,
 ) -> dict[str, Any]:
     """`query_text` simula o `SUBSTRING` ja fatiado pelo statement em execucao (o que a query
     real devolve); `full_query_text` simula `t.text` cru (o batch/procedure inteiro) — por
@@ -39,7 +40,7 @@ def _request_row(
         "start_time": None,
         "elapsed_seconds": 1.0,
         "total_elapsed_time": 1000,
-        "cpu_seconds": 0.5,
+        "cpu_time_ms": cpu_time_ms,
         "reads": 10,
         "writes": 0,
         "logical_reads": 20,
