@@ -144,6 +144,7 @@ async def test_list_instances_includes_derived_status(
     assert entry["collection_coverage"] == "full"
     assert entry["open_alert_count"] == 0
     assert entry["engine_version"] is None  # test_instance nunca teve um ciclo real de coleta
+    assert entry["engine_version_major"] is None
 
 
 async def test_list_instances_open_alert_count_reflects_real_alerts(
@@ -179,3 +180,35 @@ async def test_list_instances_open_alert_count_reflects_real_alerts(
     await db_session.execute(sa.delete(Alert).where(Alert.alert_rule_id == rule.id))
     await db_session.execute(sa.delete(AlertRule).where(AlertRule.id == rule.id))
     await db_session.commit()
+
+
+async def test_set_instance_active_pauses_and_resumes_monitoring(
+    client: AsyncClient, test_instance: Instance
+) -> None:
+    """Equivalente ao botao ON/OFF do SolarWinds — `PATCH .../active` liga/desliga sem apagar
+    o cadastro, e a instancia continua listada (pausada) em `GET /instances`."""
+    assert test_instance.active is True
+
+    pause_response = await client.patch(
+        f"/api/v1/instances/{test_instance.id}/active", json={"active": False}
+    )
+    assert pause_response.status_code == 200
+    assert pause_response.json()["active"] is False
+
+    list_response = await client.get("/api/v1/instances")
+    entry = next(i for i in list_response.json() if i["id"] == str(test_instance.id))
+    assert entry["active"] is False  # continua na lista, so pausada — nao some da UI
+
+    resume_response = await client.patch(
+        f"/api/v1/instances/{test_instance.id}/active", json={"active": True}
+    )
+    assert resume_response.status_code == 200
+    assert resume_response.json()["active"] is True
+
+
+async def test_set_instance_active_404_for_unknown_instance(client: AsyncClient) -> None:
+    response = await client.patch(
+        "/api/v1/instances/00000000-0000-0000-0000-000000000000/active",
+        json={"active": False},
+    )
+    assert response.status_code == 404

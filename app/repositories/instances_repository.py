@@ -31,6 +31,27 @@ class InstancesRepository(BaseRepository):
         result = await self._session.execute(select(Instance).where(Instance.active.is_(True)))
         return list(result.scalars().all())
 
+    async def list_all(self) -> list[Instance]:
+        """Todas as instancias cadastradas, ativas ou nao — usada pela listagem da UI
+        (`GET /instances`), diferente de `list_active()` (usada pelos workers/supervisors, que
+        so devem agir sobre instancias ativas). Sem isso, pausar o monitoramento de uma
+        instancia (`set_active(..., False)`) a faria sumir da tela sem jeito de reativar."""
+        result = await self._session.execute(select(Instance).order_by(Instance.name))
+        return list(result.scalars().all())
+
+    async def set_active(self, instance_id: UUID, active: bool) -> Instance | None:
+        """Liga/desliga o monitoramento de uma instancia (equivalente ao botao ON/OFF da coluna
+        Monitor do SolarWinds) sem apagar o cadastro. `PollingSupervisor`/`MissingIndexSupervisor`/
+        `BackupStatusSupervisor`/`AlertingWorker` ja respeitam `instances.active` via
+        `list_active()` — nenhuma mudanca de worker necessaria, so persistir o flag."""
+        instance = await self.get_by_id(instance_id)
+        if instance is None:
+            return None
+        instance.active = active
+        await self._session.commit()
+        await self._session.refresh(instance)
+        return instance
+
     async def create(self, instance: Instance) -> Instance:
         self._session.add(instance)
         await self._session.commit()

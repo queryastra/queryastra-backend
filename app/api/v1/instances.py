@@ -117,6 +117,9 @@ class InstanceSummaryResponse(BaseModel):
     host: str
     port: int
     engine_version: str | None  # detectado no ciclo de coleta mais recente (PollingWorker)
+    # Aditivo — permite o frontend traduzir pra ano de marketing (ex.: SQL Server 2019) na
+    # listagem, sem precisar de round-trip pro detalhe da instancia.
+    engine_version_major: int | None
     criticality: str
     health_status: str
     collection_coverage: str
@@ -125,6 +128,12 @@ class InstanceSummaryResponse(BaseModel):
         int  # alertas com state != 'closed' (AlertsRepository.count_open_alerts_by_target)
     )
     last_collected_at: datetime | None
+
+
+class InstanceActiveUpdateRequest(BaseModel):
+    """Corpo de `PATCH /instances/{id}/active` — liga/desliga monitoramento sem apagar cadastro."""
+
+    active: bool
 
 
 class InstanceHealthCheckResponse(BaseModel):
@@ -250,13 +259,18 @@ async def list_instances(
         InstanceDerivedStatusService, Depends(get_instance_derived_status_service)
     ],
 ) -> list[InstanceSummaryResponse]:
-    """Lista instancias ativas cadastradas, com status derivado da telemetria de ciclo.
+    """Lista todas as instancias cadastradas (ativas e pausadas), com status derivado da
+    telemetria de ciclo.
+
+    Usa `list_all()`, nao `list_active()` — uma instancia pausada (`active=False`) precisa
+    continuar aparecendo aqui pra poder ser reativada pela UI; so os workers/supervisors de
+    coleta e que devem ignorar instancias pausadas (via `list_active()`, sem mudanca).
 
     N+1 aceitavel no MVP (poucas instancias esperadas) — uma consulta de status derivado por
     instancia da lista, em vez de uma unica query agregada. `open_alert_count` ja e uma unica
     query agregada pra todas as instancias (`count_open_alerts_by_target`), sem N+1.
     """
-    instances = await repository.list_active()
+    instances = await repository.list_all()
     open_alert_counts = await alerts_repository.count_open_alerts_by_target(
         [instance.id for instance in instances]
     )
@@ -271,6 +285,7 @@ async def list_instances(
                 host=instance.host,
                 port=instance.port,
                 engine_version=instance.engine_version,
+                engine_version_major=instance.engine_version_major,
                 criticality=instance.criticality,
                 health_status=derived.health_status,
                 collection_coverage=derived.collection_coverage,
@@ -292,6 +307,35 @@ async def get_instance(
 ) -> InstanceDetailResponse:
     """Detalhe de uma instancia cadastrada, com status derivado da telemetria de ciclo."""
     instance = await repository.get_by_id(instance_id)
+    if instance is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Instancia nao encontrada."
+        )
+    derived = await status_service.compute(instance_id)
+    return InstanceDetailResponse(
+        **InstanceResponse.model_validate(instance).model_dump(),
+        health_status=derived.health_status,
+        collection_coverage=derived.collection_coverage,
+        capability_errors=[],
+        last_collected_at=derived.last_collected_at,
+    )
+
+
+@router.patch("/{instance_id}/active", response_model=InstanceDetailResponse)
+async def set_instance_active(
+    instance_id: UUID,
+    payload: InstanceActiveUpdateRequest,
+    repository: Annotated[InstancesRepository, Depends(get_instances_repository)],
+    status_service: Annotated[
+        InstanceDerivedStatusService, Depends(get_instance_derived_status_service)
+    ],
+) -> InstanceDetailResponse:
+    """Liga/desliga o monitoramento de uma instancia (equivalente ao botao ON/OFF do SolarWinds)
+    sem apagar o cadastro. Efeito real: `PollingSupervisor`/`MissingIndexSupervisor`/
+    `BackupStatusSupervisor`/`AlertingWorker` re-leem `instances.active` a cada reconciliacao
+    (ver `Docs/collector-queries.md`/supervisors) — a instancia pausada para de ser coletada e
+    avaliada na proxima janela de reconciliacao, sem exigir restart do backend."""
+    instance = await repository.set_active(instance_id, payload.active)
     if instance is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Instancia nao encontrada."
