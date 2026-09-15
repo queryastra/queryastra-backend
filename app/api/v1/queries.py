@@ -33,7 +33,7 @@ decomposta por wait nativo — mesmo padrao de "Bancos de dados", nao de "Waits"
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -42,7 +42,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db_session, resolve_time_window
 from app.core.config import get_settings
+from app.repositories.instances_repository import InstancesRepository
 from app.repositories.query_samples_repository import QuerySamplesRepository
+from app.security.credential_reference import CredentialResolver
+from app.services.execution_plan_service import fetch_execution_plan
+from app.services.sql_insight_client import SqlInsightClient
 
 router = APIRouter()
 
@@ -168,6 +172,48 @@ class QueryDetailResponse(BaseModel):
     sql_text_full_masked: str | None
     database_name: str | None
     samples: list[QuerySampleDetailResponse]
+    # Etapa 11 — decomposicao de wait time so desta query, reaproveitada pelo painel Advisor
+    # (calculado 100% no frontend a partir disso, sem endpoint proprio).
+    wait_breakdown: list[WaitBreakdownEntryResponse]
+
+
+class QueryStatsBucketResponse(BaseModel):
+    """Uma fatia (bucket de tempo) do grafico "Execucoes x tempo de espera por execucao" — Etapa
+    11, painel de estatisticas do detalhe de query (nivel 3). `avg_wait_time_ms` e derivado
+    (`total_wait_time_ms / execution_count`), calculado aqui para nao obrigar o cliente a
+    reimplementar a divisao (e tratar `execution_count == 0`)."""
+
+    bucket_start: datetime
+    execution_count: int
+    total_wait_time_ms: int
+    avg_wait_time_ms: float
+
+
+class SqlInsightRuleResponse(BaseModel):
+    """Uma violacao/observacao devolvida pelo motor de regras do AB SQL Insight."""
+
+    rule_id: str
+    description: str
+    details: str | None
+
+
+class SqlInsightAnalysisResponse(BaseModel):
+    """`available=False` quando o AB SQL Insight nao esta configurado (`SQL_INSIGHT_BASE_URL`
+    vazio) ou a chamada falhou (timeout, servico fora) — `rules` sempre vazio nesse caso, nunca
+    um erro visivel na tela de detalhe de query."""
+
+    available: bool
+    rules: list[SqlInsightRuleResponse]
+
+
+class ExecutionPlanResponse(BaseModel):
+    """Resultado da busca sob demanda de plano de execucao (Etapa 11) — `reason` explica por que
+    `available=False` (PostgreSQL sem suporte, plano fora do cache, credencial com problema),
+    nunca inventa um plano quando nao encontrado."""
+
+    available: bool
+    plan_xml: str | None
+    reason: str | None
 
 
 # --- Dependency providers -------------------------------------------------------------------
@@ -177,6 +223,21 @@ def get_query_samples_repository(
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> QuerySamplesRepository:
     return QuerySamplesRepository(session)
+
+
+def get_instances_repository(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> InstancesRepository:
+    return InstancesRepository(session)
+
+
+def get_credential_resolver() -> CredentialResolver:
+    return CredentialResolver()
+
+
+def get_sql_insight_client() -> SqlInsightClient:
+    settings = get_settings()
+    return SqlInsightClient(settings.sql_insight_base_url, settings.sql_insight_timeout_seconds)
 
 
 # --- Endpoints -------------------------------------------------------------------------------
@@ -658,6 +719,13 @@ async def get_query_detail(
             status_code=404, detail="Nenhuma amostra encontrada para essa query no periodo."
         )
     first = rows[0]
+    wait_breakdown_rows = await repository.wait_breakdown_by_sql_hash(
+        instance_id,
+        resolved_since,
+        resolved_until,
+        settings.api_read_max_rows,
+        sql_hash=sql_hash,
+    )
     return QueryDetailResponse(
         instance_id=instance_id,
         sql_hash=sql_hash,
@@ -675,4 +743,108 @@ async def get_query_detail(
             )
             for r in rows
         ],
+        wait_breakdown=[
+            WaitBreakdownEntryResponse(
+                wait_event_native=row.wait_event_native,
+                total_wait_time_ms=row.total_wait_time_ms,
+            )
+            for row in wait_breakdown_rows
+        ],
+    )
+
+
+@router.get("/detail/{instance_id}/{sql_hash}/stats", response_model=list[QueryStatsBucketResponse])
+async def get_query_stats_by_bucket(
+    instance_id: UUID,
+    sql_hash: str,
+    repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
+    since: Annotated[datetime | None, Query(alias="from")] = None,
+    until: Annotated[datetime | None, Query(alias="to")] = None,
+    bucket: Annotated[str, Query()] = "day",
+) -> list[QueryStatsBucketResponse]:
+    """Execucoes + tempo de espera por bucket de tempo, para o grafico "Execucoes x tempo de
+    espera por execucao" do painel de estatisticas (Etapa 11). Sem filtro de data/hora na tela
+    (mesma decisao ja tomada para o restante do detalhe de query) — o cliente sempre manda o
+    periodo "Tudo" (`ALL_TIME_FROM_ISO` ate agora)."""
+    settings = get_settings()
+    resolved_since, resolved_until = resolve_time_window(
+        since, until, timedelta(seconds=settings.api_read_default_lookback_seconds)
+    )
+    bucket_literal: Literal["day", "hour"] = "hour" if bucket == "hour" else "day"
+    rows = await repository.query_stats_by_bucket(
+        instance_id,
+        sql_hash,
+        resolved_since,
+        resolved_until,
+        settings.api_read_max_rows,
+        bucket=bucket_literal,
+    )
+    return [
+        QueryStatsBucketResponse(
+            bucket_start=row.bucket_start,
+            execution_count=row.execution_count,
+            total_wait_time_ms=row.total_wait_time_ms,
+            avg_wait_time_ms=(
+                row.total_wait_time_ms / row.execution_count if row.execution_count else 0.0
+            ),
+        )
+        for row in rows
+    ]
+
+
+@router.get(
+    "/detail/{instance_id}/{sql_hash}/sql-insight", response_model=SqlInsightAnalysisResponse
+)
+async def get_query_sql_insight_analysis(
+    instance_id: UUID,
+    sql_hash: str,
+    repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
+    sql_insight_client: Annotated[SqlInsightClient, Depends(get_sql_insight_client)],
+    since: Annotated[datetime | None, Query(alias="from")] = None,
+    until: Annotated[datetime | None, Query(alias="to")] = None,
+) -> SqlInsightAnalysisResponse:
+    """Analise via AB SQL Insight (sistema externo, Etapa 10 item 6) — painel isolado na tela de
+    detalhe de query, com o proprio carregamento independente do resto da pagina. Endpoint
+    separado do detalhe principal deliberadamente, pra nao atrasar/acoplar o carregamento do
+    resto da tela a disponibilidade de um sistema externo. Mesmo `from`/`to` (tipicamente "Tudo")
+    ja resolvido pela pagina de detalhe — sem isso, o lookback padrao (1h) poderia nao encontrar
+    nenhuma amostra recente."""
+    settings = get_settings()
+    resolved_since, resolved_until = resolve_time_window(
+        since, until, timedelta(seconds=settings.api_read_default_lookback_seconds)
+    )
+    rows = await repository.query_detail(instance_id, sql_hash, resolved_since, resolved_until, 1)
+    if not rows:
+        raise HTTPException(
+            status_code=404, detail="Nenhuma amostra encontrada para essa query no periodo."
+        )
+    analysis = await sql_insight_client.check(rows[0].sql_text_masked)
+    return SqlInsightAnalysisResponse(
+        available=analysis.available,
+        rules=[
+            SqlInsightRuleResponse(
+                rule_id=rule.rule_id, description=rule.description, details=rule.details
+            )
+            for rule in analysis.rules
+        ],
+    )
+
+
+@router.get("/detail/{instance_id}/{sql_hash}/execution-plan", response_model=ExecutionPlanResponse)
+async def get_query_execution_plan(
+    instance_id: UUID,
+    sql_hash: str,
+    instances_repository: Annotated[InstancesRepository, Depends(get_instances_repository)],
+    credential_resolver: Annotated[CredentialResolver, Depends(get_credential_resolver)],
+) -> ExecutionPlanResponse:
+    """Busca sob demanda (nao parte do ciclo de coleta) do plano de execucao em cache do SQL
+    Server que corresponde a este `sql_hash` — Etapa 11. PostgreSQL: `available=False` direto,
+    sem tentar conectar (sem caminho SQL-acessivel para planos, ver
+    `app.services.execution_plan_service`)."""
+    instance = await instances_repository.get_by_id(instance_id)
+    if instance is None:
+        raise HTTPException(status_code=404, detail="Instancia nao encontrada.")
+    result = await fetch_execution_plan(instance, sql_hash, credential_resolver)
+    return ExecutionPlanResponse(
+        available=result.available, plan_xml=result.plan_xml, reason=result.reason
     )

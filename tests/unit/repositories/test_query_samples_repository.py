@@ -1531,3 +1531,99 @@ async def test_wait_time_by_bucket_and_db_user_groups_by_utc_day(
     assert by_bucket[("2026-09-10", "app_erp")] == 100
     assert by_bucket[("2026-09-11", "app_erp")] == 50
     assert all(row.bucket_start.tzinfo is not None for row in rows)
+
+
+async def test_wait_breakdown_by_sql_hash_filters_by_sql_hash(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """Etapa 11 — o filtro opcional `sql_hash` de `wait_breakdown_by_sql_hash` traz so a
+    decomposicao daquele hash especifico (usado pelo painel Advisor no detalhe de query), sem
+    vazar a decomposicao de outros hashes da mesma instancia/janela."""
+    repo = QuerySamplesRepository(db_session)
+    t = datetime(2026, 9, 1, 10, 0, tzinfo=UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=t,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-a",
+                sql_text_masked="SELECT ? FROM t",
+                wait_event_native="Lock",
+                wait_time_ms=100,
+            ),
+            NormalizedQuerySample(
+                time=t,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-b",
+                sql_text_masked="SELECT ? FROM u",
+                wait_event_native="IO",
+                wait_time_ms=50,
+            ),
+        ]
+    )
+
+    rows = await repo.wait_breakdown_by_sql_hash(
+        test_instance.id,
+        since=t - timedelta(hours=1),
+        until=t + timedelta(hours=1),
+        limit=10,
+        sql_hash="hash-a",
+    )
+    assert {(row.sql_hash, row.wait_event_native, row.total_wait_time_ms) for row in rows} == {
+        ("hash-a", "Lock", 100)
+    }
+
+
+async def test_query_stats_by_bucket_counts_executions_and_sums_wait(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """`query_stats_by_bucket` — Etapa 11, alimenta o grafico "Execucoes x tempo de espera por
+    execucao" do detalhe de query. Filtra a UM `sql_hash` (nao agrupa por hash, ao contrario de
+    `wait_time_by_bucket_and_sql_hash`) e soma tambem `execution_count` (`count(*)`), nao so
+    `total_wait_time_ms` — cada amostra do hash pedido conta como uma execucao, mesmo que
+    `wait_time_ms` seja zero."""
+    repo = QuerySamplesRepository(db_session)
+    day1 = datetime(2026, 9, 1, 10, 0, tzinfo=UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=day1,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-a",
+                sql_text_masked="SELECT ? FROM t",
+                wait_time_ms=100,
+            ),
+            NormalizedQuerySample(
+                time=day1 + timedelta(minutes=1),
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-a",
+                sql_text_masked="SELECT ? FROM t",
+                wait_time_ms=0,
+            ),
+            # Hash diferente, mesma janela — nao deve aparecer no resultado filtrado.
+            NormalizedQuerySample(
+                time=day1,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-b",
+                sql_text_masked="SELECT ? FROM u",
+                wait_time_ms=999,
+            ),
+        ]
+    )
+
+    rows = await repo.query_stats_by_bucket(
+        test_instance.id,
+        "hash-a",
+        since=day1 - timedelta(days=1),
+        until=day1 + timedelta(days=1),
+        limit=10,
+        bucket="day",
+    )
+    assert len(rows) == 1
+    assert rows[0].execution_count == 2
+    assert rows[0].total_wait_time_ms == 100

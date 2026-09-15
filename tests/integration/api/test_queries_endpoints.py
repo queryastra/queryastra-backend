@@ -4,15 +4,24 @@ via `QuerySamplesRepository.insert_batch` (fixture `db_session`) e chama o endpo
 
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime, timedelta
+from typing import Any
+from uuid import uuid4
 
+import pymssql
+import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.queries import get_sql_insight_client
+from app.main import app
+from app.masking.sql_masking import mask_sql_literals
 from app.models.instance import Instance
 from app.normalizers.models import NormalizedQuerySample
 from app.normalizers.wait_taxonomy import WaitCategory
 from app.repositories.query_samples_repository import QuerySamplesRepository
+from app.services.sql_insight_client import SqlInsightAnalysis, SqlInsightRule
 
 
 async def test_list_active_queries_returns_masked_samples_in_window(
@@ -718,3 +727,231 @@ async def test_list_db_users_by_hour_groups_by_utc_hour(
     assert len(body) == 1
     assert body[0]["label"] == "app_erp"
     assert body[0]["total_wait_time_ms"] == 100
+
+
+# --- Etapa 11 -- /detail/{instance_id}/{sql_hash}/stats, /sql-insight, /execution-plan ---------
+
+
+async def test_get_query_stats_by_bucket_counts_executions_per_day(
+    client: AsyncClient, db_session: AsyncSession, test_instance: Instance
+) -> None:
+    repo = QuerySamplesRepository(db_session)
+    day1 = datetime(2026, 9, 1, 10, 0, tzinfo=UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=day1,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-stats",
+                sql_text_masked="SELECT ? FROM t",
+                wait_time_ms=100,
+            ),
+            NormalizedQuerySample(
+                time=day1 + timedelta(minutes=1),
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-stats",
+                sql_text_masked="SELECT ? FROM t",
+                wait_time_ms=50,
+            ),
+        ]
+    )
+
+    response = await client.get(
+        f"/api/v1/queries/detail/{test_instance.id}/hash-stats/stats",
+        params={
+            "from": (day1 - timedelta(days=1)).isoformat(),
+            "to": (day1 + timedelta(days=1)).isoformat(),
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 1
+    assert body[0]["execution_count"] == 2
+    assert body[0]["total_wait_time_ms"] == 150
+    assert body[0]["avg_wait_time_ms"] == 75.0
+
+
+async def test_get_query_detail_includes_wait_breakdown(
+    client: AsyncClient, db_session: AsyncSession, test_instance: Instance
+) -> None:
+    repo = QuerySamplesRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-wb",
+                sql_text_masked="SELECT ? FROM t",
+                wait_event_native="Lock",
+                wait_time_ms=100,
+            ),
+        ]
+    )
+
+    response = await client.get(f"/api/v1/queries/detail/{test_instance.id}/hash-wb")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["wait_breakdown"] == [{"wait_event_native": "Lock", "total_wait_time_ms": 100}]
+
+
+async def test_get_query_sql_insight_analysis_returns_rules(
+    client: AsyncClient, db_session: AsyncSession, test_instance: Instance
+) -> None:
+    repo = QuerySamplesRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-insight",
+                sql_text_masked="SELECT * FROM t",
+            ),
+        ]
+    )
+
+    class _FakeSqlInsightClient:
+        async def check(self, sql_text_masked: str) -> SqlInsightAnalysis:
+            assert sql_text_masked == "SELECT * FROM t"
+            return SqlInsightAnalysis(
+                available=True,
+                rules=[SqlInsightRule(rule_id="R001", description="Evite SELECT *", details=None)],
+            )
+
+    app.dependency_overrides[get_sql_insight_client] = lambda: _FakeSqlInsightClient()
+    try:
+        response = await client.get(
+            f"/api/v1/queries/detail/{test_instance.id}/hash-insight/sql-insight"
+        )
+    finally:
+        app.dependency_overrides.pop(get_sql_insight_client, None)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["available"] is True
+    assert body["rules"] == [{"rule_id": "R001", "description": "Evite SELECT *", "details": None}]
+
+
+async def test_get_query_sql_insight_analysis_returns_404_when_no_samples(
+    client: AsyncClient, test_instance: Instance
+) -> None:
+    response = await client.get(
+        f"/api/v1/queries/detail/{test_instance.id}/hash-does-not-exist/sql-insight"
+    )
+    assert response.status_code == 404
+
+
+async def test_get_query_execution_plan_unavailable_for_postgresql_without_connecting(
+    client: AsyncClient, test_instance: Instance
+) -> None:
+    """`test_instance` e PostgreSQL (fixture padrao) — o endpoint devolve `available=False` com
+    o motivo certo sem sequer tentar conectar (nenhum monkeypatch de rede necessario)."""
+    response = await client.get(
+        f"/api/v1/queries/detail/{test_instance.id}/qualquer-hash/execution-plan"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["available"] is False
+    assert body["plan_xml"] is None
+    assert "PostgreSQL" in body["reason"]
+
+
+async def test_get_query_execution_plan_returns_404_when_instance_not_found(
+    client: AsyncClient,
+) -> None:
+    response = await client.get(f"/api/v1/queries/detail/{uuid4()}/qualquer-hash/execution-plan")
+    assert response.status_code == 404
+
+
+def _masked_hash(statement_text: str) -> str:
+    return hashlib.sha256(mask_sql_literals(statement_text).encode("utf-8")).hexdigest()
+
+
+class _FakeExecutionPlanCursor:
+    def __init__(self, search_rows: list[dict[str, Any]], plan_xml_by_handle: dict) -> None:
+        self._search_rows = search_rows
+        self._plan_xml_by_handle = plan_xml_by_handle
+        self._pending_rows: list[dict[str, Any]] = []
+        self._pending_one: dict[str, Any] | None = None
+
+    def execute(self, query: str, params: tuple | None = None) -> None:
+        if "dm_exec_query_stats" in query:
+            self._pending_rows = self._search_rows
+        elif "dm_exec_query_plan" in query:
+            assert params is not None
+            xml = self._plan_xml_by_handle.get(params[0])
+            self._pending_one = {"query_plan": xml} if xml is not None else None
+        else:  # pragma: no cover - defensivo
+            raise AssertionError(f"execute inesperado: {query}")
+
+    def fetchall(self) -> list[dict[str, Any]]:
+        return self._pending_rows
+
+    def fetchone(self) -> dict[str, Any] | None:
+        return self._pending_one
+
+    def close(self) -> None:
+        pass
+
+
+class _FakeExecutionPlanConnection:
+    def __init__(self, search_rows: list[dict[str, Any]], plan_xml_by_handle: dict) -> None:
+        self._search_rows = search_rows
+        self._plan_xml_by_handle = plan_xml_by_handle
+
+    def cursor(self, as_dict: bool = False) -> _FakeExecutionPlanCursor:
+        assert as_dict is True
+        return _FakeExecutionPlanCursor(self._search_rows, self._plan_xml_by_handle)
+
+    def close(self) -> None:
+        pass
+
+
+async def test_get_query_execution_plan_returns_xml_for_sqlserver_instance(
+    client: AsyncClient, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Instancia SQL Server real (`db_type="sqlserver"`, `auth_method="integrated"` — sem
+    credencial pra resolver), `pymssql.connect` monkeypatchado pra devolver um plano cujo
+    statement mascarado+hasheado bate com o `sql_hash` pedido."""
+    instance = Instance(
+        name=f"test-instance-sqlserver-{uuid4()}",
+        db_type="sqlserver",
+        host="127.0.0.1",
+        port=1433,
+        criticality="standard",
+        polling_interval_seconds=10,
+        auth_method="integrated",
+    )
+    db_session.add(instance)
+    await db_session.commit()
+    await db_session.refresh(instance)
+
+    statement = "SELECT * FROM t WHERE id = 42"
+    sql_hash = _masked_hash(statement)
+    fake_conn = _FakeExecutionPlanConnection(
+        search_rows=[{"plan_handle": b"handle-a", "statement_text": statement}],
+        plan_xml_by_handle={b"handle-a": "<ShowPlanXML>...</ShowPlanXML>"},
+    )
+    monkeypatch.setattr(pymssql, "connect", lambda **kwargs: fake_conn)
+
+    try:
+        response = await client.get(
+            f"/api/v1/queries/detail/{instance.id}/{sql_hash}/execution-plan"
+        )
+    finally:
+        await db_session.delete(instance)
+        await db_session.commit()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["available"] is True
+    assert body["plan_xml"] == "<ShowPlanXML>...</ShowPlanXML>"
+    assert body["reason"] is None

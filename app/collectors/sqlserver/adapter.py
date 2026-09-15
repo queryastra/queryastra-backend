@@ -211,6 +211,50 @@ _BACKUP_STATUS_QUERY = """
     GROUP BY database_name
 """
 
+# Etapa 11 (plano de execucao sob demanda) — busca o `plan_handle` cujo statement isolado
+# (mesmo padrao statement_start_offset/end_offset de `_SESSION_ACTIVITY_QUERY`, mas contra
+# `sys.dm_exec_query_stats`, que tambem tem essas colunas) mascarado+hasheado bate com o
+# `sql_hash` pedido. `TOP (2000)` por `last_execution_time DESC` — acao sob demanda (nao parte do
+# ciclo de poll), scan limitado e aceitavel (~1-2s medido ao vivo); prioriza planos usados
+# recentemente, mais provaveis de corresponder a uma query vista ha pouco em `query_samples`.
+#
+# Limitacao real confirmada ao vivo (Autklinux20/autklinux70, instancias com CDC/replicacao
+# ativos): em instancias muito movimentadas, o TOP do cache por recencia pode ser dominado
+# inteiramente por chatter de fundo (CDC, replicacao, o proprio polling deste app) executando
+# multiplas vezes por segundo — mesmo TOP (2000) as vezes cobre so poucos segundos de atividade
+# real, empurrando pra fora do scan uma query que rodou ha mais de poucos segundos mesmo que
+# ainda esteja tecnicamente ativa. Aceito como limitacao conhecida da abordagem "sob demanda,
+# sem captura continua" escolhida explicitamente pelo usuario (alternativa seria captura
+# continua/persistida, escopo maior, item futuro do roadmap) — a resposta `available=false`
+# sempre vem com motivo honesto, nunca finge ter encontrado o plano.
+#
+# So devolve o XML (segunda query, so quando ha match) via `sys.dm_exec_query_plan(plan_handle)`
+# — pode ser NULL se o plano ja saiu do cache (memoria, recompilacao) entre a amostra e esta
+# busca; XML e o plano CACHEADO/compilado (estimado), nao o "actual" com contagens reais de
+# execucao (isso exigiria Query Store — desligado por padrao on-premises — ou Extended Events,
+# caro; fora de escopo).
+_EXECUTION_PLAN_SEARCH_QUERY = """
+    SELECT TOP (2000)
+        qs.plan_handle,
+        qs.last_execution_time,
+        SUBSTRING(
+            st.text,
+            (qs.statement_start_offset / 2) + 1,
+            (
+                (CASE qs.statement_end_offset
+                     WHEN -1 THEN DATALENGTH(st.text)
+                     ELSE qs.statement_end_offset
+                 END - qs.statement_start_offset) / 2
+            ) + 1
+        ) AS statement_text
+    FROM sys.dm_exec_query_stats AS qs
+    CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) AS st
+    WHERE st.text IS NOT NULL
+    ORDER BY qs.last_execution_time DESC
+"""
+
+_EXECUTION_PLAN_XML_QUERY = "SELECT query_plan FROM sys.dm_exec_query_plan(%s)"
+
 
 def _connect_and_check(connection: ConnectionParams) -> list[CapabilityResult]:
     """Helper sincrono: conecta via `pymssql` e roda as checagens de permissao.
@@ -448,6 +492,48 @@ def _connect_and_collect_backup_status(
         )
         for row in rows
     ]
+
+
+def _connect_and_fetch_execution_plan(
+    connection: ConnectionParams,
+    sql_hash: str,
+    query_timeout_seconds: float,
+) -> str | None:
+    """Helper sincrono (mesmo padrao de `_connect_and_collect_missing_indexes`): conecta,
+    varre ate 500 planos em cache (`_EXECUTION_PLAN_SEARCH_QUERY`) procurando um `statement_text`
+    cujo hash (mesma `_hash_query_text` usada na coleta normal) bate com `sql_hash`; no primeiro
+    match, busca o XML do plano via `sys.dm_exec_query_plan(plan_handle)`. `None` quando nenhum
+    plano em cache corresponde."""
+    login_timeout_seconds = int(connection.connect_timeout_seconds)
+    conn = pymssql.connect(
+        server=connection.host,
+        port=str(connection.port),
+        user=connection.username,
+        password=connection.secret_value,
+        timeout=int(query_timeout_seconds),
+        login_timeout=login_timeout_seconds,
+    )
+    try:
+        cursor = conn.cursor(as_dict=True)
+        cursor.execute(_EXECUTION_PLAN_SEARCH_QUERY)
+        rows: list[dict] = list(cursor.fetchall())
+        cursor.close()
+
+        plan_handle = None
+        for row in rows:
+            if _hash_query_text(row["statement_text"]) == sql_hash:
+                plan_handle = row["plan_handle"]
+                break
+        if plan_handle is None:
+            return None
+
+        cursor = conn.cursor(as_dict=True)
+        cursor.execute(_EXECUTION_PLAN_XML_QUERY, (plan_handle,))
+        plan_row: dict | None = cursor.fetchone()
+        cursor.close()
+        return str(plan_row["query_plan"]) if plan_row is not None else None
+    finally:
+        conn.close()
 
 
 def _hash_query_text(query_text: str | None) -> str | None:
@@ -795,6 +881,27 @@ class SQLServerCollector:
                 self._instance_id,
                 settings.collection_query_timeout_seconds,
                 settings.collection_max_rows,
+            ),
+            timeout=overall_timeout,
+        )
+
+    async def fetch_execution_plan(self, sql_hash: str) -> str | None:
+        """Busca sob demanda (Etapa 11) — NAO faz parte do ciclo de coleta, nao precisa de
+        `instance_id`. Devolve o XML `ShowPlanXML` (ainda NAO mascarado — mascaramento e
+        responsabilidade do chamador, `app.services.execution_plan_service`) do plano em cache
+        cujo statement isolado+hasheado bate com `sql_hash`, ou `None` quando nenhum corresponde
+        (pode ter saido do cache desde a ultima execucao)."""
+        settings = get_settings()
+        overall_timeout = (
+            self._connection_params.connect_timeout_seconds
+            + settings.collection_query_timeout_seconds
+        )
+        return await asyncio.wait_for(
+            asyncio.to_thread(
+                _connect_and_fetch_execution_plan,
+                self._connection_params,
+                sql_hash,
+                settings.collection_query_timeout_seconds,
             ),
             timeout=overall_timeout,
         )

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.masking.sql_masking import mask_sql_literals
+from app.masking.sql_masking import mask_showplan_xml_literals, mask_sql_literals
 
 
 def test_masks_single_string_literal() -> None:
@@ -62,3 +62,26 @@ def test_empty_string_returns_empty_string() -> None:
 def test_masking_never_leaves_a_bare_quoted_literal(sql: str) -> None:
     masked = mask_sql_literals(sql)
     assert "'" not in masked
+
+
+def test_mask_showplan_xml_literals_masks_parameter_compiled_value() -> None:
+    xml = (
+        '<ColumnReference Column="@P1" ParameterCompiledValue="(42)" '
+        'ParameterRuntimeValue="(42)" />'
+    )
+    masked = mask_showplan_xml_literals(xml)
+    assert 'ParameterCompiledValue="?"' in masked
+    assert 'ParameterRuntimeValue="?"' in masked
+    assert "42" not in masked
+    assert 'Column="@P1"' in masked  # resto do XML permanece intacto
+
+
+def test_mask_showplan_xml_literals_masks_string_parameter_value() -> None:
+    xml = "<ColumnReference ParameterCompiledValue=\"N'joao@example.com'\" />"
+    masked = mask_showplan_xml_literals(xml)
+    assert masked == '<ColumnReference ParameterCompiledValue="?" />'
+
+
+def test_mask_showplan_xml_literals_without_parameters_is_unchanged() -> None:
+    xml = '<RelOp NodeId="0" PhysicalOp="Clustered Index Scan" EstimatedTotalSubtreeCost="1.5" />'
+    assert mask_showplan_xml_literals(xml) == xml

@@ -593,3 +593,129 @@ async def test_collect_backup_status_raises_value_error_without_instance_id() ->
     collector = SQLServerCollector(connection=_CONNECTION, instance_id=None)
     with pytest.raises(ValueError, match="instance_id"):
         await collector.collect_backup_status()
+
+
+# --- fetch_execution_plan (Etapa 11 — busca sob demanda) --------------------------------------
+
+
+def _masked_hash(statement_text: str) -> str:
+    """Mesmo pipeline de `_hash_query_text` (mascara + SHA-256), pra montar o hash esperado nos
+    fixtures de teste sem depender do simbolo privado do modulo."""
+    from app.masking.sql_masking import mask_sql_literals
+
+    return hashlib.sha256(mask_sql_literals(statement_text).encode("utf-8")).hexdigest()
+
+
+class _FakeExecutionPlanCursor:
+    def __init__(
+        self, search_rows: list[dict[str, Any]], plan_xml_by_handle: dict[str, str]
+    ) -> None:
+        self._search_rows = search_rows
+        self._plan_xml_by_handle = plan_xml_by_handle
+        self._pending_rows: list[dict[str, Any]] = []
+        self._pending_one: dict[str, Any] | None = None
+
+    def execute(self, query: str, params: tuple[object, ...] | None = None) -> None:
+        if "dm_exec_query_stats" in query:
+            self._pending_rows = self._search_rows
+        elif "dm_exec_query_plan" in query:
+            assert params is not None
+            plan_handle = params[0]
+            xml = self._plan_xml_by_handle.get(plan_handle)
+            self._pending_one = {"query_plan": xml} if xml is not None else None
+        else:
+            raise AssertionError(f"execute inesperado: {query}")
+
+    def fetchall(self) -> list[dict[str, Any]]:
+        return self._pending_rows
+
+    def fetchone(self) -> dict[str, Any] | None:
+        return self._pending_one
+
+    def close(self) -> None:
+        pass
+
+
+class _FakeExecutionPlanConnection:
+    def __init__(
+        self, search_rows: list[dict[str, Any]], plan_xml_by_handle: dict[str, str]
+    ) -> None:
+        self._search_rows = search_rows
+        self._plan_xml_by_handle = plan_xml_by_handle
+        self.closed = False
+
+    def cursor(self, as_dict: bool = False) -> _FakeExecutionPlanCursor:
+        assert as_dict is True
+        return _FakeExecutionPlanCursor(self._search_rows, self._plan_xml_by_handle)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _patch_execution_plan_connect(
+    monkeypatch: pytest.MonkeyPatch,
+    search_rows: list[dict[str, Any]],
+    plan_xml_by_handle: dict[str, str] | None = None,
+) -> _FakeExecutionPlanConnection:
+    fake_conn = _FakeExecutionPlanConnection(search_rows, plan_xml_by_handle or {})
+
+    def fake_connect(**kwargs: object) -> _FakeExecutionPlanConnection:
+        return fake_conn
+
+    monkeypatch.setattr(pymssql, "connect", fake_connect)
+    return fake_conn
+
+
+async def test_fetch_execution_plan_returns_xml_for_matching_hash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    statement = "SELECT * FROM t WHERE id = 42"
+    sql_hash = _masked_hash(statement)
+    _patch_execution_plan_connect(
+        monkeypatch,
+        search_rows=[
+            {"plan_handle": b"handle-a", "statement_text": "SELECT * FROM other WHERE x = 1"},
+            {"plan_handle": b"handle-b", "statement_text": statement},
+        ],
+        plan_xml_by_handle={b"handle-b": "<ShowPlanXML>...</ShowPlanXML>"},
+    )
+
+    collector = SQLServerCollector(connection=_CONNECTION, instance_id=uuid4())
+    plan_xml = await collector.fetch_execution_plan(sql_hash)
+
+    assert plan_xml == "<ShowPlanXML>...</ShowPlanXML>"
+
+
+async def test_fetch_execution_plan_returns_none_when_no_cached_plan_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_execution_plan_connect(
+        monkeypatch,
+        search_rows=[
+            {"plan_handle": b"handle-a", "statement_text": "SELECT * FROM other WHERE x = 1"},
+        ],
+    )
+
+    collector = SQLServerCollector(connection=_CONNECTION, instance_id=uuid4())
+    plan_xml = await collector.fetch_execution_plan(_masked_hash("SELECT * FROM t WHERE id = 42"))
+
+    assert plan_xml is None
+
+
+async def test_fetch_execution_plan_returns_none_when_plan_evicted_from_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """O `plan_handle` bate (statement encontrado), mas `sys.dm_exec_query_plan` devolve NULL —
+    o plano ja saiu do cache entre a amostra original e esta busca. Nao e um erro, so `None`."""
+    statement = "SELECT * FROM t WHERE id = 42"
+    sql_hash = _masked_hash(statement)
+    _patch_execution_plan_connect(
+        monkeypatch,
+        search_rows=[{"plan_handle": b"handle-a", "statement_text": statement}],
+        plan_xml_by_handle={},  # sem entrada para handle-a -> query_plan NULL
+    )
+
+    collector = SQLServerCollector(connection=_CONNECTION, instance_id=uuid4())
+    plan_xml = await collector.fetch_execution_plan(sql_hash)
+
+    assert plan_xml is None

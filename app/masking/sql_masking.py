@@ -49,3 +49,35 @@ def mask_sql_literals(sql: str) -> str:
     masked = _STRING_LITERAL_RE.sub(MASK_STRING, sql)
     masked = _NUMERIC_LITERAL_RE.sub(MASK_NUMBER, masked)
     return masked
+
+
+# Etapa 11 (plano de execucao sob demanda) — o `ShowPlanXML` devolvido por
+# `sys.dm_exec_query_plan` pode conter valores literais reais nos atributos `ParameterCompiledValue`
+# e `ParameterRuntimeValue` de `<ParameterList>` (o valor com que o plano foi compilado/executado).
+# Mascaramento por regex sobre esses dois atributos especificos — nao um parser XML completo (mesma
+# filosofia de `mask_sql_literals`) — e obrigatorio antes de devolver o XML pra fora do backend.
+_PARAMETER_VALUE_ATTR_RE = re.compile(
+    r'(ParameterCompiledValue|ParameterRuntimeValue)="(?:[^"]|"")*"'
+)
+
+
+def mask_showplan_xml_literals(plan_xml: str) -> str:
+    """Mascara valores de parametro embutidos no XML de um plano de execucao (`ShowPlanXML`).
+
+    Args:
+        plan_xml: XML bruto devolvido por `sys.dm_exec_query_plan(plan_handle)`.
+
+    Returns:
+        O mesmo XML, com todo atributo `ParameterCompiledValue`/`ParameterRuntimeValue`
+        substituido por ``"?"`` — o resto da estrutura do plano (operadores, custos, indices)
+        permanece intacto.
+
+    Example:
+        >>> mask_showplan_xml_literals('<ColumnReference ParameterCompiledValue="(42)" />')
+        '<ColumnReference ParameterCompiledValue="?" />'
+    """
+
+    def _mask(match: re.Match[str]) -> str:
+        return f'{match.group(1)}="?"'
+
+    return _PARAMETER_VALUE_ATTR_RE.sub(_mask, plan_xml)

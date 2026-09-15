@@ -81,6 +81,14 @@ class Settings(BaseSettings):
     # so logada nesse canal).
     alert_webhook_url: str | None = Field(default=None, alias="ALERT_WEBHOOK_URL")
 
+    # Base URL da instancia do AB SQL Insight (Etapa 10/11 - painel "Analise SQL Insight" no
+    # detalhe de query). Vazio/None = capacidade desligada (painel simplesmente nao aparece, sem
+    # erro). Ex.: http://autklinux4:9100
+    sql_insight_base_url: str | None = Field(default=None, alias="SQL_INSIGHT_BASE_URL")
+    # Timeout curto (segundos) para a chamada HTTP ao SQL Insight - qualquer erro (timeout, 5xx,
+    # servico fora) degrada para "indisponivel", nunca derruba a tela de detalhe de query.
+    sql_insight_timeout_seconds: float = Field(default=3.0, alias="SQL_INSIGHT_TIMEOUT_SECONDS")
+
     # Liga o supervisor de checagem de indices ausentes (MissingIndexSupervisor,
     # ARCHITECTURE_SPEC.md Q18/Q21) no lifespan do backend. Default false - mesma politica de
     # seguranca dos demais workers (nunca ligar coleta real sem configuracao explicita).

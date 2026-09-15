@@ -651,12 +651,15 @@ class QuerySamplesRepository(BaseRepository):
         limit: int,
         database_name: str | None = None,
         db_user: str | None = None,
+        sql_hash: str | None = None,
     ) -> list[sa.Row]:
         """Agrega `query_samples` por (`sql_hash`, `wait_event_native`) — decomposicao do wait
         time de cada query (nivel 2 do drill-down) pelo tipo de espera NATIVO do engine. Mesma
         ideia de `wait_breakdown_by_database`, granularidade `sql_hash` em vez de
         `database_name`; aceita os mesmos filtros opcionais `database_name`/`db_user` de
-        `top_sql()` (nivel 2 so quer a decomposicao das queries daquele banco/usuario). Filtrados
+        `top_sql()` (nivel 2 so quer a decomposicao das queries daquele banco/usuario).
+        `sql_hash` (Etapa 11) filtra a UM hash especifico — usado pelo detalhe de query (nivel 3)
+        pra alimentar o painel Advisor com a decomposicao de wait so daquela query. Filtrados
         apos a CTE `effective` (nao antes, ver docstring da classe). `total_wait_time_ms` soma
         `effective_wait_ms` (delta real por amostra). Waits benignos/de background excluidos do
         `GROUP BY` inteiramente (ver `_NOT_BENIGN_WAIT_FILTER`). Inclui um bucket sintetico
@@ -672,12 +675,14 @@ class QuerySamplesRepository(BaseRepository):
                 FROM effective
                 WHERE (CAST(:database_name AS text) IS NULL OR database_name = :database_name)
                     AND (CAST(:db_user AS text) IS NULL OR db_user = :db_user)
+                    AND (CAST(:sql_hash AS text) IS NULL OR sql_hash = :sql_hash)
                     AND {self._NOT_BENIGN_WAIT_FILTER} AND {self._NOT_CPU_ONLY_FILTER}
                 UNION ALL
                 SELECT sql_hash, 'Memory/CPU' AS wait_event_native, effective_cpu_ms AS ms
                 FROM effective
                 WHERE (CAST(:database_name AS text) IS NULL OR database_name = :database_name)
                     AND (CAST(:db_user AS text) IS NULL OR db_user = :db_user)
+                    AND (CAST(:sql_hash AS text) IS NULL OR sql_hash = :sql_hash)
                     AND wait_event_native IS NULL AND coalesce(wait_time_ms, 0) = 0
             )
             SELECT
@@ -699,6 +704,50 @@ class QuerySamplesRepository(BaseRepository):
                 "limit": limit,
                 "database_name": database_name,
                 "db_user": db_user,
+                "sql_hash": sql_hash,
+                "benign_wait_types": list(self._BENIGN_WAIT_EVENT_NATIVE),
+            },
+        )
+        return list(result.fetchall())
+
+    async def query_stats_by_bucket(
+        self,
+        instance_id: UUID,
+        sql_hash: str,
+        since: datetime,
+        until: datetime,
+        limit: int,
+        bucket: Literal["day", "hour"] = "day",
+    ) -> list[sa.Row]:
+        """Execucoes + tempo de espera por bucket de tempo, para UM `sql_hash` especifico —
+        Etapa 11 (grafico "Execucoes x tempo de espera por execucao" no detalhe de query, nivel
+        3). Mesmo molde de `wait_time_by_bucket_and_sql_hash`, mas filtrado a um unico hash (nao
+        agrupado por hash) e somando tambem `count(*)` como `execution_count` — o hash ja e
+        conhecido pelo chamador (rota do proprio detalhe da query), nao precisa reaparecer no
+        SELECT."""
+        stmt = sa.text(
+            f"""
+            WITH effective AS ({self._EFFECTIVE_WAIT_SELECT})
+            SELECT
+                (date_trunc(:bucket, time AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') AS bucket_start,
+                count(*) AS execution_count,
+                coalesce(sum(effective_wait_ms), 0) AS total_wait_time_ms
+            FROM effective
+            WHERE sql_hash = :sql_hash
+            GROUP BY date_trunc(:bucket, time AT TIME ZONE 'UTC')
+            ORDER BY bucket_start
+            LIMIT :limit
+        """
+        )
+        result = await self._session.execute(
+            stmt,
+            {
+                "instance_id": instance_id,
+                "sql_hash": sql_hash,
+                "since": since,
+                "until": until,
+                "limit": limit,
+                "bucket": bucket,
                 "benign_wait_types": list(self._BENIGN_WAIT_EVENT_NATIVE),
             },
         )
