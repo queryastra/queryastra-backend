@@ -118,11 +118,33 @@ class BlockingIncidentsRepository(BaseRepository):
                 row.ended_at = observed_at
         await self._session.commit()
 
-    async def list_open(self, instance_id: UUID, limit: int) -> list[BlockingIncident]:
-        """Incidentes AINDA EM ANDAMENTO — alimenta a arvore ao vivo (`GET /blocking/{id}`)."""
+    async def list_open(
+        self,
+        instance_id: UUID,
+        limit: int,
+        *,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> list[BlockingIncident]:
+        """Incidentes AINDA EM ANDAMENTO — alimenta a arvore ao vivo (`GET /blocking/{id}`).
+        `since`/`until` (opcionais, a pedido explicito do usuario — o filtro de data/hora fica
+        sempre visivel e funcional, mesmo com "Somente em aberto" marcado) filtram por
+        `started_at` — "incidentes ainda em andamento que COMECARAM dentro deste periodo". Sem
+        filtro de banco de dados aqui de proposito: a arvore precisa do conjunto ABERTO completo
+        pra reconstruir a cadeia certa (um bloqueador raiz de outro banco com um descendente que
+        bate ainda precisa aparecer) — o filtro de banco na arvore e aplicado no cliente,
+        preservando a cadeia (`filterBlockingTreeByDatabase`)."""
+        conditions = [
+            BlockingIncident.instance_id == instance_id,
+            BlockingIncident.ended_at.is_(None),
+        ]
+        if since is not None:
+            conditions.append(BlockingIncident.started_at >= since)
+        if until is not None:
+            conditions.append(BlockingIncident.started_at <= until)
         stmt = (
             sa.select(BlockingIncident)
-            .where(BlockingIncident.instance_id == instance_id, BlockingIncident.ended_at.is_(None))
+            .where(*conditions)
             .order_by(sa.desc(BlockingIncident.started_at))
             .limit(limit)
         )

@@ -299,12 +299,18 @@ async def list_blocking_events(
         BlockingIncidentsRepository, Depends(get_blocking_incidents_repository)
     ],
     query_repo: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
+    since: Annotated[datetime | None, Query(alias="from")] = None,
+    until: Annotated[datetime | None, Query(alias="to")] = None,
 ) -> list[BlockingTreeNodeResponse]:
-    """Arvore de bloqueio — so os incidentes AINDA EM ANDAMENTO (`ended_at IS NULL`). Sem janela
-    de tempo: "em andamento" e um estado atual, nao um recorte de periodo (histórico/incidentes
-    encerrados: `GET /blocking/{instance_id}/incidents`)."""
+    """Arvore de bloqueio — so os incidentes AINDA EM ANDAMENTO (`ended_at IS NULL`). `from`/`to`
+    (opcionais, a pedido explicito do usuario — o filtro de data/hora fica sempre visivel e
+    funcional, mesmo com "Somente em aberto" marcado) filtram por `started_at`: "incidentes em
+    andamento que comecaram dentro deste periodo" (histórico de incidentes ja encerrados:
+    `GET /blocking/{instance_id}/incidents`)."""
     settings = get_settings()
-    events = await blocking_repo.list_open(instance_id, settings.api_read_max_rows)
+    events = await blocking_repo.list_open(
+        instance_id, settings.api_read_max_rows, since=since, until=until
+    )
     session_ids = {e.blocker_session_id for e in events} | {e.blocked_session_id for e in events}
     enrichment = await query_repo.latest_by_session(
         instance_id,
