@@ -56,21 +56,44 @@ class MetricSamplesRepository(BaseRepository):
     ) -> list[sa.Row]:
         """Linhas brutas ordenadas por (metric_name, time) para agrupar em serie por
         metric_name na camada de API. `metric_names` None/vazio devolve todas as metricas do
-        alvo no periodo."""
-        stmt = (
-            sa.select(metric_samples_table)
-            .where(
-                metric_samples_table.c.target_type == target_type,
-                metric_samples_table.c.target_id == target_id,
-                metric_samples_table.c.time >= since,
-                metric_samples_table.c.time <= until,
+        alvo no periodo.
+
+        `limit` e aplicado POR METRIC_NAME (via `ROW_NUMBER() OVER (PARTITION BY metric_name ...)`),
+        nao um LIMIT global — bug real encontrado em producao: um LIMIT global ordenado por
+        `(metric_name, time)` faz as primeiras metricas em ordem alfabetica (ex.:
+        `collector_cycle_duration_ms`, gravada a cada ciclo) consumirem o orcamento inteiro pra
+        uma instancia de poll rapido (1s), deixando toda metrica de negocio real (sessoes ativas,
+        Page Life Expectancy, etc.) sem NENHUM ponto na tela de "Dia inteiro" — nao e so volume de
+        dado, e uma metrica inteira desaparecendo silenciosamente. Mantem as amostras mais
+        RECENTES por metrica (`ORDER BY time DESC` dentro do particionamento), depois reordena
+        cronologicamente pra exibicao."""
+        stmt = sa.text("""
+            WITH ranked AS (
+                SELECT
+                    time, target_type, target_id, metric_name, labels, value,
+                    ROW_NUMBER() OVER (PARTITION BY metric_name ORDER BY time DESC) AS rn
+                FROM metric_samples
+                WHERE target_type = :target_type AND target_id = :target_id
+                  AND time >= :since AND time <= :until
+                  AND (CAST(:metric_names AS text[]) IS NULL OR metric_name = ANY(:metric_names))
             )
-            .order_by(metric_samples_table.c.metric_name, metric_samples_table.c.time)
-            .limit(limit)
+            SELECT time, target_type, target_id, metric_name, labels, value
+            FROM ranked
+            WHERE rn <= :limit
+            ORDER BY metric_name, time
+        """)
+        result = await self._session.execute(
+            stmt,
+            {
+                "target_type": target_type,
+                "target_id": target_id,
+                "since": since,
+                "until": until,
+                "metric_names": list(metric_names) if metric_names else None,
+                "limit": limit,
+            },
         )
-        if metric_names:
-            stmt = stmt.where(metric_samples_table.c.metric_name.in_(metric_names))
-        return list((await self._session.execute(stmt)).fetchall())
+        return list(result.fetchall())
 
     async def get_latest_value(
         self, target_type: str, target_id: UUID, metric_name: str
