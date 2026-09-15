@@ -81,6 +81,7 @@ from app.normalizers.models import (
     NormalizedMetricSample,
     NormalizedMissingIndexSuggestion,
     NormalizedQuerySample,
+    NormalizedTransactionEvent,
 )
 from app.normalizers.wait_taxonomy import map_wait_event
 
@@ -110,6 +111,7 @@ _SESSION_ACTIVITY_QUERY = """
            r.cpu_time AS cpu_time_ms,
            r.reads, r.writes, r.logical_reads, r.row_count,
            r.blocking_session_id, r.wait_type, r.wait_time, r.wait_resource,
+           r.transaction_id, r.prev_error,
            s.login_name, s.host_name, s.program_name,
            DB_NAME(r.database_id) AS database_name,
            t.text AS full_query_text,
@@ -164,6 +166,36 @@ _BLOCKED_OBJECT_QUERY = """
         AND l.resource_database_id = DB_ID()
         AND p.hobt_id = l.resource_associated_entity_id
     WHERE l.request_status = 'WAIT'
+"""
+
+# Etapa 10 (rastreamento de transacoes) — toda transacao ABERTA no ciclo, join documentado pela
+# propria Microsoft (`sys.dm_tran_session_transactions` linka pra `sys.dm_tran_active_
+# transactions` por `transaction_id`). Cobre sessoes ativas E ociosas (uma sessao "idle in
+# transaction" ainda aparece aqui, mesmo sem request ativa) — usado tanto pra popular
+# `transaction_events` quanto pra enriquecer `blocking_events` com `blocker_transaction_id`/
+# `blocked_transaction_id` (join por `session_id`).
+_TRANSACTION_QUERY = """
+    SELECT
+        tst.transaction_id,
+        tst.session_id,
+        tat.transaction_begin_time,
+        tat.transaction_type,
+        tat.transaction_state,
+        tat.transaction_uow
+    FROM sys.dm_tran_session_transactions AS tst
+    INNER JOIN sys.dm_tran_active_transactions AS tat
+        ON tst.transaction_id = tat.transaction_id
+"""
+
+# Banco de dados de uma transacao — `sys.dm_tran_database_transactions` tem 1 linha por
+# (transacao, banco tocado); uma transacao pode tocar mais de um banco (ex.: via linked server),
+# entao agregamos pro banco de MENOR database_id como melhor esforco (nao ha um "banco principal"
+# formalmente definido pela DMV). `DB_NAME()` resolve pelo `database_id` diretamente, sem
+# depender do banco atual da conexao (funciona pra qualquer banco da instancia).
+_TRANSACTION_DATABASE_QUERY = """
+    SELECT transaction_id, DB_NAME(MIN(database_id)) AS database_name
+    FROM sys.dm_tran_database_transactions
+    GROUP BY transaction_id
 """
 
 # So contadores RAW (`cntr_type=65792`) — delta/razao (§5, corte de escopo) nao implementados.
@@ -323,6 +355,7 @@ def _connect_and_collect(
     list[NormalizedMetricSample],
     list[NormalizedQuerySample],
     list[NormalizedBlockingEvent],
+    list[NormalizedTransactionEvent],
     str,
     int,
 ]:
@@ -374,6 +407,12 @@ def _connect_and_collect(
         cursor.execute(_BLOCKED_OBJECT_QUERY)
         blocked_object_rows = list(cursor.fetchall())[:max_rows]
 
+        cursor.execute(_TRANSACTION_QUERY)
+        transaction_rows = list(cursor.fetchall())[:max_rows]
+
+        cursor.execute(_TRANSACTION_DATABASE_QUERY)
+        transaction_database_rows = list(cursor.fetchall())[:max_rows]
+
         cursor.execute(_PERFORMANCE_COUNTERS_QUERY)
         counter_rows = list(cursor.fetchall())[:max_rows]
 
@@ -381,12 +420,30 @@ def _connect_and_collect(
     finally:
         conn.close()
 
+    transaction_id_by_session_id = {
+        str(row["session_id"]): str(row["transaction_id"]) for row in transaction_rows
+    }
     query_samples = _build_query_samples(session_rows, instance_id, collected_at)
     blocking_events = _build_blocking_events(
-        session_rows, all_session_rows, blocked_object_rows, instance_id, collected_at
+        session_rows,
+        all_session_rows,
+        blocked_object_rows,
+        transaction_id_by_session_id,
+        instance_id,
+        collected_at,
     )
     metric_samples = _build_metric_samples(session_rows, counter_rows, instance_id, collected_at)
-    return metric_samples, query_samples, blocking_events, product_version, version_major
+    transaction_events = _build_transaction_events(
+        transaction_rows, transaction_database_rows, session_rows, instance_id
+    )
+    return (
+        metric_samples,
+        query_samples,
+        blocking_events,
+        transaction_events,
+        product_version,
+        version_major,
+    )
 
 
 def _connect_and_collect_missing_indexes(
@@ -584,6 +641,7 @@ def _build_blocking_events(
     session_rows: list[dict],
     all_session_rows: list[dict],
     blocked_object_rows: list[dict],
+    transaction_id_by_session_id: dict[str, str],
     instance_id: UUID,
     collected_at: datetime,
 ) -> list[NormalizedBlockingEvent]:
@@ -647,6 +705,81 @@ def _build_blocking_events(
                 blocked_wait_resource=row["wait_resource"] or None,
                 blocked_object=(
                     blocked_object_row["blocked_object"] if blocked_object_row is not None else None
+                ),
+                blocker_transaction_id=transaction_id_by_session_id.get(str(blocking_session_id)),
+                blocked_transaction_id=transaction_id_by_session_id.get(str(row["session_id"])),
+            )
+        )
+    return events
+
+
+_TRANSACTION_TYPE_LABELS = {
+    1: "local",
+    2: "local",  # read-only
+    3: "local",  # system
+    4: "distributed",
+}
+
+# Ver Microsoft Learn (`sys.dm_tran_active_transactions.transaction_state`) — mapeamento
+# best-effort, nao exaustivo (fallback pro codigo bruto quando desconhecido).
+_TRANSACTION_STATE_LABELS = {
+    0: "nao inicializada",
+    1: "inicializada",
+    2: "ativa",
+    3: "encerrada (read-only)",
+    4: "commit iniciado",
+    5: "preparada (aguardando resolucao)",
+    6: "commitada",
+    7: "revertendo (rollback)",
+    8: "revertida (rolled back)",
+}
+
+
+def _build_transaction_events(
+    transaction_rows: list[dict],
+    transaction_database_rows: list[dict],
+    session_rows: list[dict],
+    instance_id: UUID,
+) -> list[NormalizedTransactionEvent]:
+    """Transacoes ABERTAS neste ciclo — `_TRANSACTION_QUERY` (join `sys.dm_tran_session_
+    transactions`/`sys.dm_tran_active_transactions`). `transaction_uow` (GUID) so preenchido
+    quando a transacao e uma distribuida promovida pelo MSDTC (unico caso em que correlacionar 2
+    transacoes entre instancias e confiavel — ver `ARCHITECTURE_SPEC.md`). `last_error_code` e
+    melhor esforco (`sys.dm_exec_requests.prev_error`, so em `session_rows` — so existe enquanto
+    a sessao ainda tem request ativa; ausente quando a transacao ja ficou idle apos o erro)."""
+    database_name_by_transaction_id = {
+        str(row["transaction_id"]): row["database_name"] for row in transaction_database_rows
+    }
+    prev_error_by_session_id = {str(row["session_id"]): row["prev_error"] for row in session_rows}
+    events: list[NormalizedTransactionEvent] = []
+    for row in transaction_rows:
+        transaction_id = str(row["transaction_id"])
+        session_id = str(row["session_id"])
+        transaction_type_code = row["transaction_type"]
+        transaction_state_code = row["transaction_state"]
+        transaction_uow = row["transaction_uow"]
+        prev_error = prev_error_by_session_id.get(session_id)
+        events.append(
+            NormalizedTransactionEvent(
+                instance_id=instance_id,
+                transaction_identifier=transaction_id,
+                session_id=session_id,
+                database_name=database_name_by_transaction_id.get(transaction_id),
+                transaction_type=_TRANSACTION_TYPE_LABELS.get(
+                    transaction_type_code, f"desconhecido ({transaction_type_code})"
+                ),
+                transaction_uow=(
+                    str(transaction_uow)
+                    if transaction_uow
+                    and str(transaction_uow) != "00000000-0000-0000-0000-000000000000"
+                    else None
+                ),
+                begin_time=row["transaction_begin_time"],
+                state=_TRANSACTION_STATE_LABELS.get(
+                    transaction_state_code, f"código {transaction_state_code}"
+                ),
+                last_error_code=(
+                    int(prev_error) if prev_error is not None and prev_error != 0 else None
                 ),
             )
         )
@@ -810,6 +943,7 @@ class SQLServerCollector:
             metric_samples,
             query_samples,
             blocking_events,
+            transaction_events,
             product_version,
             version_major,
         ) = await asyncio.wait_for(
@@ -832,6 +966,7 @@ class SQLServerCollector:
             metric_samples=metric_samples,
             query_samples=query_samples,
             blocking_events=blocking_events,
+            transaction_events=transaction_events,
             engine_version=product_version,
             engine_version_major=version_major,
         )

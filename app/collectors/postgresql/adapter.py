@@ -85,6 +85,7 @@ from app.normalizers.models import (
     NormalizedMetricSample,
     NormalizedMissingIndexSuggestion,
     NormalizedQuerySample,
+    NormalizedTransactionEvent,
 )
 from app.normalizers.wait_taxonomy import map_wait_event
 
@@ -116,8 +117,11 @@ _BLOCKING_QUERY = """
 # com transacao aberta segurando lock sem estar rodando nada (`state = 'idle in transaction'` ou,
 # no caso raro de lock preservado por outro motivo, mesmo `'idle'`) nao aparece em
 # `_SESSION_ACTIVITY_QUERY` — sem isso, ficaria sem usuario/programa/maquina na arvore.
+# `datname`/`xact_start`/`state` (Etapa 10 — rastreamento de transacoes) reaproveitados daqui:
+# uma transacao aberta pode estar em QUALQUER estado (inclusive "idle in transaction", o caso
+# mais comum de transacao orfa), nao so nas sessoes ativas de `_SESSION_ACTIVITY_QUERY`.
 _ALL_SESSIONS_QUERY = """
-    SELECT pid, usename, application_name, client_addr
+    SELECT pid, usename, application_name, client_addr, datname, xact_start, state
     FROM pg_stat_activity
 """
 
@@ -425,6 +429,7 @@ class PostgreSQLCollector:
             version_num,
             collected_at,
         )
+        transaction_events = self._build_transaction_events(all_session_rows)
 
         duration_ms = int((time.perf_counter() - start) * 1000)
         return CollectionResult(
@@ -434,6 +439,7 @@ class PostgreSQLCollector:
             metric_samples=metric_samples,
             query_samples=query_samples,
             blocking_events=blocking_events,
+            transaction_events=transaction_events,
             engine_version=engine_version,
             engine_version_major=version_num // 10000,
         )
@@ -596,8 +602,42 @@ class PostgreSQLCollector:
                             if blocked_object_row is not None
                             else None
                         ),
+                        # Postgres nao tem transacao nomeada separada da sessao — o proprio pid
+                        # ja identifica a transacao (ver NormalizedTransactionEvent).
+                        blocker_transaction_id=str(blocker_pid),
+                        blocked_transaction_id=str(blocked_pid),
                     )
                 )
+        return events
+
+    def _build_transaction_events(
+        self, all_session_rows: list[asyncpg.Record]
+    ) -> list[NormalizedTransactionEvent]:
+        """Transacoes ABERTAS neste ciclo — qualquer sessao com `xact_start IS NOT NULL` em
+        `all_session_rows` (todas as sessoes conectadas, nao so as ativas — pega tambem "idle in
+        transaction", o caso mais comum de transacao orfa). `transaction_identifier` = o proprio
+        `pid` (Postgres nao tem conceito de transacao nomeada separada da sessao — ao contrario
+        do SQL Server, so pode haver 1 transacao aberta por backend por vez)."""
+        assert self._instance_id is not None  # garantido por collect()
+        instance_id: UUID = self._instance_id
+        events: list[NormalizedTransactionEvent] = []
+        for row in all_session_rows:
+            xact_start = row["xact_start"]
+            if xact_start is None:
+                continue
+            events.append(
+                NormalizedTransactionEvent(
+                    instance_id=instance_id,
+                    transaction_identifier=str(row["pid"]),
+                    session_id=str(row["pid"]),
+                    database_name=row["datname"],
+                    transaction_type=None,
+                    transaction_uow=None,
+                    begin_time=xact_start,
+                    state=row["state"],
+                    last_error_code=None,
+                )
+            )
         return events
 
     @staticmethod

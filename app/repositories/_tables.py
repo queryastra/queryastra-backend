@@ -72,6 +72,12 @@ blocking_events_table = sa.Table(
     sa.Column("blocked_wait_event_native", sa.Text(), nullable=True),
     sa.Column("blocked_wait_resource", sa.Text(), nullable=True),
     sa.Column("blocked_object", sa.Text(), nullable=True),
+    # Etapa 10 (rastreamento de transacoes) — liga cada lado da aresta de bloqueio a sua
+    # transacao (coluna "Transacao" na tela de Bloqueios). SQL Server:
+    # `sys.dm_tran_session_transactions.transaction_id`; PostgreSQL: o proprio `pid` do backend
+    # (sem conceito de transacao nomeada separado da sessao).
+    sa.Column("blocker_transaction_id", sa.Text(), nullable=True),
+    sa.Column("blocked_transaction_id", sa.Text(), nullable=True),
 )
 
 sql_exclusions_table = sa.Table(

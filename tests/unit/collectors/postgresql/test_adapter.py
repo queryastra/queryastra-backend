@@ -260,6 +260,9 @@ async def test_collect_enriches_idle_blocker_identity(monkeypatch: pytest.Monkey
             "usename": "idle_blocker_user",
             "application_name": "batch_job",
             "client_addr": "10.0.0.9",
+            "datname": "app_db",
+            "xact_start": None,
+            "state": "idle in transaction",
         },
     ]
     fake_conn = _FakeConnection(

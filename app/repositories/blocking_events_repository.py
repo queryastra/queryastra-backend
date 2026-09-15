@@ -45,6 +45,8 @@ class BlockingEventsRepository(BaseRepository):
                 "blocked_wait_event_native": e.blocked_wait_event_native,
                 "blocked_wait_resource": e.blocked_wait_resource,
                 "blocked_object": e.blocked_object,
+                "blocker_transaction_id": e.blocker_transaction_id,
+                "blocked_transaction_id": e.blocked_transaction_id,
             }
             for e in events
         ]

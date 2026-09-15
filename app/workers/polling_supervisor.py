@@ -31,6 +31,7 @@ from app.repositories.blocking_events_repository import BlockingEventsRepository
 from app.repositories.instances_repository import InstancesRepository
 from app.repositories.metric_samples_repository import MetricSamplesRepository
 from app.repositories.query_samples_repository import QuerySamplesRepository
+from app.repositories.transaction_events_repository import TransactionEventsRepository
 from app.security.credential_reference import (
     CredentialReference,
     CredentialResolutionError,
@@ -45,6 +46,7 @@ _InstancesRepositoryFactory = Callable[[AsyncSession], InstancesRepository]
 _MetricSamplesRepositoryFactory = Callable[[AsyncSession], MetricSamplesRepository]
 _QuerySamplesRepositoryFactory = Callable[[AsyncSession], QuerySamplesRepository]
 _BlockingEventsRepositoryFactory = Callable[[AsyncSession], BlockingEventsRepository]
+_TransactionEventsRepositoryFactory = Callable[[AsyncSession], TransactionEventsRepository]
 
 
 @dataclass(slots=True)
@@ -74,6 +76,9 @@ class PollingSupervisor:
         blocking_events_repository_factory: _BlockingEventsRepositoryFactory = (
             BlockingEventsRepository
         ),
+        transaction_events_repository_factory: _TransactionEventsRepositoryFactory = (
+            TransactionEventsRepository
+        ),
     ) -> None:
         self._session_factory = session_factory
         self._discovery_interval_seconds = discovery_interval_seconds
@@ -83,6 +88,7 @@ class PollingSupervisor:
         self._metric_samples_repository_factory = metric_samples_repository_factory
         self._query_samples_repository_factory = query_samples_repository_factory
         self._blocking_events_repository_factory = blocking_events_repository_factory
+        self._transaction_events_repository_factory = transaction_events_repository_factory
         self._stop_event = asyncio.Event()
         self._instance_tasks: dict[UUID, _InstanceTaskHandle] = {}
 
@@ -247,6 +253,7 @@ class PollingSupervisor:
                         self._query_samples_repository_factory(session),
                         self._blocking_events_repository_factory(session),
                         instances_repository,
+                        self._transaction_events_repository_factory(session),
                     )
                     await worker._run_cycle()  # noqa: SLF001 - reuso interno deliberado
                 finally:

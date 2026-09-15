@@ -43,6 +43,7 @@ from app.repositories.blocking_events_repository import BlockingEventsRepository
 from app.repositories.instances_repository import InstancesRepository
 from app.repositories.metric_samples_repository import MetricSamplesRepository
 from app.repositories.query_samples_repository import QuerySamplesRepository
+from app.repositories.transaction_events_repository import TransactionEventsRepository
 
 logger = get_logger(__name__)
 
@@ -82,6 +83,7 @@ class PollingWorker:
         query_samples_repository: QuerySamplesRepository,
         blocking_events_repository: BlockingEventsRepository,
         instances_repository: InstancesRepository,
+        transaction_events_repository: TransactionEventsRepository | None = None,
     ) -> None:
         self._instance_id = instance_id
         self._collector = collector
@@ -90,6 +92,10 @@ class PollingWorker:
         self._query_samples_repository = query_samples_repository
         self._blocking_events_repository = blocking_events_repository
         self._instances_repository = instances_repository
+        # Opcional (default None) — testes/chamadores existentes que nao passam esse repositorio
+        # continuam funcionando sem persistir transacoes (rastreamento de transacoes so fica
+        # ativo quando o chamador injeta o repositorio de verdade).
+        self._transaction_events_repository = transaction_events_repository
         self._stop_event = asyncio.Event()
 
     async def run(self) -> None:
@@ -130,6 +136,10 @@ class PollingWorker:
             await self._metric_samples_repository.insert_batch(result.metric_samples)
             await self._query_samples_repository.insert_batch(result.query_samples)
             await self._blocking_events_repository.insert_batch(result.blocking_events)
+            if self._transaction_events_repository is not None:
+                await self._transaction_events_repository.upsert_batch(
+                    self._instance_id, result.transaction_events, now
+                )
             if result.engine_version is not None and result.engine_version_major is not None:
                 await self._instances_repository.update_engine_version(
                     self._instance_id, result.engine_version, result.engine_version_major

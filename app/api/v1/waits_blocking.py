@@ -58,6 +58,10 @@ class BlockingTreeNodeResponse(BaseModel):
     wait_event_native: str | None
     wait_resource: str | None
     blocked_object: str | None
+    # Etapa 10 (rastreamento de transacoes) — SQL Server: `sys.dm_tran_session_transactions.
+    # transaction_id`; PostgreSQL: o proprio session_id (sem conceito de transacao nomeada
+    # separada da sessao). Liga pra `GET /transactions/{instance_id}/{transaction_identifier}`.
+    transaction_id: str | None
     waited_ms: int | None
     caused_ms: int
     children: list[BlockingTreeNodeResponse] = Field(default_factory=list)
@@ -90,6 +94,7 @@ class SessionBlockingDetailResponse(BaseModel):
     wait_event_native: str | None
     wait_resource: str | None
     blocked_object: str | None
+    transaction_id: str | None
     sql_hash: str | None
     sql_text_masked: str | None
     sql_text_full_masked: str | None
@@ -141,6 +146,7 @@ def _collect_session_info(events: list[Row]) -> dict[str, _SessionInfo]:
         blocker.setdefault("program", e.blocker_program)
         blocker.setdefault("machine", e.blocker_machine)
         blocker.setdefault("wait_event_native", e.blocker_wait_event_native)
+        blocker.setdefault("transaction_id", e.blocker_transaction_id)
 
         blocked = info.setdefault(e.blocked_session_id, {})
         blocked["db_user"] = e.blocked_db_user or blocked.get("db_user")
@@ -151,6 +157,7 @@ def _collect_session_info(events: list[Row]) -> dict[str, _SessionInfo]:
         )
         blocked["wait_resource"] = e.blocked_wait_resource or blocked.get("wait_resource")
         blocked["blocked_object"] = e.blocked_object or blocked.get("blocked_object")
+        blocked["transaction_id"] = e.blocked_transaction_id or blocked.get("transaction_id")
     return info
 
 
@@ -195,6 +202,7 @@ def _build_blocking_tree(
             wait_event_native=info.get("wait_event_native"),
             wait_resource=info.get("wait_resource"),
             blocked_object=info.get("blocked_object"),
+            transaction_id=info.get("transaction_id"),
             waited_ms=waited_ms,
             caused_ms=caused_ms,
             children=children,
@@ -276,6 +284,7 @@ async def get_session_blocking_detail(
         wait_event_native=info.get("wait_event_native"),
         wait_resource=info.get("wait_resource"),
         blocked_object=info.get("blocked_object"),
+        transaction_id=info.get("transaction_id"),
         sql_hash=sample.sql_hash if sample else None,
         sql_text_masked=sample.sql_text_masked if sample else None,
         sql_text_full_masked=sample.sql_text_full_masked if sample else None,

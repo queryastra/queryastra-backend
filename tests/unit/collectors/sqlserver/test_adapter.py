@@ -30,6 +30,8 @@ def _request_row(
     full_query_text: str | None = None,
     cpu_time_ms: int = 500,
     wait_resource: str | None = None,
+    transaction_id: int | None = None,
+    prev_error: int = 0,
 ) -> dict[str, Any]:
     """`query_text` simula o `SUBSTRING` ja fatiado pelo statement em execucao (o que a query
     real devolve); `full_query_text` simula `t.text` cru (o batch/procedure inteiro) — por
@@ -50,6 +52,8 @@ def _request_row(
         "wait_type": wait_type,
         "wait_time": wait_time,
         "wait_resource": wait_resource,
+        "transaction_id": transaction_id,
+        "prev_error": prev_error,
         "login_name": "monitoring_user",
         "host_name": "app-server-1",
         "program_name": "sqlcmd",
@@ -67,12 +71,16 @@ class _FakeCursor:
         counter_rows: list,
         all_session_rows: list,
         blocked_object_rows: list,
+        transaction_rows: list,
+        transaction_database_rows: list,
     ) -> None:
         self._version_row = version_row
         self._session_rows = session_rows
         self._counter_rows = counter_rows
         self._all_session_rows = all_session_rows
         self._blocked_object_rows = blocked_object_rows
+        self._transaction_rows = transaction_rows
+        self._transaction_database_rows = transaction_database_rows
         self._pending: list[dict[str, Any]] = []
 
     def execute(self, query: str) -> None:
@@ -82,6 +90,10 @@ class _FakeCursor:
             self._pending = self._session_rows
         elif "dm_tran_locks" in query:
             self._pending = self._blocked_object_rows
+        elif "dm_tran_database_transactions" in query:
+            self._pending = self._transaction_database_rows
+        elif "dm_tran_session_transactions" in query:
+            self._pending = self._transaction_rows
         elif "dm_exec_sessions" in query:
             self._pending = self._all_session_rows
         elif "dm_os_performance_counters" in query:
@@ -107,12 +119,16 @@ class _FakeConnection:
         counter_rows: list,
         all_session_rows: list,
         blocked_object_rows: list,
+        transaction_rows: list,
+        transaction_database_rows: list,
     ) -> None:
         self._version_row = version_row
         self._session_rows = session_rows
         self._counter_rows = counter_rows
         self._all_session_rows = all_session_rows
         self._blocked_object_rows = blocked_object_rows
+        self._transaction_rows = transaction_rows
+        self._transaction_database_rows = transaction_database_rows
         self.closed = False
 
     def cursor(self, as_dict: bool = False) -> _FakeCursor:
@@ -123,6 +139,8 @@ class _FakeConnection:
             self._counter_rows,
             self._all_session_rows,
             self._blocked_object_rows,
+            self._transaction_rows,
+            self._transaction_database_rows,
         )
 
     def close(self) -> None:
@@ -136,6 +154,8 @@ def _patch_connect(
     counter_rows: list,
     all_session_rows: list | None = None,
     blocked_object_rows: list | None = None,
+    transaction_rows: list | None = None,
+    transaction_database_rows: list | None = None,
 ) -> _FakeConnection:
     # `all_session_rows` default: identidade equivalente a `session_rows` (converte cada linha de
     # request pras 4 colunas de `_ALL_SESSIONS_QUERY`) — suficiente pra maioria dos testes, que
@@ -156,6 +176,8 @@ def _patch_connect(
         counter_rows,
         all_session_rows,
         blocked_object_rows if blocked_object_rows is not None else [],
+        transaction_rows if transaction_rows is not None else [],
+        transaction_database_rows if transaction_database_rows is not None else [],
     )
 
     def fake_connect(**kwargs: object) -> _FakeConnection:

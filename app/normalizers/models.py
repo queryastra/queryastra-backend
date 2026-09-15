@@ -136,6 +136,37 @@ class NormalizedBlockingEvent(BaseModel):
     blocked_wait_event_native: str | None = None
     blocked_wait_resource: str | None = None
     blocked_object: str | None = None
+    # Etapa 10 (rastreamento de transacoes) — liga cada lado da aresta a sua transacao (coluna
+    # "Transacao" na tela de Bloqueios). SQL Server:
+    # `sys.dm_tran_session_transactions.transaction_id`; PostgreSQL: o proprio `pid` do backend.
+    blocker_transaction_id: str | None = None
+    blocked_transaction_id: str | None = None
+
+
+class NormalizedTransactionEvent(BaseModel):
+    """Transacao aberta normalizada — destino: tabela relacional `transaction_events` (upsert
+    por instance_id/transaction_identifier, com reconciliacao — ver
+    `TransactionEventsRepository.upsert_batch`). Etapa 10, itens 2/3.
+
+    `transaction_identifier`: SQL Server usa `sys.dm_tran_session_transactions.transaction_id`
+    (texto); PostgreSQL usa o proprio `pid` do backend (sem conceito de transacao nomeada
+    separada da sessao). `transaction_type`/`transaction_uow` so fazem sentido no SQL Server —
+    `transaction_uow` (GUID) so preenchido quando a transacao e uma distribuida promovida pelo
+    MSDTC (unico caso em que correlacionar 2 transacoes entre instancias e confiavel, ver
+    `ARCHITECTURE_SPEC.md`). `last_error_code` e melhor esforco
+    (`sys.dm_exec_requests.prev_error`), ausente quando a sessao ja ficou idle apos o erro."""
+
+    model_config = ConfigDict(frozen=True)
+
+    instance_id: UUID
+    transaction_identifier: str
+    session_id: str | None = None
+    database_name: str | None = None
+    transaction_type: str | None = None
+    transaction_uow: str | None = None
+    begin_time: datetime | None = None
+    state: str | None = None
+    last_error_code: int | None = None
 
 
 class NormalizedMissingIndexSuggestion(BaseModel):

@@ -107,6 +107,15 @@ class _FakeBlockingEventsRepository:
         self.batches.append(events)
 
 
+class _FakeTransactionEventsRepository:
+    def __init__(self, session: object) -> None:
+        del session
+        self.calls: list = []
+
+    async def upsert_batch(self, instance_id: object, events: list, observed_at: object) -> None:
+        self.calls.append((instance_id, events, observed_at))
+
+
 def _build_result(instance_id) -> CollectionResult:  # noqa: ANN001 - fake
     from datetime import UTC, datetime
 
@@ -175,6 +184,7 @@ def _make_supervisor(
         metric_samples_repository_factory=_FakeMetricSamplesRepository,
         query_samples_repository_factory=_FakeQuerySamplesRepository,
         blocking_events_repository_factory=_FakeBlockingEventsRepository,
+        transaction_events_repository_factory=_FakeTransactionEventsRepository,
         collector_factory=collector_factory or _FakeCollector,
         **kwargs,
     )

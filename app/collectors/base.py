@@ -26,6 +26,7 @@ from app.normalizers.models import (
     NormalizedMetricSample,
     NormalizedMissingIndexSuggestion,
     NormalizedQuerySample,
+    NormalizedTransactionEvent,
 )
 
 
@@ -72,6 +73,10 @@ class CollectionResult:
     metric_samples: list[NormalizedMetricSample] = field(default_factory=list)
     query_samples: list[NormalizedQuerySample] = field(default_factory=list)
     blocking_events: list[NormalizedBlockingEvent] = field(default_factory=list)
+    # Etapa 10 (rastreamento de transacoes) — transacoes ABERTAS neste ciclo (nao serie
+    # temporal bruta: `TransactionEventsRepository.upsert_batch` reconcilia o conjunto inteiro,
+    # removendo qualquer transacao vista antes mas ausente agora — ja fechou).
+    transaction_events: list[NormalizedTransactionEvent] = field(default_factory=list)
     capabilities: list[CapabilityResult] = field(default_factory=list)
     # Versao do motor detectada NESTE ciclo (o coletor ja detecta pra decidir qual variante de
     # query usar — ex.: `pg_stat_checkpointer` vs `pg_stat_bgwriter` — mas so passou a expor isso

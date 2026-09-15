@@ -10,6 +10,7 @@ from app.models.backup_status import BackupStatus
 from app.models.instance import Instance, InstanceMaintenanceWindow
 from app.models.missing_index_suggestion import MissingIndexSuggestion
 from app.models.server import InstanceServer, Server
+from app.models.transaction_event import TransactionEvent
 
 __all__ = [
     "Instance",
@@ -22,4 +23,5 @@ __all__ = [
     "AlertSilence",
     "MissingIndexSuggestion",
     "BackupStatus",
+    "TransactionEvent",
 ]

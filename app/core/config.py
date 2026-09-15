@@ -109,6 +109,13 @@ class Settings(BaseSettings):
     )
     missing_index_pg_min_seq_scans: int = Field(default=100, alias="MISSING_INDEX_PG_MIN_SEQ_SCANS")
 
+    # Etapa 10 (rastreamento de transacoes) - a partir de quantos minutos aberta uma transacao
+    # vira candidata a "orfa" (`is_orphan_candidate` em GET /transactions/{instance_id}). So um
+    # destaque visual/ordenacao - nunca fecha nem interfere na transacao de verdade.
+    transaction_orphan_threshold_minutes: int = Field(
+        default=5, alias="TRANSACTION_ORPHAN_THRESHOLD_MINUTES"
+    )
+
     # Liga o supervisor de checagem de backup/archiving (BackupStatusSupervisor,
     # ARCHITECTURE_SPEC.md Q16) no lifespan do backend. Default false - mesma politica de
     # seguranca dos demais workers.

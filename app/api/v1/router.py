@@ -17,6 +17,7 @@ from app.api.v1 import (
     metrics,
     missing_index,
     queries,
+    transactions,
     waits_blocking,
     websocket,
 )
@@ -35,6 +36,7 @@ api_v1_router.include_router(
     missing_index.router, prefix="/missing-index-suggestions", tags=["missing-index"]
 )
 api_v1_router.include_router(backup_status.router, prefix="/backup-status", tags=["backup-status"])
+api_v1_router.include_router(transactions.router, prefix="/transactions", tags=["transactions"])
 api_v1_router.include_router(websocket.router, tags=["websocket"])
 
 # Endpoint de health-check do backend em si (nao confundir com health-check de instancia
