@@ -717,24 +717,41 @@ class QuerySamplesRepository(BaseRepository):
         since: datetime,
         until: datetime,
         limit: int,
-        bucket: Literal["day", "hour"] = "day",
+        bucket: Literal["day", "hour", "ten_minutes"] = "day",
     ) -> list[sa.Row]:
         """Execucoes + tempo de espera por bucket de tempo, para UM `sql_hash` especifico —
         Etapa 11 (grafico "Execucoes x tempo de espera por execucao" no detalhe de query, nivel
         3). Mesmo molde de `wait_time_by_bucket_and_sql_hash`, mas filtrado a um unico hash (nao
         agrupado por hash) e somando tambem `count(*)` como `execution_count` — o hash ja e
         conhecido pelo chamador (rota do proprio detalhe da query), nao precisa reaparecer no
-        SELECT."""
+        SELECT.
+
+        `bucket="ten_minutes"` (a pedido explicito do usuario, pra quando o periodo em analise ja
+        e uma unica hora — bucket "hour" nesse caso produziria 1 barra so, inutil): `date_trunc`
+        do Postgres NAO tem uma unidade nativa de 10 minutos (so segundo/minuto/hora/dia/...),
+        entao usamos aritmetica de epoch (`floor(epoch/600)*600`) em vez de `date_trunc` — `bucket`
+        e um `Literal` fechado validado pelo tipo, nunca texto arbitrario do cliente, entao
+        interpolar a expressao SQL condicionalmente (nao como bind param) e seguro aqui."""
+        bucket_start_sql = (
+            "to_timestamp(floor(extract(epoch FROM time) / 600) * 600)"
+            if bucket == "ten_minutes"
+            else "(date_trunc(:bucket, time AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')"
+        )
+        group_by_sql = (
+            "floor(extract(epoch FROM time) / 600)"
+            if bucket == "ten_minutes"
+            else "date_trunc(:bucket, time AT TIME ZONE 'UTC')"
+        )
         stmt = sa.text(
             f"""
             WITH effective AS ({self._EFFECTIVE_WAIT_SELECT})
             SELECT
-                (date_trunc(:bucket, time AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') AS bucket_start,
+                {bucket_start_sql} AS bucket_start,
                 count(*) AS execution_count,
                 coalesce(sum(effective_wait_ms), 0) AS total_wait_time_ms
             FROM effective
             WHERE sql_hash = :sql_hash
-            GROUP BY date_trunc(:bucket, time AT TIME ZONE 'UTC')
+            GROUP BY {group_by_sql}
             ORDER BY bucket_start
             LIMIT :limit
         """

@@ -763,14 +763,23 @@ async def get_query_stats_by_bucket(
     bucket: Annotated[str, Query()] = "day",
 ) -> list[QueryStatsBucketResponse]:
     """Execucoes + tempo de espera por bucket de tempo, para o grafico "Execucoes x tempo de
-    espera por execucao" do painel de estatisticas (Etapa 11). Sem filtro de data/hora na tela
-    (mesma decisao ja tomada para o restante do detalhe de query) — o cliente sempre manda o
-    periodo "Tudo" (`ALL_TIME_FROM_ISO` ate agora)."""
+    espera por execucao" do painel de estatisticas (Etapa 11). Respeita o mesmo periodo
+    (`from`/`to`) selecionado no drill-down de onde a tela de detalhe foi aberta — cai para
+    "Tudo" (`ALL_TIME_FROM_ISO` ate agora) so quando ausente (link direto/favorito).
+    `bucket="ten_minutes"` (a pedido explicito do usuario): quando o periodo em analise ja e uma
+    unica hora, bucket "hour" produziria 1 barra so — 10 em 10 minutos aproveita a granularidade
+    real da coleta (~1-10s) sem virar ruido."""
     settings = get_settings()
     resolved_since, resolved_until = resolve_time_window(
         since, until, timedelta(seconds=settings.api_read_default_lookback_seconds)
     )
-    bucket_literal: Literal["day", "hour"] = "hour" if bucket == "hour" else "day"
+    bucket_literal: Literal["day", "hour", "ten_minutes"]
+    if bucket == "hour":
+        bucket_literal = "hour"
+    elif bucket == "ten_minutes":
+        bucket_literal = "ten_minutes"
+    else:
+        bucket_literal = "day"
     rows = await repository.query_stats_by_bucket(
         instance_id,
         sql_hash,

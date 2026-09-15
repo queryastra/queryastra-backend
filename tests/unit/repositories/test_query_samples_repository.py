@@ -1627,3 +1627,48 @@ async def test_query_stats_by_bucket_counts_executions_and_sums_wait(
     assert len(rows) == 1
     assert rows[0].execution_count == 2
     assert rows[0].total_wait_time_ms == 100
+
+
+async def test_query_stats_by_bucket_ten_minutes_splits_within_the_same_hour(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """`bucket="ten_minutes"` — a pedido explicito do usuario: quando o periodo em analise ja e
+    uma unica hora, bucket "hour" produziria 1 barra so (inutil); 2 amostras na mesma hora mas em
+    janelas de 10 minutos diferentes devem sair em buckets separados."""
+    repo = QuerySamplesRepository(db_session)
+    hour_start = datetime(2026, 9, 1, 10, 0, tzinfo=UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=hour_start + timedelta(minutes=2),
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-a",
+                sql_text_masked="SELECT ? FROM t",
+                wait_time_ms=100,
+            ),
+            NormalizedQuerySample(
+                time=hour_start + timedelta(minutes=15),
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-a",
+                sql_text_masked="SELECT ? FROM t",
+                wait_time_ms=50,
+            ),
+        ]
+    )
+
+    rows = await repo.query_stats_by_bucket(
+        test_instance.id,
+        "hash-a",
+        since=hour_start - timedelta(minutes=1),
+        until=hour_start + timedelta(hours=1),
+        limit=10,
+        bucket="ten_minutes",
+    )
+
+    assert len(rows) == 2
+    assert rows[0].execution_count == 1
+    assert rows[0].total_wait_time_ms == 100
+    assert rows[1].execution_count == 1
+    assert rows[1].total_wait_time_ms == 50
