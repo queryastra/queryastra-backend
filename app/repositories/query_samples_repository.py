@@ -265,6 +265,7 @@ class QuerySamplesRepository(BaseRepository):
         until: datetime,
         limit: int,
         database_name: str | None = None,
+        db_user: str | None = None,
     ) -> list[sa.Row]:
         """Agrega `query_samples` bruto por `sql_hash`: execution_count/total/avg via GROUP BY;
         sql_name/sql_text_masked/database_name da linha mais recente por hash (DISTINCT ON); wait
@@ -272,10 +273,11 @@ class QuerySamplesRepository(BaseRepository):
         (mais legivel que expression builder para DISTINCT ON + moda).
 
         `database_name` (nivel 2 do drill-down hierarquico: Instancia -> Banco -> Query) filtra
-        as amostras a um unico banco quando informado; `None` (default) mantem o comportamento
-        historico de agregar todos os bancos juntos sob o mesmo `sql_hash` — o filtro e aplicado
-        na query externa, apos a CTE `effective` calcular `effective_wait_ms` sem restricao de
-        banco (ver docstring da classe). `total_wait_time_ms`/`avg_wait_time_ms` somam/promediam
+        as amostras a um unico banco quando informado; `db_user` (nivel 2 da dimensao "Usuarios",
+        mesmo padrao) filtra a um unico usuario. `None`/`None` (default) mantem o comportamento
+        historico de agregar tudo junto sob o mesmo `sql_hash` — os filtros sao aplicados na
+        query externa, apos a CTE `effective` calcular `effective_wait_ms` sem restricao (ver
+        docstring da classe). `total_wait_time_ms`/`avg_wait_time_ms` somam/promediam
         `effective_wait_ms + effective_cpu_ms` (delta real por amostra, incluindo o tempo de CPU
         sem espera ativa — ver docstring de `_EFFECTIVE_WAIT_SELECT`), nao mais `wait_time_ms`
         bruto — ver docstring da classe para o porque. Somar os dois aqui (em vez de manter
@@ -288,6 +290,7 @@ class QuerySamplesRepository(BaseRepository):
             filtered AS (
                 SELECT * FROM effective
                 WHERE (CAST(:database_name AS text) IS NULL OR database_name = :database_name)
+                  AND (CAST(:db_user AS text) IS NULL OR db_user = :db_user)
             ),
             agg AS (
                 SELECT sql_hash, count(*) AS execution_count,
@@ -332,6 +335,7 @@ class QuerySamplesRepository(BaseRepository):
                 "until": until,
                 "limit": limit,
                 "database_name": database_name,
+                "db_user": db_user,
                 "benign_wait_types": list(self._BENIGN_WAIT_EVENT_NATIVE),
             },
         )
@@ -646,13 +650,14 @@ class QuerySamplesRepository(BaseRepository):
         until: datetime,
         limit: int,
         database_name: str | None = None,
+        db_user: str | None = None,
     ) -> list[sa.Row]:
         """Agrega `query_samples` por (`sql_hash`, `wait_event_native`) — decomposicao do wait
         time de cada query (nivel 2 do drill-down) pelo tipo de espera NATIVO do engine. Mesma
         ideia de `wait_breakdown_by_database`, granularidade `sql_hash` em vez de
-        `database_name`; aceita o mesmo filtro opcional `database_name` de `top_sql()` (nivel 2
-        so quer a decomposicao das queries daquele banco). `database_name` e filtrado apos a CTE
-        `effective` (nao antes, ver docstring da classe). `total_wait_time_ms` soma
+        `database_name`; aceita os mesmos filtros opcionais `database_name`/`db_user` de
+        `top_sql()` (nivel 2 so quer a decomposicao das queries daquele banco/usuario). Filtrados
+        apos a CTE `effective` (nao antes, ver docstring da classe). `total_wait_time_ms` soma
         `effective_wait_ms` (delta real por amostra). Waits benignos/de background excluidos do
         `GROUP BY` inteiramente (ver `_NOT_BENIGN_WAIT_FILTER`). Inclui um bucket sintetico
         'Memory/CPU' por `sql_hash` (`effective_cpu_ms`) via UNION ALL — mesmo gap fechado em
@@ -666,11 +671,13 @@ class QuerySamplesRepository(BaseRepository):
                        effective_wait_ms AS ms
                 FROM effective
                 WHERE (CAST(:database_name AS text) IS NULL OR database_name = :database_name)
+                    AND (CAST(:db_user AS text) IS NULL OR db_user = :db_user)
                     AND {self._NOT_BENIGN_WAIT_FILTER} AND {self._NOT_CPU_ONLY_FILTER}
                 UNION ALL
                 SELECT sql_hash, 'Memory/CPU' AS wait_event_native, effective_cpu_ms AS ms
                 FROM effective
                 WHERE (CAST(:database_name AS text) IS NULL OR database_name = :database_name)
+                    AND (CAST(:db_user AS text) IS NULL OR db_user = :db_user)
                     AND wait_event_native IS NULL AND coalesce(wait_time_ms, 0) = 0
             )
             SELECT
@@ -691,6 +698,7 @@ class QuerySamplesRepository(BaseRepository):
                 "until": until,
                 "limit": limit,
                 "database_name": database_name,
+                "db_user": db_user,
                 "benign_wait_types": list(self._BENIGN_WAIT_EVENT_NATIVE),
             },
         )
@@ -797,16 +805,16 @@ class QuerySamplesRepository(BaseRepository):
         until: datetime,
         limit: int,
         database_name: str | None = None,
+        db_user: str | None = None,
         bucket: Literal["day", "hour"] = "day",
     ) -> list[sa.Row]:
         """Agrega `query_samples` por (`bucket` de tempo, `sql_hash`) — visao historica "Tudo" do
         nivel 2 do drill-down (`bucket="day"`) ou detalhamento por hora dentro de um dia
         (`bucket="hour"`). Mesmas ressalvas de `wait_time_by_bucket_and_database` (`bucket_start`
         convertido de volta pra `timestamptz` via `AT TIME ZONE 'UTC'` externo, pra sair com `Z`
-        no JSON); aceita o mesmo filtro opcional `database_name` de
+        no JSON); aceita os mesmos filtros opcionais `database_name`/`db_user` de
         `top_sql()`/`wait_breakdown_by_sql_hash()`. `total_wait_time_ms` soma `effective_wait_ms`
-        (delta real por amostra) — `database_name` filtrado apos a CTE `effective`, ver docstring
-        da classe."""
+        (delta real por amostra) — filtrados apos a CTE `effective`, ver docstring da classe."""
         stmt = sa.text(
             f"""
             WITH effective AS ({self._EFFECTIVE_WAIT_SELECT})
@@ -816,6 +824,7 @@ class QuerySamplesRepository(BaseRepository):
                 coalesce(sum(effective_wait_ms), 0) AS total_wait_time_ms
             FROM effective
             WHERE (CAST(:database_name AS text) IS NULL OR database_name = :database_name)
+              AND (CAST(:db_user AS text) IS NULL OR db_user = :db_user)
             GROUP BY date_trunc(:bucket, time AT TIME ZONE 'UTC'), sql_hash
             ORDER BY bucket_start, total_wait_time_ms DESC
             LIMIT :limit
@@ -829,6 +838,7 @@ class QuerySamplesRepository(BaseRepository):
                 "until": until,
                 "limit": limit,
                 "database_name": database_name,
+                "db_user": db_user,
                 "bucket": bucket,
                 "benign_wait_types": list(self._BENIGN_WAIT_EVENT_NATIVE),
             },

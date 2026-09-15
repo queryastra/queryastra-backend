@@ -242,6 +242,48 @@ async def test_top_sql_filters_by_database_name_query_param(
     assert body[0]["total_wait_time_ms"] == 100
 
 
+async def test_top_sql_filters_by_db_user_query_param(
+    client: AsyncClient, db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """Nivel 2 da dimensao "Usuarios" — mesmo padrao de `database_name`, filtrando por
+    `db_user`."""
+    repo = QuerySamplesRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-shared",
+                sql_text_masked="SELECT ? FROM t",
+                db_user="app_erp",
+                wait_time_ms=100,
+            ),
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-shared",
+                sql_text_masked="SELECT ? FROM t",
+                db_user="batch_conciliacao",
+                wait_time_ms=200,
+            ),
+        ]
+    )
+
+    response = await client.get(
+        f"/api/v1/queries/top-sql/{test_instance.id}", params={"db_user": "app_erp"}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 1
+    assert body[0]["sql_hash"] == "hash-shared"
+    assert body[0]["execution_count"] == 1
+    assert body[0]["total_wait_time_ms"] == 100
+
+
 async def test_get_query_detail_returns_raw_samples(
     client: AsyncClient, db_session: AsyncSession, test_instance: Instance
 ) -> None:

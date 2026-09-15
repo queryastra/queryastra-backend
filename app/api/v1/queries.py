@@ -210,6 +210,7 @@ async def top_sql(
     since: Annotated[datetime | None, Query(alias="from")] = None,
     until: Annotated[datetime | None, Query(alias="to")] = None,
     database_name: Annotated[str | None, Query()] = None,
+    db_user: Annotated[str | None, Query()] = None,
 ) -> list[TopSqlEntryResponse]:
     """Top SQL agregado de uma instancia, calculado em tempo real sobre `query_samples`
     (GROUP BY sql_hash). PostgreSQL: nao depende de `pg_stat_statements` (agrega o que o
@@ -217,8 +218,9 @@ async def top_sql(
     pelo collector.
 
     `database_name` (nivel 2 do drill-down hierarquico: Instancia -> Banco -> Query) restringe a
-    agregacao a um unico banco; sem o parametro, mantem o comportamento historico de agregar
-    todos os bancos juntos sob o mesmo `sql_hash`."""
+    agregacao a um unico banco; `db_user` (nivel 2 da dimensao "Usuarios") restringe a um unico
+    usuario; sem nenhum dos dois, mantem o comportamento historico de agregar tudo junto sob o
+    mesmo `sql_hash`."""
     settings = get_settings()
     resolved_since, resolved_until = resolve_time_window(
         since, until, timedelta(seconds=settings.api_read_default_lookback_seconds)
@@ -229,6 +231,7 @@ async def top_sql(
         resolved_until,
         settings.api_read_max_rows,
         database_name=database_name,
+        db_user=db_user,
     )
     breakdown_rows = await repository.wait_breakdown_by_sql_hash(
         instance_id,
@@ -236,6 +239,7 @@ async def top_sql(
         resolved_until,
         settings.api_read_max_rows,
         database_name=database_name,
+        db_user=db_user,
     )
     breakdown_by_hash: dict[str, list[WaitBreakdownEntryResponse]] = {}
     for row in breakdown_rows:
@@ -377,11 +381,13 @@ async def list_top_sql_by_day(
     since: Annotated[datetime | None, Query(alias="from")] = None,
     until: Annotated[datetime | None, Query(alias="to")] = None,
     database_name: Annotated[str | None, Query()] = None,
+    db_user: Annotated[str | None, Query()] = None,
 ) -> list[BucketEntryResponse]:
-    """Visao historica "Tudo" do nivel 2 (Instancia -> Banco -> Query): um dia por barra,
-    empilhada por query — mesmo `database_name` opcional de `top_sql()`. `label` e `sql_hash`
-    (o cliente resolve o rotulo curto/nome, esta rota nao traz `sql_name`/`sql_text_masked` —
-    corte de escopo deliberado, o overview historico nao precisa do texto completo da query)."""
+    """Visao historica "Tudo" do nivel 2 (Instancia -> Banco -> Query, ou da dimensao
+    "Usuarios"): um dia por barra, empilhada por query — mesmos `database_name`/`db_user`
+    opcionais de `top_sql()`. `label` e `sql_hash` (o cliente resolve o rotulo curto/nome, esta
+    rota nao traz `sql_name`/`sql_text_masked` — corte de escopo deliberado, o overview historico
+    nao precisa do texto completo da query)."""
     settings = get_settings()
     resolved_since, resolved_until = resolve_time_window(
         since, until, timedelta(seconds=settings.api_read_default_lookback_seconds)
@@ -392,6 +398,7 @@ async def list_top_sql_by_day(
         resolved_until,
         settings.api_read_max_rows,
         database_name=database_name,
+        db_user=db_user,
         bucket="day",
     )
     return [
@@ -439,9 +446,11 @@ async def list_top_sql_by_hour(
     since: Annotated[datetime | None, Query(alias="from")] = None,
     until: Annotated[datetime | None, Query(alias="to")] = None,
     database_name: Annotated[str | None, Query()] = None,
+    db_user: Annotated[str | None, Query()] = None,
 ) -> list[BucketEntryResponse]:
     """Detalhamento por hora do nivel 2, dentro de um dia especifico — mesma ideia de
-    `list_databases_by_hour`, empilhado por query em vez de banco. `label` e `sql_hash`."""
+    `list_databases_by_hour`, empilhado por query em vez de banco (ou por usuario, quando
+    `db_user` e informado). `label` e `sql_hash`."""
     settings = get_settings()
     resolved_since, resolved_until = resolve_time_window(
         since, until, timedelta(seconds=settings.api_read_default_lookback_seconds)
@@ -452,6 +461,7 @@ async def list_top_sql_by_hour(
         resolved_until,
         settings.api_read_max_rows,
         database_name=database_name,
+        db_user=db_user,
         bucket="hour",
     )
     return [
