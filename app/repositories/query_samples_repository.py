@@ -109,7 +109,7 @@ class QuerySamplesRepository(BaseRepository):
 
     _EFFECTIVE_WAIT_SELECT = """
         SELECT
-            time, session_id, sql_hash, sql_name, sql_text_masked, database_name,
+            time, session_id, sql_hash, sql_name, sql_text_masked, database_name, db_user,
             wait_type, wait_event_native, wait_time_ms,
             CASE
                 WHEN wait_event_native = ANY(:benign_wait_types) THEN 0
@@ -136,8 +136,9 @@ class QuerySamplesRepository(BaseRepository):
         WHERE instance_id = :instance_id AND time >= :since AND time <= :until
     """
     """Bloco `SELECT` reutilizado dentro da CTE `effective AS (...)` de cada metodo abaixo — todas
-    as colunas usadas por alguma agregacao downstream, mais `effective_wait_ms`/`effective_cpu_ms`
-    ja calculados. Filtro de `database_name` (quando existe) e aplicado FORA desta CTE (na query
+    as colunas usadas por alguma agregacao downstream (incluindo `db_user`, usado pela dimensao
+    "Usuarios"), mais `effective_wait_ms`/`effective_cpu_ms` ja calculados. Filtro de
+    `database_name` (quando existe) e aplicado FORA desta CTE (na query
     externa), nunca aqui dentro — a continuidade de uma espera/CPU e uma propriedade da sessao
     fisica, independente de banco de dados; filtrar `database_name` antes do `LAG` cortaria a
     amostra anterior sempre que ela (impossivelmente, mas por seguranca) aparecesse com outro
@@ -548,6 +549,96 @@ class QuerySamplesRepository(BaseRepository):
         )
         return list(result.fetchall())
 
+    # --- Dimensao "Usuarios" (irma de "Bancos de dados"/"SQL"/"Waits") ----------------------
+
+    async def top_users(
+        self, instance_id: UUID, since: datetime, until: datetime, limit: int
+    ) -> list[sa.Row]:
+        """Agrega `query_samples` por `db_user` — dimensao "Usuarios" do drill-down (irma de
+        "Bancos de dados"/"SQL"/"Waits"), folha da propria dimensao (um usuario nao se decompoe
+        em mais nada, ao contrario de banco/query, que se decompoem por wait nativo — aqui a
+        decomposicao e so visual, ver `wait_breakdown_by_db_user`). Mesmo padrao de CTE de
+        `top_sql_by_database`, agrupando por `db_user` em vez de `database_name`. Linhas com
+        `db_user` NULL sao agrupadas sob a label 'desconhecido' (COALESCE), nunca descartadas.
+        `total_wait_time_ms`/`avg_wait_time_ms` somam/promediam `effective_wait_ms +
+        effective_cpu_ms` (delta real por amostra, incluindo CPU sem espera ativa) — ver
+        docstring da classe e de `_EFFECTIVE_WAIT_SELECT`."""
+        stmt = sa.text(
+            f"""
+            WITH effective AS ({self._EFFECTIVE_WAIT_SELECT})
+            SELECT
+                COALESCE(db_user, 'desconhecido') AS db_user,
+                count(*) AS execution_count,
+                coalesce(sum(coalesce(effective_wait_ms, 0) + effective_cpu_ms), 0)
+                    AS total_wait_time_ms,
+                coalesce(avg(coalesce(effective_wait_ms, 0) + effective_cpu_ms), 0)
+                    AS avg_wait_time_ms
+            FROM effective
+            GROUP BY COALESCE(db_user, 'desconhecido')
+            ORDER BY total_wait_time_ms DESC
+            LIMIT :limit
+        """
+        )
+        result = await self._session.execute(
+            stmt,
+            {
+                "instance_id": instance_id,
+                "since": since,
+                "until": until,
+                "limit": limit,
+                "benign_wait_types": list(self._BENIGN_WAIT_EVENT_NATIVE),
+            },
+        )
+        return list(result.fetchall())
+
+    async def wait_breakdown_by_db_user(
+        self, instance_id: UUID, since: datetime, until: datetime, limit: int
+    ) -> list[sa.Row]:
+        """Agrega `query_samples` por (`db_user`, `wait_event_native`) — decomposicao do wait
+        time de cada usuario (dimensao "Usuarios") pelo tipo de espera NATIVO do engine. Mesmo
+        padrao de `wait_breakdown_by_database`, granularidade `db_user` em vez de
+        `database_name`. `db_user`/`wait_event_native` NULL viram 'desconhecido' (COALESCE),
+        nunca descartados. Waits benignos/de background excluidos do `GROUP BY` inteiramente
+        (ver `_NOT_BENIGN_WAIT_FILTER`). Inclui um bucket sintetico 'Memory/CPU' por usuario
+        (`effective_cpu_ms`) via UNION ALL — mesmo gap fechado em `top_wait_types`."""
+        stmt = sa.text(
+            f"""
+            WITH effective AS ({self._EFFECTIVE_WAIT_SELECT}),
+            combined AS (
+                SELECT COALESCE(db_user, 'desconhecido') AS db_user,
+                       COALESCE(wait_event_native, 'desconhecido') AS wait_event_native,
+                       effective_wait_ms AS ms
+                FROM effective
+                WHERE {self._NOT_BENIGN_WAIT_FILTER} AND {self._NOT_CPU_ONLY_FILTER}
+                UNION ALL
+                SELECT COALESCE(db_user, 'desconhecido') AS db_user,
+                       'Memory/CPU' AS wait_event_native,
+                       effective_cpu_ms AS ms
+                FROM effective
+                WHERE wait_event_native IS NULL AND coalesce(wait_time_ms, 0) = 0
+            )
+            SELECT
+                db_user,
+                wait_event_native,
+                coalesce(sum(ms), 0) AS total_wait_time_ms
+            FROM combined
+            GROUP BY db_user, wait_event_native
+            ORDER BY db_user, total_wait_time_ms DESC
+            LIMIT :limit
+        """
+        )
+        result = await self._session.execute(
+            stmt,
+            {
+                "instance_id": instance_id,
+                "since": since,
+                "until": until,
+                "limit": limit,
+                "benign_wait_types": list(self._BENIGN_WAIT_EVENT_NATIVE),
+            },
+        )
+        return list(result.fetchall())
+
     async def wait_breakdown_by_sql_hash(
         self,
         instance_id: UUID,
@@ -642,6 +733,46 @@ class QuerySamplesRepository(BaseRepository):
             GROUP BY
                 date_trunc(:bucket, time AT TIME ZONE 'UTC'),
                 COALESCE(database_name, 'desconhecido')
+            ORDER BY bucket_start, total_wait_time_ms DESC
+            LIMIT :limit
+        """
+        )
+        result = await self._session.execute(
+            stmt,
+            {
+                "instance_id": instance_id,
+                "since": since,
+                "until": until,
+                "limit": limit,
+                "bucket": bucket,
+                "benign_wait_types": list(self._BENIGN_WAIT_EVENT_NATIVE),
+            },
+        )
+        return list(result.fetchall())
+
+    async def wait_time_by_bucket_and_db_user(
+        self,
+        instance_id: UUID,
+        since: datetime,
+        until: datetime,
+        limit: int,
+        bucket: Literal["day", "hour"] = "day",
+    ) -> list[sa.Row]:
+        """Agrega `query_samples` por (`bucket` de tempo, `db_user`) — visao historica "Tudo"
+        da dimensao "Usuarios" (`bucket="day"`) ou detalhamento por hora dentro de um dia
+        (`bucket="hour"`). Mesmas ressalvas de `wait_time_by_bucket_and_database` (`bucket_start`
+        convertido de volta pra `timestamptz` via `AT TIME ZONE 'UTC'` externo)."""
+        stmt = sa.text(
+            f"""
+            WITH effective AS ({self._EFFECTIVE_WAIT_SELECT})
+            SELECT
+                (date_trunc(:bucket, time AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') AS bucket_start,
+                COALESCE(db_user, 'desconhecido') AS db_user,
+                coalesce(sum(effective_wait_ms), 0) AS total_wait_time_ms
+            FROM effective
+            GROUP BY
+                date_trunc(:bucket, time AT TIME ZONE 'UTC'),
+                COALESCE(db_user, 'desconhecido')
             ORDER BY bucket_start, total_wait_time_ms DESC
             LIMIT :limit
         """

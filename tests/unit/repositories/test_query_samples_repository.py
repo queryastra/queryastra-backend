@@ -1371,3 +1371,163 @@ async def test_wait_breakdown_by_database_excludes_benign_wait(
 
     by_key = {(row.database_name, row.wait_event_native): row.total_wait_time_ms for row in rows}
     assert set(by_key) == {("db_a", "WRITELOG")}
+
+
+async def test_top_users_groups_by_db_user_and_desconhecido_fallback(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """Dimensao "Usuarios" (irma de "Bancos de dados"/"SQL"/"Waits") — mesmo padrao de
+    `top_sql_by_database`, agrupando por `db_user`. `db_user` NULL vira 'desconhecido', nunca
+    descartado."""
+    repo = QuerySamplesRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-a",
+                sql_text_masked="SELECT ? FROM t",
+                db_user="app_erp",
+                wait_time_ms=100,
+            ),
+            NormalizedQuerySample(
+                time=now + timedelta(seconds=1),
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-b",
+                sql_text_masked="SELECT ? FROM t",
+                db_user="app_erp",
+                wait_time_ms=50,
+            ),
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-c",
+                sql_text_masked="SELECT ?",
+                db_user=None,
+                wait_time_ms=10,
+            ),
+        ]
+    )
+
+    rows = await repo.top_users(
+        test_instance.id,
+        since=now - timedelta(minutes=1),
+        until=now + timedelta(minutes=1),
+        limit=10,
+    )
+
+    by_user = {row.db_user: row for row in rows}
+    assert set(by_user) == {"app_erp", "desconhecido"}
+    assert by_user["app_erp"].execution_count == 2
+    assert by_user["app_erp"].total_wait_time_ms == 150
+    assert by_user["desconhecido"].total_wait_time_ms == 10
+
+
+async def test_wait_breakdown_by_db_user_groups_by_native_wait_type(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """`wait_breakdown_by_db_user` decompoe o wait time de cada usuario pelo tipo de espera
+    NATIVO — mesmo padrao de `wait_breakdown_by_database`."""
+    repo = QuerySamplesRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-a",
+                sql_text_masked="SELECT ? FROM t",
+                db_user="app_erp",
+                wait_event_native="PAGEIOLATCH_SH",
+                wait_time_ms=100,
+            ),
+            NormalizedQuerySample(
+                time=now + timedelta(seconds=1),
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-b",
+                sql_text_masked="SELECT ? FROM t",
+                db_user="app_erp",
+                wait_event_native="ASYNC_NETWORK_IO",
+                wait_time_ms=30,
+            ),
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-c",
+                sql_text_masked="SELECT ?",
+                db_user="app_erp",
+                wait_event_native=None,
+                wait_time_ms=0,
+                cpu_time_ms=500,
+            ),
+        ]
+    )
+
+    rows = await repo.wait_breakdown_by_db_user(
+        test_instance.id,
+        since=now - timedelta(minutes=1),
+        until=now + timedelta(minutes=1),
+        limit=10,
+    )
+
+    by_wait = {
+        row.wait_event_native: row.total_wait_time_ms for row in rows if row.db_user == "app_erp"
+    }
+    assert set(by_wait) == {"PAGEIOLATCH_SH", "ASYNC_NETWORK_IO", "Memory/CPU"}
+    assert by_wait["PAGEIOLATCH_SH"] == 100
+    assert by_wait["ASYNC_NETWORK_IO"] == 30
+    assert by_wait["Memory/CPU"] == 500
+
+
+async def test_wait_time_by_bucket_and_db_user_groups_by_utc_day(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """Visao historica "Tudo" da dimensao "Usuarios" — mesmo padrao de
+    `wait_time_by_bucket_and_database`, `bucket="day"`."""
+    repo = QuerySamplesRepository(db_session)
+    day1 = datetime(2026, 9, 10, 14, 0, tzinfo=UTC)
+    day2 = datetime(2026, 9, 11, 3, 0, tzinfo=UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=day1,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-a",
+                sql_text_masked="SELECT ?",
+                db_user="app_erp",
+                wait_time_ms=100,
+            ),
+            NormalizedQuerySample(
+                time=day2,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-b",
+                sql_text_masked="SELECT ?",
+                db_user="app_erp",
+                wait_time_ms=50,
+            ),
+        ]
+    )
+
+    rows = await repo.wait_time_by_bucket_and_db_user(
+        test_instance.id,
+        since=day1 - timedelta(hours=1),
+        until=day2 + timedelta(hours=1),
+        limit=10,
+        bucket="day",
+    )
+
+    by_bucket = {
+        (row.bucket_start.date().isoformat(), row.db_user): row.total_wait_time_ms for row in rows
+    }
+    assert by_bucket[("2026-09-10", "app_erp")] == 100
+    assert by_bucket[("2026-09-11", "app_erp")] == 50
+    assert all(row.bucket_start.tzinfo is not None for row in rows)

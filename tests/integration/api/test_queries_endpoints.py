@@ -561,3 +561,118 @@ async def test_list_wait_types_by_hour_groups_by_utc_hour(
     assert len(body) == 1
     assert body[0]["label"] == "ASYNC_NETWORK_IO"
     assert body[0]["total_wait_time_ms"] == 100
+
+
+async def test_list_db_users_aggregates_by_db_user(
+    client: AsyncClient, db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """Dimensao "Usuarios" (irma de "Bancos de dados"/"SQL"/"Waits") — mesmo formato de
+    `list_databases`, agrupado por `db_user`."""
+    repo = QuerySamplesRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-user-a",
+                sql_text_masked="SELECT ? FROM t",
+                db_user="app_erp",
+                wait_event_native="IO done",
+                wait_time_ms=100,
+            ),
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-user-b",
+                sql_text_masked="SELECT ? FROM t",
+                db_user="batch_conciliacao",
+                wait_time_ms=50,
+            ),
+        ]
+    )
+
+    response = await client.get(f"/api/v1/queries/users/{test_instance.id}")
+
+    assert response.status_code == 200
+    body = response.json()
+    by_user = {row["db_user"]: row for row in body}
+    assert set(by_user) == {"app_erp", "batch_conciliacao"}
+    assert by_user["app_erp"]["execution_count"] == 1
+    assert by_user["app_erp"]["total_wait_time_ms"] == 100
+    assert by_user["app_erp"]["wait_breakdown"] == [
+        {"wait_event_native": "IO done", "total_wait_time_ms": 100}
+    ]
+    assert by_user["batch_conciliacao"]["wait_breakdown"] == [
+        {"wait_event_native": "desconhecido", "total_wait_time_ms": 50}
+    ]
+
+
+async def test_list_db_users_by_day_groups_by_utc_day(
+    client: AsyncClient, db_session: AsyncSession, test_instance: Instance
+) -> None:
+    repo = QuerySamplesRepository(db_session)
+    day1 = datetime(2026, 9, 10, 14, 0, tzinfo=UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=day1,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-user-a",
+                sql_text_masked="SELECT ?",
+                db_user="app_erp",
+                wait_time_ms=100,
+            ),
+        ]
+    )
+
+    response = await client.get(
+        f"/api/v1/queries/users-by-day/{test_instance.id}",
+        params={
+            "from": (day1 - timedelta(days=1)).isoformat(),
+            "to": (day1 + timedelta(days=1)).isoformat(),
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 1
+    assert body[0]["label"] == "app_erp"
+    assert body[0]["total_wait_time_ms"] == 100
+
+
+async def test_list_db_users_by_hour_groups_by_utc_hour(
+    client: AsyncClient, db_session: AsyncSession, test_instance: Instance
+) -> None:
+    repo = QuerySamplesRepository(db_session)
+    hour10 = datetime(2026, 9, 10, 10, 30, tzinfo=UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=hour10,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-user-a",
+                sql_text_masked="SELECT ?",
+                db_user="app_erp",
+                wait_time_ms=100,
+            ),
+        ]
+    )
+
+    response = await client.get(
+        f"/api/v1/queries/users-by-hour/{test_instance.id}",
+        params={
+            "from": (hour10 - timedelta(hours=1)).isoformat(),
+            "to": (hour10 + timedelta(hours=1)).isoformat(),
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 1
+    assert body[0]["label"] == "app_erp"
+    assert body[0]["total_wait_time_ms"] == 100

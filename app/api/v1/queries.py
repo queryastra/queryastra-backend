@@ -24,6 +24,10 @@ Dimensao "Waits" (irma de "Bancos de dados"/"SQL", mesmo padrao Tudo/dia/hora, m
 espera nativo — folha da propria dimensao, sem decomposicao adicional): `GET
 /wait-types/{instance_id}`, `GET /wait-types-by-day/{instance_id}`, `GET
 /wait-types-by-hour/{instance_id}`.
+
+Dimensao "Usuarios" (irma das demais, mesmo padrao Tudo/dia/hora, agregada por `db_user` e
+decomposta por wait nativo — mesmo padrao de "Bancos de dados", nao de "Waits"): `GET
+/users/{instance_id}`, `GET /users-by-day/{instance_id}`, `GET /users-by-hour/{instance_id}`.
 """
 
 from __future__ import annotations
@@ -97,13 +101,25 @@ class DatabaseSummaryResponse(BaseModel):
     wait_breakdown: list[WaitBreakdownEntryResponse]
 
 
+class DbUserSummaryResponse(BaseModel):
+    """Linha agregada por usuario de banco (`db_user`) — dimensao "Usuarios" do drill-down
+    (irma de "Bancos de dados"/"SQL"/"Waits"), decomposta por wait nativo (`wait_breakdown`) do
+    mesmo jeito que "Bancos de dados"."""
+
+    db_user: str
+    execution_count: int
+    total_wait_time_ms: int
+    avg_wait_time_ms: float
+    wait_breakdown: list[WaitBreakdownEntryResponse]
+
+
 class BucketEntryResponse(BaseModel):
     """Uma fatia (bucket de tempo, entidade) dos graficos historicos por periodo — usado tanto
     pela visao "Tudo" (`bucket_start` e meia-noite UTC de um dia calendario, um dia por barra)
     quanto pelo detalhamento por hora dentro de um dia (`bucket_start` e o inicio de uma hora
-    UTC). `label` e `database_name` nas rotas `*databases*`, `sql_hash` nas rotas `*top-sql*`, ou
-    `wait_event_native` nas rotas `*wait-types*`. Retornado plano (nao agrupado) — o cliente
-    agrupa por `bucket_start` para montar cada barra empilhada."""
+    UTC). `label` e `database_name` nas rotas `*databases*`, `sql_hash` nas rotas `*top-sql*`,
+    `wait_event_native` nas rotas `*wait-types*`, ou `db_user` nas rotas `*users*`. Retornado
+    plano (nao agrupado) — o cliente agrupa por `bucket_start` para montar cada barra empilhada."""
 
     bucket_start: datetime
     label: str
@@ -514,6 +530,95 @@ async def list_wait_types_by_hour(
         BucketEntryResponse(
             bucket_start=row.bucket_start,
             label=row.wait_event_native,
+            total_wait_time_ms=row.total_wait_time_ms,
+        )
+        for row in rows
+    ]
+
+
+@router.get("/users/{instance_id}", response_model=list[DbUserSummaryResponse])
+async def list_db_users(
+    instance_id: UUID,
+    repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
+    since: Annotated[datetime | None, Query(alias="from")] = None,
+    until: Annotated[datetime | None, Query(alias="to")] = None,
+) -> list[DbUserSummaryResponse]:
+    """Dimensao "Usuarios" do drill-down (irma de "Bancos de dados"/"SQL"/"Waits"): agrega
+    `query_samples` por `db_user`, calculado em tempo real. Amostras sem `db_user` sao agrupadas
+    sob a label 'desconhecido', nunca descartadas.
+
+    Cada usuario vem com `wait_breakdown`: a mesma soma de wait time decomposta por tipo de
+    espera NATIVO do engine — mesmo padrao de `list_databases`."""
+    settings = get_settings()
+    resolved_since, resolved_until = resolve_time_window(
+        since, until, timedelta(seconds=settings.api_read_default_lookback_seconds)
+    )
+    rows = await repository.top_users(
+        instance_id, resolved_since, resolved_until, settings.api_read_max_rows
+    )
+    breakdown_rows = await repository.wait_breakdown_by_db_user(
+        instance_id, resolved_since, resolved_until, settings.api_read_max_rows
+    )
+    breakdown_by_user: dict[str, list[WaitBreakdownEntryResponse]] = {}
+    for row in breakdown_rows:
+        breakdown_by_user.setdefault(row.db_user, []).append(
+            WaitBreakdownEntryResponse(
+                wait_event_native=row.wait_event_native,
+                total_wait_time_ms=row.total_wait_time_ms,
+            )
+        )
+    return [
+        DbUserSummaryResponse(**row._mapping, wait_breakdown=breakdown_by_user.get(row.db_user, []))
+        for row in rows
+    ]
+
+
+@router.get("/users-by-day/{instance_id}", response_model=list[BucketEntryResponse])
+async def list_db_users_by_day(
+    instance_id: UUID,
+    repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
+    since: Annotated[datetime | None, Query(alias="from")] = None,
+    until: Annotated[datetime | None, Query(alias="to")] = None,
+) -> list[BucketEntryResponse]:
+    """Visao historica "Tudo" da dimensao "Usuarios": um dia por barra, empilhada por usuario.
+    `label` e `db_user`."""
+    settings = get_settings()
+    resolved_since, resolved_until = resolve_time_window(
+        since, until, timedelta(seconds=settings.api_read_default_lookback_seconds)
+    )
+    rows = await repository.wait_time_by_bucket_and_db_user(
+        instance_id, resolved_since, resolved_until, settings.api_read_max_rows, bucket="day"
+    )
+    return [
+        BucketEntryResponse(
+            bucket_start=row.bucket_start,
+            label=row.db_user,
+            total_wait_time_ms=row.total_wait_time_ms,
+        )
+        for row in rows
+    ]
+
+
+@router.get("/users-by-hour/{instance_id}", response_model=list[BucketEntryResponse])
+async def list_db_users_by_hour(
+    instance_id: UUID,
+    repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
+    since: Annotated[datetime | None, Query(alias="from")] = None,
+    until: Annotated[datetime | None, Query(alias="to")] = None,
+) -> list[BucketEntryResponse]:
+    """Detalhamento por hora da dimensao "Usuarios", dentro de um dia especifico — mesma ideia
+    de `list_db_users_by_day`, granularidade de hora."""
+    settings = get_settings()
+    resolved_since, resolved_until = resolve_time_window(
+        since, until, timedelta(seconds=settings.api_read_default_lookback_seconds)
+    )
+    rows = await repository.wait_time_by_bucket_and_db_user(
+        instance_id, resolved_since, resolved_until, settings.api_read_max_rows, bucket="hour"
+    )
+    return [
+        BucketEntryResponse(
+            bucket_start=row.bucket_start,
+            label=row.db_user,
             total_wait_time_ms=row.total_wait_time_ms,
         )
         for row in rows
