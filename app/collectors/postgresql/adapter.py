@@ -525,7 +525,10 @@ class PostgreSQLCollector:
         entao usamos `collected_at - query_start` da sessao bloqueada quando disponivel, ou `0`
         quando `query_start` e `None`. Identidade (usuario/programa/maquina) vem PRIMEIRO de
         `session_rows` (sessao ativa) e cai pra `all_session_rows` (qualquer sessao conectada)
-        pro caso do bloqueador ocioso — mesmo padrao do adaptador SQL Server.
+        pro caso do bloqueador ocioso — mesmo padrao do adaptador SQL Server. Banco de dados
+        (`datname`) vem do mesmo jeito — ao contrario do SQL Server, `datname` esta disponivel em
+        `all_session_rows` pra QUALQUER sessao conectada, ativa ou ociosa, sem precisar de
+        fallback via transacao.
         """
         assert self._instance_id is not None  # garantido por collect()
         instance_id: UUID = self._instance_id
@@ -533,16 +536,17 @@ class PostgreSQLCollector:
         identity_by_pid = {row["pid"]: row for row in all_session_rows}
         blocked_object_by_pid = {row["pid"]: row for row in blocked_object_rows}
 
-        def _identity(pid: int) -> tuple[str | None, str | None, str | None]:
+        def _identity(pid: int) -> tuple[str | None, str | None, str | None, str | None]:
             active_row = sessions_by_pid.get(pid)
             row = active_row if active_row is not None else identity_by_pid.get(pid)
             if row is None:
-                return None, None, None
+                return None, None, None, None
             client_addr = row["client_addr"]
             return (
                 row["usename"],
                 row["application_name"],
                 str(client_addr) if client_addr is not None else None,
+                row["datname"],
             )
 
         blocked_by_map = {row["pid"]: set(row["blocked_by"]) for row in blocking_rows}
@@ -563,14 +567,18 @@ class PostgreSQLCollector:
                 if query_start is not None
                 else 0
             )
-            blocked_login, blocked_program, blocked_machine = _identity(blocked_pid)
+            blocked_login, blocked_program, blocked_machine, blocked_database_name = _identity(
+                blocked_pid
+            )
             blocked_object_row = blocked_object_by_pid.get(blocked_pid)
             for blocker_pid in direct_edges.get(blocked_pid, set()):
                 blocker_session = sessions_by_pid.get(blocker_pid)
                 blocker_sql_hash = self._hash_query(
                     blocker_session["query"] if blocker_session is not None else None
                 )
-                blocker_login, blocker_program, blocker_machine = _identity(blocker_pid)
+                blocker_login, blocker_program, blocker_machine, blocker_database_name = _identity(
+                    blocker_pid
+                )
                 events.append(
                     NormalizedBlockingEvent(
                         time=collected_at,
@@ -606,6 +614,8 @@ class PostgreSQLCollector:
                         # ja identifica a transacao (ver NormalizedTransactionEvent).
                         blocker_transaction_id=str(blocker_pid),
                         blocked_transaction_id=str(blocked_pid),
+                        blocker_database_name=blocker_database_name,
+                        blocked_database_name=blocked_database_name,
                     )
                 )
         return events

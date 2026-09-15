@@ -115,6 +115,14 @@ class NormalizedBlockingEvent(BaseModel):
       `sys.dm_tran_locks JOIN sys.partitions` + `OBJECT_NAME()`; PostgreSQL via
       `pg_locks.relation::regclass`) — None quando nao resolvivel (ex. lock de metadado) ou a
       linha ja foi liberada entre a consulta de bloqueio e a de recurso no mesmo ciclo.
+    - `blocker_database_name`/`blocked_database_name` (a pedido explicito do usuario, mesma
+      rodada do item 3 de Etapa 10): banco de dados de cada lado. Lado bloqueado sempre vem de
+      `DB_NAME(r.database_id)`/`datname` (tem request ativa por definicao — esta esperando).
+      Lado bloqueador, quando ocioso (sem request ativa), cai pro banco resolvido via
+      `blocker_transaction_id` -> `sys.dm_tran_database_transactions` no SQL Server (mesmo
+      lookup ja usado por `NormalizedTransactionEvent`) — `None` so no caso raro de bloqueador
+      ocioso sem transacao rastreavel. PostgreSQL nao precisa desse fallback: `datname` esta
+      disponivel pra QUALQUER sessao conectada, ativa ou ociosa.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -141,6 +149,8 @@ class NormalizedBlockingEvent(BaseModel):
     # `sys.dm_tran_session_transactions.transaction_id`; PostgreSQL: o proprio `pid` do backend.
     blocker_transaction_id: str | None = None
     blocked_transaction_id: str | None = None
+    blocker_database_name: str | None = None
+    blocked_database_name: str | None = None
 
 
 class NormalizedTransactionEvent(BaseModel):

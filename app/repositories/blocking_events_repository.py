@@ -47,6 +47,8 @@ class BlockingEventsRepository(BaseRepository):
                 "blocked_object": e.blocked_object,
                 "blocker_transaction_id": e.blocker_transaction_id,
                 "blocked_transaction_id": e.blocked_transaction_id,
+                "blocker_database_name": e.blocker_database_name,
+                "blocked_database_name": e.blocked_database_name,
             }
             for e in events
         ]

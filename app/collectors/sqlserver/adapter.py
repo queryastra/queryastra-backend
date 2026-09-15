@@ -423,12 +423,19 @@ def _connect_and_collect(
     transaction_id_by_session_id = {
         str(row["session_id"]): str(row["transaction_id"]) for row in transaction_rows
     }
+    database_name_by_transaction_id: dict[str, str | None] = {
+        str(row["transaction_id"]): (
+            str(row["database_name"]) if row["database_name"] is not None else None
+        )
+        for row in transaction_database_rows
+    }
     query_samples = _build_query_samples(session_rows, instance_id, collected_at)
     blocking_events = _build_blocking_events(
         session_rows,
         all_session_rows,
         blocked_object_rows,
         transaction_id_by_session_id,
+        database_name_by_transaction_id,
         instance_id,
         collected_at,
     )
@@ -642,6 +649,7 @@ def _build_blocking_events(
     all_session_rows: list[dict],
     blocked_object_rows: list[dict],
     transaction_id_by_session_id: dict[str, str],
+    database_name_by_transaction_id: dict[str, str | None],
     instance_id: UUID,
     collected_at: datetime,
 ) -> list[NormalizedBlockingEvent]:
@@ -657,6 +665,12 @@ def _build_blocking_events(
     nenhuma identidade. `blocked_object`/`blocked_wait_resource` sao melhor esforco (ver
     `_BLOCKED_OBJECT_QUERY`/docstring de `NormalizedBlockingEvent`) — so preenchidos pro lado
     BLOQUEADO (e quem esta de fato esperando por um recurso).
+
+    Banco de dados (`blocker_database_name`/`blocked_database_name`, a pedido explicito do
+    usuario): `sys.dm_exec_sessions` (`all_session_rows`) nao expoe um "banco atual" fora de uma
+    request ativa, entao um bloqueador OCIOSO cai pro banco resolvido via sua transacao aberta
+    (`database_name_by_transaction_id`, mesmo lookup ja usado por `_build_transaction_events`) —
+    `None` so no caso raro de bloqueador ocioso sem nenhuma transacao rastreavel.
     """
     sessions_by_id = {row["session_id"]: row for row in session_rows}
     identity_by_id = {row["session_id"]: row for row in all_session_rows}
@@ -670,6 +684,15 @@ def _build_blocking_events(
         if idle_row is not None:
             return idle_row["login_name"], idle_row["program_name"], idle_row["host_name"]
         return None, None, None
+
+    def _database_name(session_id: int) -> str | None:
+        active_row = sessions_by_id.get(session_id)
+        if active_row is not None and active_row["database_name"] is not None:
+            return active_row["database_name"]
+        transaction_id = transaction_id_by_session_id.get(str(session_id))
+        if transaction_id is not None:
+            return database_name_by_transaction_id.get(transaction_id)
+        return None
 
     events: list[NormalizedBlockingEvent] = []
     for row in session_rows:
@@ -708,6 +731,8 @@ def _build_blocking_events(
                 ),
                 blocker_transaction_id=transaction_id_by_session_id.get(str(blocking_session_id)),
                 blocked_transaction_id=transaction_id_by_session_id.get(str(row["session_id"])),
+                blocker_database_name=_database_name(blocking_session_id),
+                blocked_database_name=_database_name(row["session_id"]),
             )
         )
     return events

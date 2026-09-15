@@ -78,6 +78,10 @@ blocking_events_table = sa.Table(
     # (sem conceito de transacao nomeada separado da sessao).
     sa.Column("blocker_transaction_id", sa.Text(), nullable=True),
     sa.Column("blocked_transaction_id", sa.Text(), nullable=True),
+    # Banco de dados de cada lado (a pedido explicito do usuario) — ver docstring de
+    # NormalizedBlockingEvent para a logica de fallback do lado bloqueador ocioso.
+    sa.Column("blocker_database_name", sa.Text(), nullable=True),
+    sa.Column("blocked_database_name", sa.Text(), nullable=True),
 )
 
 sql_exclusions_table = sa.Table(

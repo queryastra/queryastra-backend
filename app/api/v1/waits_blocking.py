@@ -62,6 +62,9 @@ class BlockingTreeNodeResponse(BaseModel):
     # transaction_id`; PostgreSQL: o proprio session_id (sem conceito de transacao nomeada
     # separada da sessao). Liga pra `GET /transactions/{instance_id}/{transaction_identifier}`.
     transaction_id: str | None
+    # A pedido explicito do usuario: banco de dados dessa sessao — ver docstring de
+    # `NormalizedBlockingEvent` para a logica de fallback do lado bloqueador ocioso (SQL Server).
+    database_name: str | None
     waited_ms: int | None
     caused_ms: int
     children: list[BlockingTreeNodeResponse] = Field(default_factory=list)
@@ -95,6 +98,7 @@ class SessionBlockingDetailResponse(BaseModel):
     wait_resource: str | None
     blocked_object: str | None
     transaction_id: str | None
+    database_name: str | None
     sql_hash: str | None
     sql_text_masked: str | None
     sql_text_full_masked: str | None
@@ -147,6 +151,7 @@ def _collect_session_info(events: list[Row]) -> dict[str, _SessionInfo]:
         blocker.setdefault("machine", e.blocker_machine)
         blocker.setdefault("wait_event_native", e.blocker_wait_event_native)
         blocker.setdefault("transaction_id", e.blocker_transaction_id)
+        blocker.setdefault("database_name", e.blocker_database_name)
 
         blocked = info.setdefault(e.blocked_session_id, {})
         blocked["db_user"] = e.blocked_db_user or blocked.get("db_user")
@@ -158,6 +163,7 @@ def _collect_session_info(events: list[Row]) -> dict[str, _SessionInfo]:
         blocked["wait_resource"] = e.blocked_wait_resource or blocked.get("wait_resource")
         blocked["blocked_object"] = e.blocked_object or blocked.get("blocked_object")
         blocked["transaction_id"] = e.blocked_transaction_id or blocked.get("transaction_id")
+        blocked["database_name"] = e.blocked_database_name or blocked.get("database_name")
     return info
 
 
@@ -203,6 +209,7 @@ def _build_blocking_tree(
             wait_resource=info.get("wait_resource"),
             blocked_object=info.get("blocked_object"),
             transaction_id=info.get("transaction_id"),
+            database_name=info.get("database_name"),
             waited_ms=waited_ms,
             caused_ms=caused_ms,
             children=children,
@@ -285,6 +292,7 @@ async def get_session_blocking_detail(
         wait_resource=info.get("wait_resource"),
         blocked_object=info.get("blocked_object"),
         transaction_id=info.get("transaction_id"),
+        database_name=info.get("database_name"),
         sql_hash=sample.sql_hash if sample else None,
         sql_text_masked=sample.sql_text_masked if sample else None,
         sql_text_full_masked=sample.sql_text_full_masked if sample else None,
