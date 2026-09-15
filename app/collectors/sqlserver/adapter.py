@@ -54,6 +54,7 @@ import asyncio
 import hashlib
 import time
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID
 from xml.etree import ElementTree
 
@@ -659,11 +660,13 @@ def _build_deadlock_events(rows: list[dict], instance_id: UUID) -> list[Normaliz
     e extrai cada evento `xml_deadlock_report` como um `NormalizedDeadlockEvent`.
 
     O `<deadlock>` de cada evento tem `<victim-list>` (id do processo vitima, escolhido pelo
-    motor pra rollback) e `<process-list>` (todos os processos envolvidos no ciclo, com `spid` e
-    `<inputbuf>` = statement em execucao). Melhor esforco para o caso mais comum (ciclo de 2
-    processos): sobrevivente = qualquer processo que nao seja a vitima. Deadlocks de 3+ processos
-    tem mais de um "sobrevivente" — so o primeiro encontrado e guardado (o XML bruto mascarado em
-    `raw_xml_masked` preserva o grafo completo para quem precisar de mais detalhe).
+    motor pra rollback), `<process-list>` (TODOS os processos envolvidos — sessao, banco,
+    transacao, comando, pilha de execucao) e `<resource-list>` (recursos em disputa, cada um com
+    owner-list/waiter-list referenciando process ids). A pedido explicito do usuario, o grafo
+    COMPLETO (nao so vitima+1 sobrevivente) vai pro campo `detail` de cada evento — os campos
+    `victim_*`/`survivor_*`/`resource_description` continuam existindo como resumo de leitura
+    rapida (melhor esforco: sobrevivente = o primeiro processo que nao e vitima; um deadlock de
+    3+ processos tem mais de um sobrevivente de verdade, todos aparecem em `detail.processes`).
     """
     events: list[NormalizedDeadlockEvent] = []
     for row in rows:
@@ -687,22 +690,39 @@ def _build_deadlock_events(rows: list[dict], instance_id: UUID) -> list[Normaliz
             timestamp_raw = event_el.get("timestamp")
             time_value = _parse_xe_timestamp(timestamp_raw)
 
-            processes = deadlock_el.findall("./process-list/process")
+            process_elements = deadlock_el.findall("./process-list/process")
             victim_ids = {
                 v.get("id")
                 for v in deadlock_el.findall("./victim-list/victimProcess")
                 if v.get("id")
             }
-            victim_process = next((p for p in processes if p.get("id") in victim_ids), None)
-            survivor_process = next((p for p in processes if p.get("id") not in victim_ids), None)
+            # Mapa process id ("process1") -> session_id ("62") - resource-list referencia
+            # owner/waiter por process id, nao por spid diretamente.
+            session_id_by_process_id = {
+                p.get("id"): p.get("spid") for p in process_elements if p.get("id")
+            }
+            processes = [
+                _parse_deadlock_process(p, p.get("id") in victim_ids) for p in process_elements
+            ]
+            resources = [
+                _parse_deadlock_resource(r, session_id_by_process_id)
+                for r in deadlock_el.findall("./resource-list/*")
+            ]
 
-            resource_el = deadlock_el.find("./resource-list")
+            victim_process = next((p for p in processes if p["is_victim"]), None)
+            survivor_process = next((p for p in processes if not p["is_victim"]), None)
+            # Banco de dados do evento (melhor esforco): o da vitima, senao o do primeiro
+            # processo com currentdbname disponivel.
+            database_name = (victim_process or {}).get("database_name") or next(
+                (p["database_name"] for p in processes if p["database_name"]), None
+            )
             resource_description = None
-            if resource_el is not None and len(resource_el) > 0:
-                first_resource = resource_el[0]
-                object_name = first_resource.get("objectname")
+            if resources:
+                first_resource = resources[0]
                 resource_description = (
-                    f"{first_resource.tag} ({object_name})" if object_name else first_resource.tag
+                    f"{first_resource['type']} ({first_resource['object_name']})"
+                    if first_resource["object_name"]
+                    else first_resource["type"]
                 )
 
             raw_xml = ElementTree.tostring(deadlock_el, encoding="unicode")
@@ -711,12 +731,14 @@ def _build_deadlock_events(rows: list[dict], instance_id: UUID) -> list[Normaliz
                 NormalizedDeadlockEvent(
                     instance_id=instance_id,
                     time=time_value,
-                    victim_session_id=_deadlock_process_session_id(victim_process),
-                    victim_sql_text_masked=_deadlock_process_query_text(victim_process),
-                    survivor_session_id=_deadlock_process_session_id(survivor_process),
-                    survivor_sql_text_masked=_deadlock_process_query_text(survivor_process),
+                    database_name=database_name,
+                    victim_session_id=(victim_process or {}).get("session_id"),
+                    victim_sql_text_masked=(victim_process or {}).get("sql_text_masked"),
+                    survivor_session_id=(survivor_process or {}).get("session_id"),
+                    survivor_sql_text_masked=(survivor_process or {}).get("sql_text_masked"),
                     resource_description=resource_description,
                     raw_xml_masked=mask_sql_literals(raw_xml),
+                    detail={"processes": processes, "resources": resources},
                 )
             )
     return events
@@ -735,19 +757,60 @@ def _parse_xe_timestamp(timestamp_raw: str | None) -> datetime:
         return datetime.now(UTC)
 
 
-def _deadlock_process_session_id(process: ElementTree.Element | None) -> str | None:
-    if process is None:
-        return None
-    spid = process.get("spid")
-    return str(spid) if spid is not None else None
-
-
-def _deadlock_process_query_text(process: ElementTree.Element | None) -> str | None:
-    if process is None:
-        return None
+def _parse_deadlock_process(process: ElementTree.Element, is_victim: bool) -> dict[str, Any]:
+    """Extrai um `<process>` do grafo de deadlock — atributos best-effort (a presenca exata
+    varia por versao do SQL Server, `.get()` devolve `None` quando ausente, nunca inventa dado).
+    `procedures`: cadeia de `procname` de `<executionStack>/<frame>` (ordem de chamada, sem
+    duplicatas), quando o comando rodou dentro de uma procedure/function."""
     inputbuf = process.find("./inputbuf")
-    text = inputbuf.text if inputbuf is not None else None
-    return mask_sql_literals(text) if text else None
+    sql_text = inputbuf.text if inputbuf is not None else None
+    procedures: list[str] = []
+    for frame in process.findall("./executionStack/frame"):
+        procname = frame.get("procname")
+        if procname and procname not in procedures:
+            procedures.append(procname)
+    session_id = process.get("spid")
+    return {
+        "id": process.get("id"),
+        "session_id": str(session_id) if session_id is not None else None,
+        "database_name": process.get("currentdbname"),
+        "transaction_id": process.get("xactid") or process.get("ownerId"),
+        "transaction_begin_time": process.get("lasttranstarted"),
+        "login_name": process.get("loginname"),
+        "host_name": process.get("hostname"),
+        "program_name": process.get("clientapp"),
+        "isolation_level": process.get("isolationlevel"),
+        "is_victim": is_victim,
+        "sql_text_masked": mask_sql_literals(sql_text) if sql_text else None,
+        "procedures": procedures,
+    }
+
+
+def _parse_deadlock_resource(
+    resource: ElementTree.Element, session_id_by_process_id: dict[str | None, str | None]
+) -> dict[str, Any]:
+    """Extrai um recurso do `<resource-list>` (`keylock`/`objectlock`/`pagelock`/etc — o proprio
+    nome da tag XML e o tipo). `owner-list`/`waiter-list` referenciam process id ("process1"),
+    resolvidos pra session_id via `session_id_by_process_id` (mesmo mapa montado a partir de
+    `<process-list>` no mesmo evento)."""
+
+    def _session_ids(container_tag: str, item_tag: str) -> list[str]:
+        ids = []
+        for item in resource.findall(f"./{container_tag}/{item_tag}"):
+            process_id = item.get("id")
+            session_id = session_id_by_process_id.get(process_id)
+            if session_id is not None:
+                ids.append(str(session_id))
+        return ids
+
+    return {
+        "type": resource.tag,
+        "object_name": resource.get("objectname"),
+        "index_name": resource.get("indexname"),
+        "mode": resource.get("mode"),
+        "owner_session_ids": _session_ids("owner-list", "owner"),
+        "waiter_session_ids": _session_ids("waiter-list", "waiter"),
+    }
 
 
 def _connect_and_fetch_execution_plan(

@@ -322,17 +322,23 @@ async def list_blocking_incidents(
     ],
     open_only: Annotated[bool, Query()] = False,
     database_name: Annotated[str | None, Query()] = None,
+    since: Annotated[datetime | None, Query(alias="from")] = None,
+    until: Annotated[datetime | None, Query(alias="to")] = None,
 ) -> list[BlockingIncidentResponse]:
     """Lista PLANA (nao arvore) de incidentes de bloqueio, mais recentes primeiro — para
     investigacao/historico. `open_only=true` mostra so os em andamento (mesmo conjunto da
     arvore, sem nesting); por padrao inclui os ja encerrados, retidos ate
-    `settings.problem_events_retention_days`. `database_name` casa contra qualquer lado."""
+    `settings.problem_events_retention_days`. `database_name` casa contra qualquer lado.
+    `from`/`to` (opcionais, so fazem sentido com `open_only=false`) filtram por sobreposicao com
+    o periodo."""
     settings = get_settings()
     rows = await blocking_repo.list_incidents(
         instance_id,
         settings.api_read_max_rows,
         open_only=open_only,
         database_name=database_name,
+        since=since,
+        until=until,
     )
     return [BlockingIncidentResponse.model_validate(row) for row in rows]
 

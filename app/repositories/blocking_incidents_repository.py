@@ -135,9 +135,14 @@ class BlockingIncidentsRepository(BaseRepository):
         *,
         open_only: bool = False,
         database_name: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
     ) -> list[BlockingIncident]:
         """Lista plana (nao arvore) para investigacao/historico — mais recentes primeiro.
-        `database_name` casa contra QUALQUER lado (bloqueador ou bloqueado)."""
+        `database_name` casa contra QUALQUER lado (bloqueador ou bloqueado). `since`/`until`
+        (opcionais) filtram por SOBREPOSICAO com a janela — um incidente que comecou antes de
+        `since` mas so terminou depois (ou continua em andamento) ainda conta como ativo
+        durante o periodo pedido."""
         conditions = [BlockingIncident.instance_id == instance_id]
         if open_only:
             conditions.append(BlockingIncident.ended_at.is_(None))
@@ -148,9 +153,38 @@ class BlockingIncidentsRepository(BaseRepository):
                     BlockingIncident.blocked_database_name == database_name,
                 )
             )
+        if since is not None:
+            conditions.append(
+                sa.or_(BlockingIncident.ended_at.is_(None), BlockingIncident.ended_at >= since)
+            )
+        if until is not None:
+            conditions.append(BlockingIncident.started_at <= until)
         stmt = (
             sa.select(BlockingIncident)
             .where(*conditions)
+            .order_by(sa.desc(BlockingIncident.last_seen_at))
+            .limit(limit)
+        )
+        return list((await self._session.execute(stmt)).scalars().all())
+
+    async def find_involving_sessions(
+        self, instance_id: UUID, session_ids: list[str], limit: int
+    ) -> list[BlockingIncident]:
+        """Versao em lote de `find_involving_session` — incidentes (em andamento ou ja
+        encerrados) que envolvem QUALQUER sessao de `session_ids` de qualquer lado. Usado pela
+        tela de Transacoes para correlacionar cada transacao com um eventual bloqueio relacionado
+        numa unica consulta (evita N+1 - uma por linha)."""
+        if not session_ids:
+            return []
+        stmt = (
+            sa.select(BlockingIncident)
+            .where(
+                BlockingIncident.instance_id == instance_id,
+                sa.or_(
+                    BlockingIncident.blocker_session_id.in_(session_ids),
+                    BlockingIncident.blocked_session_id.in_(session_ids),
+                ),
+            )
             .order_by(sa.desc(BlockingIncident.last_seen_at))
             .limit(limit)
         )

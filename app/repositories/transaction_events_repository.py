@@ -125,16 +125,29 @@ class TransactionEventsRepository(BaseRepository):
         *,
         open_only: bool = True,
         database_name: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
     ) -> list[TransactionEvent]:
         """`open_only=True` (padrao): so transacoes ainda abertas, mais antigas primeiro (mais
         provavel de ser uma orfa/esquecida no topo). `open_only=False`: inclui encerradas
         tambem (retidas ate a janela de retencao), mais recentes primeiro (feed de historico,
-        nao teria sentido enterrar atividade recente sob transacoes antigas ja fechadas)."""
+        nao teria sentido enterrar atividade recente sob transacoes antigas ja fechadas).
+
+        `since`/`until` (opcionais, so fazem sentido com `open_only=False` — uma transacao ainda
+        aberta esta sempre "no periodo atual" por definicao): filtra por SOBREPOSICAO com a
+        janela, nao so pelo inicio — uma transacao que comecou antes de `since` mas so fechou
+        depois (ou continua aberta) ainda contava como "ativa" durante a janela pedida."""
         conditions = [TransactionEvent.instance_id == instance_id]
         if open_only:
             conditions.append(TransactionEvent.closed_at.is_(None))
         if database_name is not None:
             conditions.append(TransactionEvent.database_name == database_name)
+        if since is not None:
+            conditions.append(
+                sa.or_(TransactionEvent.closed_at.is_(None), TransactionEvent.closed_at >= since)
+            )
+        if until is not None:
+            conditions.append(TransactionEvent.begin_time <= until)
         stmt = sa.select(TransactionEvent).where(*conditions)
         stmt = (
             stmt.order_by(sa.asc(TransactionEvent.begin_time).nulls_last())

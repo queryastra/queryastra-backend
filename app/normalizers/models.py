@@ -246,15 +246,22 @@ class NormalizedDeadlockEvent(BaseModel):
     agregado `pg_stat_database.deadlocks` (ja coletado como metrica). `victim_sql_text_masked`/
     `survivor_sql_text_masked` e `raw_xml_masked` ja vem mascarados
     (`mask_sql_literals`/`mask_showplan_xml_literals`-style, melhor esforco) — nunca persistir
-    texto de query em claro."""
+    texto de query em claro.
+
+    `detail` (a pedido explicito do usuario — gravar TODAS as informacoes do deadlock, nao so
+    vitima+1 sobrevivente): grafo completo `{"processes": [...], "resources": [...]}`, ver
+    docstring de `app.models.deadlock_event.DeadlockEvent`. `database_name` e melhor esforco
+    (banco do primeiro processo com `currentdbname` disponivel)."""
 
     model_config = ConfigDict(frozen=True)
 
     instance_id: UUID
     time: datetime
+    database_name: str | None = None
     victim_session_id: str | None = None
     victim_sql_text_masked: str | None = None
     survivor_session_id: str | None = None
     survivor_sql_text_masked: str | None = None
     resource_description: str | None = None
     raw_xml_masked: str | None = None
+    detail: dict[str, Any] = Field(default_factory=dict)

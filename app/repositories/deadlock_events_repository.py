@@ -59,12 +59,14 @@ class DeadlockEventsRepository(BaseRepository):
             DeadlockEvent(
                 instance_id=e.instance_id,
                 time=e.time,
+                database_name=e.database_name,
                 victim_session_id=e.victim_session_id,
                 victim_sql_text_masked=e.victim_sql_text_masked,
                 survivor_session_id=e.survivor_session_id,
                 survivor_sql_text_masked=e.survivor_sql_text_masked,
                 resource_description=e.resource_description,
                 raw_xml_masked=e.raw_xml_masked,
+                detail=e.detail or None,
             )
             for e in new_events
         ]
@@ -74,15 +76,37 @@ class DeadlockEventsRepository(BaseRepository):
             await self._session.refresh(row)
         return new_rows
 
-    async def list_for_instance(self, instance_id: UUID, limit: int) -> list[DeadlockEvent]:
-        """Mais recentes primeiro."""
+    async def list_for_instance(
+        self,
+        instance_id: UUID,
+        limit: int,
+        *,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        database_name: str | None = None,
+    ) -> list[DeadlockEvent]:
+        """Mais recentes primeiro. `since`/`until` (opcionais, aditivos) filtram por `time` —
+        deixa de exigir o historico inteiro quando o usuario quer so um periodo especifico."""
+        conditions = [DeadlockEvent.instance_id == instance_id]
+        if since is not None:
+            conditions.append(DeadlockEvent.time >= since)
+        if until is not None:
+            conditions.append(DeadlockEvent.time <= until)
+        if database_name is not None:
+            conditions.append(DeadlockEvent.database_name == database_name)
         stmt = (
             sa.select(DeadlockEvent)
-            .where(DeadlockEvent.instance_id == instance_id)
+            .where(*conditions)
             .order_by(sa.desc(DeadlockEvent.time))
             .limit(limit)
         )
         return list((await self._session.execute(stmt)).scalars().all())
+
+    async def get_by_id(self, instance_id: UUID, deadlock_id: UUID) -> DeadlockEvent | None:
+        stmt = sa.select(DeadlockEvent).where(
+            DeadlockEvent.instance_id == instance_id, DeadlockEvent.id == deadlock_id
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def purge_older_than(self, cutoff: datetime) -> int:
         """Expurgo por idade — deadlock e sempre um fato ja concluido, entao (ao contrario de
