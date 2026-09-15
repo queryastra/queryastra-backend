@@ -55,6 +55,7 @@ from app.collectors.capabilities import (
     POSTGRESQL_TOP_SQL,
 )
 from app.collectors.connection import ConnectionParams
+from app.collectors.transaction_flagging import compute_flag_reason
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.masking.sql_masking import mask_sql_literals
@@ -82,6 +83,7 @@ from app.normalizers.metric_names import (
 from app.normalizers.models import (
     NormalizedBackupStatus,
     NormalizedBlockingEvent,
+    NormalizedDeadlockEvent,
     NormalizedMetricSample,
     NormalizedMissingIndexSuggestion,
     NormalizedQuerySample,
@@ -429,7 +431,15 @@ class PostgreSQLCollector:
             version_num,
             collected_at,
         )
-        transaction_events = self._build_transaction_events(all_session_rows)
+        transaction_events = self._build_transaction_events(
+            all_session_rows,
+            blocking_events,
+            collected_at,
+            settings.transaction_orphan_threshold_minutes,
+        )
+        open_transaction_identifiers = [
+            str(row["pid"]) for row in all_session_rows if row["xact_start"] is not None
+        ]
 
         duration_ms = int((time.perf_counter() - start) * 1000)
         return CollectionResult(
@@ -440,6 +450,7 @@ class PostgreSQLCollector:
             query_samples=query_samples,
             blocking_events=blocking_events,
             transaction_events=transaction_events,
+            open_transaction_identifiers=open_transaction_identifiers,
             engine_version=engine_version,
             engine_version_major=version_num // 10000,
         )
@@ -549,6 +560,11 @@ class PostgreSQLCollector:
                 row["datname"],
             )
 
+        def _xact_start(pid: int) -> datetime | None:
+            active_row = sessions_by_pid.get(pid)
+            row = active_row if active_row is not None else identity_by_pid.get(pid)
+            return row["xact_start"] if row is not None else None
+
         blocked_by_map = {row["pid"]: set(row["blocked_by"]) for row in blocking_rows}
         direct_edges = _reduce_to_direct_edges(blocked_by_map)
 
@@ -616,36 +632,63 @@ class PostgreSQLCollector:
                         blocked_transaction_id=str(blocked_pid),
                         blocker_database_name=blocker_database_name,
                         blocked_database_name=blocked_database_name,
+                        blocker_transaction_begin_time=_xact_start(blocker_pid),
+                        blocked_transaction_begin_time=_xact_start(blocked_pid),
                     )
                 )
         return events
 
     def _build_transaction_events(
-        self, all_session_rows: list[asyncpg.Record]
+        self,
+        all_session_rows: list[asyncpg.Record],
+        blocking_events: list[NormalizedBlockingEvent],
+        collected_at: datetime,
+        orphan_threshold_minutes: int,
     ) -> list[NormalizedTransactionEvent]:
-        """Transacoes ABERTAS neste ciclo — qualquer sessao com `xact_start IS NOT NULL` em
-        `all_session_rows` (todas as sessoes conectadas, nao so as ativas — pega tambem "idle in
-        transaction", o caso mais comum de transacao orfa). `transaction_identifier` = o proprio
-        `pid` (Postgres nao tem conceito de transacao nomeada separada da sessao — ao contrario
-        do SQL Server, so pode haver 1 transacao aberta por backend por vez)."""
+        """Transacoes DIGNAS DE NOTA neste ciclo — qualquer sessao com `xact_start IS NOT NULL`
+        em `all_session_rows` (todas as sessoes conectadas, nao so as ativas — pega tambem "idle
+        in transaction", o caso mais comum de transacao orfa) que `compute_flag_reason` marcar
+        (bloqueio ou orfa — Postgres nao tem `last_error_code`, sempre `None`, entao o criterio
+        de erro nunca se aplica aqui). Redesenho pos-uso real: log de incidente retido, nao
+        espelho de toda transacao aberta (ver `app.collectors.transaction_flagging`).
+        `transaction_identifier` = o proprio `pid` (Postgres nao tem conceito de transacao
+        nomeada separada da sessao — ao contrario do SQL Server, so pode haver 1 transacao
+        aberta por backend por vez)."""
         assert self._instance_id is not None  # garantido por collect()
         instance_id: UUID = self._instance_id
+        blocking_involved_transaction_ids = {
+            tx_id
+            for e in blocking_events
+            for tx_id in (e.blocker_transaction_id, e.blocked_transaction_id)
+            if tx_id is not None
+        }
         events: list[NormalizedTransactionEvent] = []
         for row in all_session_rows:
             xact_start = row["xact_start"]
             if xact_start is None:
                 continue
+            transaction_identifier = str(row["pid"])
+            flag_reason = compute_flag_reason(
+                involved_in_blocking=transaction_identifier in blocking_involved_transaction_ids,
+                has_error=False,
+                begin_time=xact_start,
+                now=collected_at,
+                orphan_threshold_minutes=orphan_threshold_minutes,
+            )
+            if flag_reason is None:
+                continue
             events.append(
                 NormalizedTransactionEvent(
                     instance_id=instance_id,
-                    transaction_identifier=str(row["pid"]),
-                    session_id=str(row["pid"]),
+                    transaction_identifier=transaction_identifier,
+                    session_id=transaction_identifier,
                     database_name=row["datname"],
                     transaction_type=None,
                     transaction_uow=None,
                     begin_time=xact_start,
                     state=row["state"],
                     last_error_code=None,
+                    flag_reason=flag_reason,
                 )
             )
         return events
@@ -845,6 +888,13 @@ class PostgreSQLCollector:
                 },
             )
         ]
+
+    async def collect_deadlock_events(self) -> list[NormalizedDeadlockEvent]:
+        """PostgreSQL nao expoe detalhe de deadlock via SQL (so o contador agregado
+        `pg_stat_database.deadlocks`, ja coletado como metrica em `collect()`) — sempre lista
+        vazia, sem tentar conectar (mesmo padrao ja usado pro plano de execucao sob demanda no
+        PostgreSQL, Etapa 11)."""
+        return []
 
     async def close(self) -> None:
         """Sem estado persistente entre chamadas (cada `check_capabilities` fecha sua conexao)."""

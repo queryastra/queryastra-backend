@@ -151,12 +151,27 @@ class NormalizedBlockingEvent(BaseModel):
     blocked_transaction_id: str | None = None
     blocker_database_name: str | None = None
     blocked_database_name: str | None = None
+    # Redesenho "log de incidente" (a pedido explicito do usuario): inicio da transacao de cada
+    # lado, denormalizado dos mesmos dados de transacao ja lidos no ciclo (SQL Server:
+    # _TRANSACTION_QUERY; PostgreSQL: xact_start, ja em session_rows) — sem query extra. O ciclo
+    # de vida do INCIDENTE em si (started_at/ended_at) NAO vive nesta tabela (hypertable,
+    # insert-only) — e computado por `BlockingIncidentsRepository.upsert_batch` na tabela irma
+    # `blocking_incidents` (tabela relacional comum, ver `app/models/blocking_incident.py`), a
+    # partir do MESMO objeto `NormalizedBlockingEvent` (representa so a aresta OBSERVADA neste
+    # ciclo, sem saber nada de historico).
+    blocker_transaction_begin_time: datetime | None = None
+    blocked_transaction_begin_time: datetime | None = None
 
 
 class NormalizedTransactionEvent(BaseModel):
-    """Transacao aberta normalizada — destino: tabela relacional `transaction_events` (upsert
-    por instance_id/transaction_identifier, com reconciliacao — ver
-    `TransactionEventsRepository.upsert_batch`). Etapa 10, itens 2/3.
+    """Transacao "digna de nota" normalizada — destino: tabela relacional `transaction_events`,
+    um LOG DE INCIDENTE retido para analise posterior (upsert + fechamento via `closed_at`, nunca
+    deletado por reconciliacao — ver `TransactionEventsRepository.upsert_batch` e a secao "Etapa
+    10, redesenho" do plano). Etapa 10, itens 2/3.
+
+    So transacoes com `flag_reason` preenchido chegam a ser construidas pelo adaptador
+    (`app.collectors.transaction_flagging.compute_flag_reason`) — uma transacao aberta comum,
+    sem bloqueio/erro/duracao suspeita/deadlock, nunca vira uma linha aqui.
 
     `transaction_identifier`: SQL Server usa `sys.dm_tran_session_transactions.transaction_id`
     (texto); PostgreSQL usa o proprio `pid` do backend (sem conceito de transacao nomeada
@@ -177,6 +192,7 @@ class NormalizedTransactionEvent(BaseModel):
     begin_time: datetime | None = None
     state: str | None = None
     last_error_code: int | None = None
+    flag_reason: str | None = None
 
 
 class NormalizedMissingIndexSuggestion(BaseModel):
@@ -219,3 +235,26 @@ class NormalizedBackupStatus(BaseModel):
     database_name: str | None = None
     last_backup_at: datetime | None = None
     detail: dict[str, Any] = Field(default_factory=dict)
+
+
+class NormalizedDeadlockEvent(BaseModel):
+    """Deadlock normalizado — destino: tabela relacional `deadlock_events` (INSERT-ONLY, um
+    deadlock e um evento instantaneo, sem "abrir/fechar"). Etapa 10, item 7.
+
+    So SQL Server (`sys.dm_xe_session_targets`, ring buffer `system_health`, evento
+    `xml_deadlock_report`) — PostgreSQL nao expoe detalhe de deadlock via SQL, so o contador
+    agregado `pg_stat_database.deadlocks` (ja coletado como metrica). `victim_sql_text_masked`/
+    `survivor_sql_text_masked` e `raw_xml_masked` ja vem mascarados
+    (`mask_sql_literals`/`mask_showplan_xml_literals`-style, melhor esforco) — nunca persistir
+    texto de query em claro."""
+
+    model_config = ConfigDict(frozen=True)
+
+    instance_id: UUID
+    time: datetime
+    victim_session_id: str | None = None
+    victim_sql_text_masked: str | None = None
+    survivor_session_id: str | None = None
+    survivor_sql_text_masked: str | None = None
+    resource_description: str | None = None
+    raw_xml_masked: str | None = None

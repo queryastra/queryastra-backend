@@ -23,6 +23,7 @@ from uuid import UUID
 from app.normalizers.models import (
     NormalizedBackupStatus,
     NormalizedBlockingEvent,
+    NormalizedDeadlockEvent,
     NormalizedMetricSample,
     NormalizedMissingIndexSuggestion,
     NormalizedQuerySample,
@@ -73,10 +74,19 @@ class CollectionResult:
     metric_samples: list[NormalizedMetricSample] = field(default_factory=list)
     query_samples: list[NormalizedQuerySample] = field(default_factory=list)
     blocking_events: list[NormalizedBlockingEvent] = field(default_factory=list)
-    # Etapa 10 (rastreamento de transacoes) — transacoes ABERTAS neste ciclo (nao serie
-    # temporal bruta: `TransactionEventsRepository.upsert_batch` reconcilia o conjunto inteiro,
-    # removendo qualquer transacao vista antes mas ausente agora — ja fechou).
+    # Etapa 10 (rastreamento de transacoes), redesenhado pos-uso real: so as transacoes ABERTAS
+    # neste ciclo que sao "dignas de nota" (bloqueio/erro/orfa — ver
+    # `app.collectors.transaction_flagging.compute_flag_reason`), ja filtradas pelo coletor.
+    # `TransactionEventsRepository.upsert_batch` grava/atualiza essas e FECHA (`closed_at`, nunca
+    # deleta) qualquer uma ja rastreada que sumiu do conjunto aberto — log de incidente retido
+    # para analise posterior, nao mais um espelho reconciliado de toda transacao aberta.
     transaction_events: list[NormalizedTransactionEvent] = field(default_factory=list)
+    # TODOS os identificadores de transacao ABERTA neste ciclo, flagged ou nao — usado so por
+    # `TransactionEventsRepository.upsert_batch` para saber quais linhas JA RASTREADAS (de um
+    # ciclo anterior, quando foram flagged) devem ser fechadas (`closed_at`) por terem deixado de
+    # estar abertas. Uma transacao aberta comum, nunca flagged, nunca aparece em
+    # `transaction_events` mas aparece aqui enquanto durar.
+    open_transaction_identifiers: list[str] = field(default_factory=list)
     capabilities: list[CapabilityResult] = field(default_factory=list)
     # Versao do motor detectada NESTE ciclo (o coletor ja detecta pra decidir qual variante de
     # query usar — ex.: `pg_stat_checkpointer` vs `pg_stat_bgwriter` — mas so passou a expor isso
@@ -136,5 +146,16 @@ class Collector(Protocol):
         por padrao). SQL Server: `msdb.dbo.backupset` (`type='D'`, so backup completo), uma
         linha por banco. PostgreSQL: `pg_stat_archiver` (cluster-wide), uma unica linha por
         instancia — proxy de saude de WAL archiving, NAO um backup de fato.
+        """
+        ...
+
+    async def collect_deadlock_events(self) -> list[NormalizedDeadlockEvent]:
+        """Executa a extracao de deadlocks recentes (Etapa 10, item 7).
+
+        Separado de `collect()` pelo mesmo motivo dos demais — roda num worker de baixa
+        frequencia (`app/workers/deadlock_supervisor.py`). So SQL Server (ring buffer nativo
+        `system_health`, sempre ativo por padrao, evento `xml_deadlock_report`) — PostgreSQL nao
+        expoe detalhe de deadlock via SQL, devolve lista vazia sempre (so o contador agregado
+        `pg_stat_database.deadlocks`, ja coletado como metrica em `collect()`).
         """
         ...

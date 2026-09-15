@@ -1,16 +1,18 @@
-"""Repositorio de `transaction_events` — Etapa 10 (itens 2/3), rastreamento de transacoes.
+"""Repositorio de `transaction_events` — Etapa 10 (itens 2/3), log de incidente de transacao.
 
-Tabela relacional comum (nao hypertable), mas com uma semantica diferente de
-`missing_index_suggestions`/`backup_status`: cada linha representa uma transacao ATUALMENTE
-aberta. `upsert_batch` reconcilia o conjunto inteiro por instancia a cada ciclo — alem de
-upsert nos eventos vistos, DELETA qualquer linha da mesma instancia que nao apareceu neste ciclo
-(a transacao fechou desde o ciclo anterior). Sem isso, uma transacao ja encerrada ficaria
-"presa" pra sempre na tabela como se ainda estivesse aberta.
+Redesenho pos-uso real (ver plano "Etapa 10, redesenho"): cada linha e uma transacao "digna de
+nota" (bloqueio, erro, orfa ou deadlock — ver `app.collectors.transaction_flagging`), retida para
+analise posterior ate `settings.problem_events_retention_days`
+(`app/workers/problem_events_retention_worker.py`) — NUNCA deletada so porque a transacao fechou.
+`upsert_batch` grava/atualiza as transacoes flagged deste ciclo (`flag_reason` uniao de todos os
+motivos ja vistos, nunca sobrescrita) e FECHA (`closed_at`) qualquer linha ja rastreada cuja
+transacao nao esta mais entre as abertas deste ciclo — nunca deleta.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
+from typing import cast
 from uuid import UUID
 
 import sqlalchemy as sa
@@ -21,20 +23,45 @@ from app.normalizers.models import NormalizedTransactionEvent
 from app.repositories.base import BaseRepository
 
 
+def _merge_tags(old: str | None, new: str | None) -> str | None:
+    """Uniao de tags separadas por virgula, preservando ordem de primeira aparicao — sem
+    duplicatas. `None` quando nenhum dos dois lados tem tag nenhuma."""
+    tags: list[str] = []
+    for part in (old or "").split(",") + (new or "").split(","):
+        if part and part not in tags:
+            tags.append(part)
+    return ",".join(tags) if tags else None
+
+
 class TransactionEventsRepository(BaseRepository):
     async def upsert_batch(
         self,
         instance_id: UUID,
         events: list[NormalizedTransactionEvent],
+        open_transaction_identifiers: set[str],
         observed_at: datetime,
     ) -> None:
-        """Reconcilia as transacoes abertas de `instance_id` neste ciclo: upsert em cada uma
-        (`first_seen_at` preservado, resto atualizado) e remove qualquer linha da mesma
-        instancia ausente de `events` (transacao ja fechou). Lista vazia remove tudo daquela
-        instancia — nenhuma transacao aberta neste ciclo."""
-        seen_identifiers = [e.transaction_identifier for e in events]
-
+        """Grava/atualiza as transacoes FLAGGED (`events`, ja filtradas pelo coletor — so quem
+        tem `flag_reason`) e fecha (`closed_at`, nunca deleta) qualquer transacao ja rastreada
+        (`closed_at IS NULL`) que nao esta mais em `open_transaction_identifiers` (TODAS as
+        transacoes abertas neste ciclo, flagged ou nao — necessario para nao fechar por engano
+        uma transacao que so nao foi re-flagged neste ciclo mas continua aberta)."""
         if events:
+            identifiers = [e.transaction_identifier for e in events]
+            existing_rows = (
+                await self._session.execute(
+                    sa.select(
+                        TransactionEvent.transaction_identifier, TransactionEvent.flag_reason
+                    ).where(
+                        TransactionEvent.instance_id == instance_id,
+                        TransactionEvent.transaction_identifier.in_(identifiers),
+                    )
+                )
+            ).all()
+            existing_flag_reason = {
+                row.transaction_identifier: row.flag_reason for row in existing_rows
+            }
+
             rows = [
                 {
                     "instance_id": instance_id,
@@ -46,6 +73,9 @@ class TransactionEventsRepository(BaseRepository):
                     "begin_time": e.begin_time,
                     "state": e.state,
                     "last_error_code": e.last_error_code,
+                    "flag_reason": _merge_tags(
+                        existing_flag_reason.get(e.transaction_identifier), e.flag_reason
+                    ),
                     "first_seen_at": observed_at,
                     "last_seen_at": observed_at,
                 }
@@ -62,39 +92,107 @@ class TransactionEventsRepository(BaseRepository):
                     "begin_time": stmt.excluded.begin_time,
                     "state": stmt.excluded.state,
                     "last_error_code": stmt.excluded.last_error_code,
+                    "flag_reason": stmt.excluded.flag_reason,
                     "last_seen_at": stmt.excluded.last_seen_at,
+                    # Reabre defensivamente: se o identificador foi reciclado pelo motor depois
+                    # de ja ter sido fechado (raro, mas possivel numa janela de retencao longa),
+                    # trata como uma nova ocorrencia da mesma transacao, nao um erro.
+                    "closed_at": None,
                 },
             )
             await self._session.execute(stmt)
 
         stale_condition = (
-            TransactionEvent.transaction_identifier.notin_(seen_identifiers)
-            if seen_identifiers
+            TransactionEvent.transaction_identifier.notin_(open_transaction_identifiers)
+            if open_transaction_identifiers
             else sa.true()
         )
         await self._session.execute(
-            sa.delete(TransactionEvent).where(
-                TransactionEvent.instance_id == instance_id, stale_condition
+            sa.update(TransactionEvent)
+            .where(
+                TransactionEvent.instance_id == instance_id,
+                TransactionEvent.closed_at.is_(None),
+                stale_condition,
             )
+            .values(closed_at=observed_at, state="encerrada")
         )
         await self._session.commit()
 
-    async def list_for_instance(self, instance_id: UUID, limit: int) -> list[TransactionEvent]:
-        """Transacoes abertas de uma instancia, mais antigas primeiro (a mais provavel de ser
-        uma orfa/esquecida aparece no topo)."""
+    async def list_for_instance(
+        self,
+        instance_id: UUID,
+        limit: int,
+        *,
+        open_only: bool = True,
+        database_name: str | None = None,
+    ) -> list[TransactionEvent]:
+        """`open_only=True` (padrao): so transacoes ainda abertas, mais antigas primeiro (mais
+        provavel de ser uma orfa/esquecida no topo). `open_only=False`: inclui encerradas
+        tambem (retidas ate a janela de retencao), mais recentes primeiro (feed de historico,
+        nao teria sentido enterrar atividade recente sob transacoes antigas ja fechadas)."""
+        conditions = [TransactionEvent.instance_id == instance_id]
+        if open_only:
+            conditions.append(TransactionEvent.closed_at.is_(None))
+        if database_name is not None:
+            conditions.append(TransactionEvent.database_name == database_name)
+        stmt = sa.select(TransactionEvent).where(*conditions)
         stmt = (
-            sa.select(TransactionEvent)
-            .where(TransactionEvent.instance_id == instance_id)
-            .order_by(sa.asc(TransactionEvent.begin_time).nulls_last())
-            .limit(limit)
+            stmt.order_by(sa.asc(TransactionEvent.begin_time).nulls_last())
+            if open_only
+            else stmt.order_by(sa.desc(TransactionEvent.last_seen_at))
         )
+        stmt = stmt.limit(limit)
         return list((await self._session.execute(stmt)).scalars().all())
 
     async def get_by_identifier(
         self, instance_id: UUID, transaction_identifier: str
     ) -> TransactionEvent | None:
+        """Resolve tanto aberta quanto ja encerrada (retida) — o detalhe de uma transacao
+        continua acessivel apos ela fechar, ate a janela de retencao expirar."""
         stmt = sa.select(TransactionEvent).where(
             TransactionEvent.instance_id == instance_id,
             TransactionEvent.transaction_identifier == transaction_identifier,
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def tag_open_transactions_by_session(
+        self, instance_id: UUID, session_ids: list[str], tag: str
+    ) -> None:
+        """Correlacao assincrona com deadlock (`app/workers/deadlock_supervisor.py`): quando um
+        novo deadlock e persistido, adiciona `tag` (ex. `"deadlock"`) a `flag_reason` de qualquer
+        transacao AINDA ABERTA cujo `session_id` bata com a vitima/sobrevivente do deadlock —
+        melhor esforco, sem problema se a transacao ja tiver fechado (o `deadlock_events` em si e
+        o registro durável, nao depende desta correlacao para existir)."""
+        if not session_ids:
+            return
+        rows = (
+            (
+                await self._session.execute(
+                    sa.select(TransactionEvent).where(
+                        TransactionEvent.instance_id == instance_id,
+                        TransactionEvent.closed_at.is_(None),
+                        TransactionEvent.session_id.in_(session_ids),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for row in rows:
+            merged = _merge_tags(row.flag_reason, tag)
+            if merged != row.flag_reason:
+                row.flag_reason = merged
+        await self._session.commit()
+
+    async def purge_closed_before(self, cutoff: datetime) -> int:
+        """Expurgo por idade (`app/workers/problem_events_retention_worker.py`) — so linhas JA
+        ENCERRADAS ha mais tempo que `cutoff`; uma transacao ainda aberta nunca e removida,
+        nao importa ha quanto tempo esta aberta (a orfa mais antiga e exatamente o caso mais
+        importante de manter visivel)."""
+        result = await self._session.execute(
+            sa.delete(TransactionEvent).where(
+                TransactionEvent.closed_at.is_not(None), TransactionEvent.closed_at < cutoff
+            )
+        )
+        await self._session.commit()
+        return cast(sa.CursorResult, result).rowcount or 0

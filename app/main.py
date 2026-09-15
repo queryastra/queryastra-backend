@@ -24,8 +24,10 @@ from app.core.logging import configure_logging, get_logger
 from app.db.session import async_session_factory
 from app.workers.alerting_worker import AlertingWorker, EmailSettings
 from app.workers.backup_status_supervisor import BackupStatusSupervisor
+from app.workers.deadlock_supervisor import DeadlockSupervisor
 from app.workers.missing_index_supervisor import MissingIndexSupervisor
 from app.workers.polling_supervisor import PollingSupervisor
+from app.workers.problem_events_retention_worker import ProblemEventsRetentionWorker
 
 logger = get_logger(__name__)
 
@@ -42,6 +44,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     missing_index_task: asyncio.Task[None] | None = None
     backup_status_supervisor: BackupStatusSupervisor | None = None
     backup_status_task: asyncio.Task[None] | None = None
+    deadlock_supervisor: DeadlockSupervisor | None = None
+    deadlock_task: asyncio.Task[None] | None = None
+    problem_events_retention_worker: ProblemEventsRetentionWorker | None = None
+    problem_events_retention_task: asyncio.Task[None] | None = None
 
     if settings.polling_supervisor_enabled:
         supervisor = PollingSupervisor(
@@ -109,6 +115,36 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     else:
         logger.info("BackupStatusSupervisor desabilitado (BACKUP_STATUS_SUPERVISOR_ENABLED=false)")
 
+    if settings.deadlock_supervisor_enabled:
+        deadlock_supervisor = DeadlockSupervisor(
+            async_session_factory, settings.deadlock_check_interval_seconds
+        )
+        deadlock_task = asyncio.create_task(deadlock_supervisor.run())
+        logger.info(
+            "DeadlockSupervisor habilitado (check_interval=%ss)",
+            settings.deadlock_check_interval_seconds,
+        )
+    else:
+        logger.info("DeadlockSupervisor desabilitado (DEADLOCK_SUPERVISOR_ENABLED=false)")
+
+    if settings.problem_events_retention_worker_enabled:
+        problem_events_retention_worker = ProblemEventsRetentionWorker(
+            async_session_factory,
+            settings.problem_events_retention_days,
+            settings.problem_events_retention_check_interval_seconds,
+        )
+        problem_events_retention_task = asyncio.create_task(problem_events_retention_worker.run())
+        logger.info(
+            "ProblemEventsRetentionWorker habilitado (retention_days=%s, check_interval=%ss)",
+            settings.problem_events_retention_days,
+            settings.problem_events_retention_check_interval_seconds,
+        )
+    else:
+        logger.info(
+            "ProblemEventsRetentionWorker desabilitado "
+            "(PROBLEM_EVENTS_RETENTION_WORKER_ENABLED=false)"
+        )
+
     yield
 
     if supervisor is not None and supervisor_task is not None:
@@ -123,6 +159,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if backup_status_supervisor is not None and backup_status_task is not None:
         backup_status_supervisor.stop()
         await backup_status_task
+    if deadlock_supervisor is not None and deadlock_task is not None:
+        deadlock_supervisor.stop()
+        await deadlock_task
+    if problem_events_retention_worker is not None and problem_events_retention_task is not None:
+        problem_events_retention_worker.stop()
+        await problem_events_retention_task
     logger.info("Lifespan finalizado")
 
 

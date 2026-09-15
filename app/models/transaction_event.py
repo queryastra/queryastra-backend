@@ -21,7 +21,12 @@ from app.db.base import Base
 
 
 class TransactionEvent(Base):
-    """Estado mais recente de uma transacao aberta numa instancia.
+    """Log de incidente de uma transacao "digna de nota" (bloqueio, erro, aberta por tempo
+    suspeito ou envolvida em deadlock — ver `app.collectors.transaction_flagging`), retido para
+    analise posterior ate `settings.problem_events_retention_days`
+    (`app/workers/problem_events_retention_worker.py`) — NAO um espelho de toda transacao aberta
+    (redesenho pos-uso real; modelo anterior reconciliava/deletava a cada ciclo, o que gerava
+    escrita desnecessaria e fazia a transacao sumir da tela antes de dar tempo de investigar).
 
     `transaction_identifier`: SQL Server usa `sys.dm_tran_session_transactions.transaction_id`
     (texto); PostgreSQL nao tem o conceito de transacao nomeada separada da sessao — usa o
@@ -30,6 +35,11 @@ class TransactionEvent(Base):
     MSDTC — ver `Docs/collector-queries.md`). `last_error_code` e melhor esforco
     (`sys.dm_exec_requests.prev_error`), so existe enquanto a sessao ainda tem uma request ativa
     — objetivamente ausente exatamente no caso "a transacao ja ficou idle depois do erro".
+
+    `closed_at`: `NULL` enquanto a transacao ainda esta aberta; preenchido (e nunca mais limpo)
+    quando ela some do conjunto de transacoes abertas de um ciclo. `flag_reason`: tags
+    combinadas separadas por virgula (`"bloqueio"`, `"erro"`, `"orfa"`, `"deadlock"`) explicando
+    por que esta linha existe — uniao de todos os motivos ja vistos, nunca sobrescrita.
     """
 
     __tablename__ = "transaction_events"
@@ -57,3 +67,5 @@ class TransactionEvent(Base):
     last_error_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    flag_reason: Mapped[str | None] = mapped_column(Text, nullable=True)

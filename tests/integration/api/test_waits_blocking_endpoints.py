@@ -1,5 +1,5 @@
 """Testes de integracao de `GET /api/v1/waits-blocking/*` contra o banco real `ab_xql_pm_dev`.
-Semeia via `BlockingEventsRepository`/`QuerySamplesRepository` (fixture `db_session`) e chama o
+Semeia via `BlockingIncidentsRepository`/`QuerySamplesRepository` (fixture `db_session`) e chama o
 endpoint via `client` (fixture de `tests/conftest.py`)."""
 
 from __future__ import annotations
@@ -12,15 +12,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.instance import Instance
 from app.normalizers.models import NormalizedBlockingEvent, NormalizedQuerySample
 from app.normalizers.wait_taxonomy import WaitCategory
-from app.repositories.blocking_events_repository import BlockingEventsRepository
+from app.repositories.blocking_incidents_repository import BlockingIncidentsRepository
 from app.repositories.query_samples_repository import QuerySamplesRepository
 
 
 async def test_list_blocking_events_builds_tree_with_enrichment(
     client: AsyncClient, db_session: AsyncSession, test_instance: Instance
 ) -> None:
-    """Identidade/wait/recurso vem denormalizado do proprio evento (`blocker_*`/`blocked_*`) —
-    so o texto mascarado do comando continua vindo do join contra `query_samples`."""
+    """Identidade/wait/recurso vem denormalizado do proprio incidente (`blocker_*`/`blocked_*`)
+    — so o texto mascarado do comando continua vindo do join contra `query_samples`."""
     now = datetime.now(UTC)
 
     query_repo = QuerySamplesRepository(db_session)
@@ -47,8 +47,9 @@ async def test_list_blocking_events_builds_tree_with_enrichment(
         ]
     )
 
-    blocking_repo = BlockingEventsRepository(db_session)
-    await blocking_repo.insert_batch(
+    blocking_repo = BlockingIncidentsRepository(db_session)
+    await blocking_repo.upsert_batch(
+        test_instance.id,
         [
             NormalizedBlockingEvent(
                 time=now,
@@ -65,7 +66,8 @@ async def test_list_blocking_events_builds_tree_with_enrichment(
                 blocked_wait_resource="relation/AccessShareLock",
                 blocked_object="t",
             )
-        ]
+        ],
+        now,
     )
 
     response = await client.get(f"/api/v1/waits-blocking/blocking/{test_instance.id}")
@@ -95,13 +97,14 @@ async def test_list_blocking_events_builds_tree_with_enrichment(
 async def test_list_blocking_events_builds_multi_level_tree(
     client: AsyncClient, db_session: AsyncSession, test_instance: Instance
 ) -> None:
-    """Cadeia A -> B -> C de 3 niveis: B aparece bloqueado por A E bloqueando C na mesma linha
-    do tempo — a arvore encadeia as 2 arestas diretas num unico snapshot. `caused_ms` de A soma o
-    proprio bloqueio de B (500) mais tudo que B, por sua vez, causou (o `waited_ms` de C, 200) —
-    reflete o impacto TOTAL da cadeia, nao so o filho direto."""
+    """Cadeia A -> B -> C de 3 niveis: B aparece bloqueado por A E bloqueando C no mesmo
+    conjunto aberto — a arvore encadeia as 2 arestas diretas. `caused_ms` de A soma o proprio
+    bloqueio de B (500) mais tudo que B, por sua vez, causou (o `waited_ms` de C, 200) — reflete
+    o impacto TOTAL da cadeia, nao so o filho direto."""
     now = datetime.now(UTC)
-    blocking_repo = BlockingEventsRepository(db_session)
-    await blocking_repo.insert_batch(
+    blocking_repo = BlockingIncidentsRepository(db_session)
+    await blocking_repo.upsert_batch(
+        test_instance.id,
         [
             NormalizedBlockingEvent(
                 time=now,
@@ -117,7 +120,8 @@ async def test_list_blocking_events_builds_multi_level_tree(
                 blocked_session_id="C",
                 wait_time_ms=200,
             ),
-        ]
+        ],
+        now,
     )
 
     response = await client.get(f"/api/v1/waits-blocking/blocking/{test_instance.id}")
@@ -151,50 +155,49 @@ async def test_list_blocking_events_empty_when_no_events(
     assert response.json() == []
 
 
-async def test_list_blocking_events_respects_to_upper_bound(
+async def test_list_blocking_events_excludes_ended_incidents(
     client: AsyncClient, db_session: AsyncSession, test_instance: Instance
 ) -> None:
-    """`to` (opcional, aditivo — usado pelo `DayFilter` do frontend pra delimitar um dia
-    calendario especifico) exclui um snapshot mais recente fora da janela pedida."""
+    """A arvore ao vivo (`GET /blocking/{id}`) so mostra incidentes EM ANDAMENTO — um incidente
+    ja encerrado (segundo ciclo sem ele no batch) some da arvore, mas continua acessivel via
+    `GET /blocking/{id}/incidents` (lista plana/historico)."""
     now = datetime.now(UTC)
-    within_window_time = now - timedelta(hours=2)
-
-    blocking_repo = BlockingEventsRepository(db_session)
-    await blocking_repo.insert_batch(
-        [
-            NormalizedBlockingEvent(
-                time=within_window_time,
-                instance_id=test_instance.id,
-                blocker_session_id="within-window-blocker",
-                blocked_session_id="within-window-blocked",
-                wait_time_ms=300,
-            )
-        ]
-    )
-    await blocking_repo.insert_batch(
+    blocking_repo = BlockingIncidentsRepository(db_session)
+    await blocking_repo.upsert_batch(
+        test_instance.id,
         [
             NormalizedBlockingEvent(
                 time=now,
                 instance_id=test_instance.id,
-                blocker_session_id="after-window-blocker",
-                blocked_session_id="after-window-blocked",
-                wait_time_ms=100,
+                blocker_session_id="ended-blocker",
+                blocked_session_id="ended-blocked",
+                wait_time_ms=300,
             )
-        ]
+        ],
+        now,
     )
+    # Proximo ciclo: o incidente ja foi resolvido (nao aparece mais no batch).
+    await blocking_repo.upsert_batch(test_instance.id, [], datetime.now(UTC))
 
-    response = await client.get(
-        f"/api/v1/waits-blocking/blocking/{test_instance.id}",
-        params={
-            "from": (now - timedelta(hours=6)).isoformat(),
-            "to": (now - timedelta(hours=1)).isoformat(),
-        },
+    tree_response = await client.get(f"/api/v1/waits-blocking/blocking/{test_instance.id}")
+    assert tree_response.status_code == 200
+    assert tree_response.json() == []
+
+    incidents_response = await client.get(
+        f"/api/v1/waits-blocking/blocking/{test_instance.id}/incidents"
     )
+    assert incidents_response.status_code == 200
+    incidents = incidents_response.json()
+    assert len(incidents) == 1
+    assert incidents[0]["blocker_session_id"] == "ended-blocker"
+    assert incidents[0]["ended_at"] is not None
 
-    assert response.status_code == 200
-    body = response.json()
-    assert len(body) == 1
-    assert body[0]["session_id"] == "within-window-blocker"
+    open_only_response = await client.get(
+        f"/api/v1/waits-blocking/blocking/{test_instance.id}/incidents",
+        params={"open_only": "true"},
+    )
+    assert open_only_response.status_code == 200
+    assert open_only_response.json() == []
 
 
 async def test_get_session_blocking_detail_returns_identity_command_and_edges(
@@ -217,8 +220,9 @@ async def test_get_session_blocking_detail_returns_identity_command_and_edges(
         ]
     )
 
-    blocking_repo = BlockingEventsRepository(db_session)
-    await blocking_repo.insert_batch(
+    blocking_repo = BlockingIncidentsRepository(db_session)
+    await blocking_repo.upsert_batch(
+        test_instance.id,
         [
             NormalizedBlockingEvent(
                 time=now,
@@ -233,7 +237,8 @@ async def test_get_session_blocking_detail_returns_identity_command_and_edges(
                 blocked_wait_resource="relation/AccessShareLock",
                 blocked_object="t",
             )
-        ]
+        ],
+        now,
     )
 
     response = await client.get(
@@ -255,6 +260,39 @@ async def test_get_session_blocking_detail_returns_identity_command_and_edges(
     assert len(body["blocked_by"]) == 1
     assert body["blocked_by"][0]["session_id"] == "blocker-1"
     assert body["blocked_by"][0]["wait_time_ms"] == 999
+    assert body["blocked_by"][0]["ended_at"] is None
+
+
+async def test_get_session_blocking_detail_resolves_after_incident_ends(
+    client: AsyncClient, db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """A pedido explicito do usuario: o detalhe de sessao continua resolvendo depois do
+    bloqueio ja ter sido encerrado — mostrando `ended_at` preenchido, nao 404."""
+    now = datetime.now(UTC)
+    blocking_repo = BlockingIncidentsRepository(db_session)
+    await blocking_repo.upsert_batch(
+        test_instance.id,
+        [
+            NormalizedBlockingEvent(
+                time=now,
+                instance_id=test_instance.id,
+                blocker_session_id="blocker-2",
+                blocked_session_id="blocked-2",
+                wait_time_ms=42,
+            )
+        ],
+        now,
+    )
+    await blocking_repo.upsert_batch(test_instance.id, [], datetime.now(UTC))
+
+    response = await client.get(
+        f"/api/v1/waits-blocking/blocking/{test_instance.id}/session/blocked-2"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["blocked_by"]) == 1
+    assert body["blocked_by"][0]["ended_at"] is not None
 
 
 async def test_get_session_blocking_detail_404_when_session_not_in_snapshot(

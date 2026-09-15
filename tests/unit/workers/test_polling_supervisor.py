@@ -112,6 +112,21 @@ class _FakeTransactionEventsRepository:
         del session
         self.calls: list = []
 
+    async def upsert_batch(
+        self,
+        instance_id: object,
+        events: list,
+        open_transaction_identifiers: object,
+        observed_at: object,
+    ) -> None:
+        self.calls.append((instance_id, events, open_transaction_identifiers, observed_at))
+
+
+class _FakeBlockingIncidentsRepository:
+    def __init__(self, session: object) -> None:
+        del session
+        self.calls: list = []
+
     async def upsert_batch(self, instance_id: object, events: list, observed_at: object) -> None:
         self.calls.append((instance_id, events, observed_at))
 
@@ -185,6 +200,7 @@ def _make_supervisor(
         query_samples_repository_factory=_FakeQuerySamplesRepository,
         blocking_events_repository_factory=_FakeBlockingEventsRepository,
         transaction_events_repository_factory=_FakeTransactionEventsRepository,
+        blocking_incidents_repository_factory=_FakeBlockingIncidentsRepository,
         collector_factory=collector_factory or _FakeCollector,
         **kwargs,
     )

@@ -55,6 +55,7 @@ import hashlib
 import time
 from datetime import UTC, datetime
 from uuid import UUID
+from xml.etree import ElementTree
 
 import pymssql
 
@@ -68,6 +69,7 @@ from app.collectors.capabilities import (
     SQLSERVER_TABLE_READ_ACCESS,
 )
 from app.collectors.connection import ConnectionParams
+from app.collectors.transaction_flagging import compute_flag_reason
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.masking.sql_masking import mask_sql_literals
@@ -78,6 +80,7 @@ from app.normalizers.metric_names import (
 from app.normalizers.models import (
     NormalizedBackupStatus,
     NormalizedBlockingEvent,
+    NormalizedDeadlockEvent,
     NormalizedMetricSample,
     NormalizedMissingIndexSuggestion,
     NormalizedQuerySample,
@@ -243,6 +246,18 @@ _BACKUP_STATUS_QUERY = """
     GROUP BY database_name
 """
 
+# Etapa 10, item 7 (Deadlocks) — ring buffer `system_health`, sessao Extended Events nativa e
+# sempre ativa por padrao desde o SQL Server 2008 (nunca precisa ser criada). `target_data` e um
+# XML com varios tipos de evento acumulados recentemente (buffer circular, poucos MB) — filtrar
+# so `xml_deadlock_report` e mais simples/barato fazendo o parse em Python (`_build_deadlock_
+# events`) do que via XQuery T-SQL.
+_DEADLOCK_RING_BUFFER_QUERY = """
+    SELECT CAST(xet.target_data AS NVARCHAR(MAX)) AS target_data
+    FROM sys.dm_xe_session_targets AS xet
+    INNER JOIN sys.dm_xe_sessions AS xes ON xes.address = xet.event_session_address
+    WHERE xes.name = 'system_health' AND xet.target_name = 'ring_buffer'
+"""
+
 # Etapa 11 (plano de execucao sob demanda) — busca o `plan_handle` cujo statement isolado
 # (mesmo padrao statement_start_offset/end_offset de `_SESSION_ACTIVITY_QUERY`, mas contra
 # `sys.dm_exec_query_stats`, que tambem tem essas colunas) mascarado+hasheado bate com o
@@ -351,11 +366,13 @@ def _connect_and_collect(
     query_timeout_seconds: float,
     max_rows: int,
     collected_at: datetime,
+    transaction_orphan_threshold_minutes: int,
 ) -> tuple[
     list[NormalizedMetricSample],
     list[NormalizedQuerySample],
     list[NormalizedBlockingEvent],
     list[NormalizedTransactionEvent],
+    list[str],
     str,
     int,
 ]:
@@ -429,6 +446,14 @@ def _connect_and_collect(
         )
         for row in transaction_database_rows
     }
+    begin_time_by_transaction_id: dict[str, datetime | None] = {
+        str(row["transaction_id"]): (
+            row["transaction_begin_time"]
+            if isinstance(row["transaction_begin_time"], datetime)
+            else None
+        )
+        for row in transaction_rows
+    }
     query_samples = _build_query_samples(session_rows, instance_id, collected_at)
     blocking_events = _build_blocking_events(
         session_rows,
@@ -436,18 +461,27 @@ def _connect_and_collect(
         blocked_object_rows,
         transaction_id_by_session_id,
         database_name_by_transaction_id,
+        begin_time_by_transaction_id,
         instance_id,
         collected_at,
     )
     metric_samples = _build_metric_samples(session_rows, counter_rows, instance_id, collected_at)
     transaction_events = _build_transaction_events(
-        transaction_rows, transaction_database_rows, session_rows, instance_id
+        transaction_rows,
+        transaction_database_rows,
+        session_rows,
+        blocking_events,
+        instance_id,
+        collected_at,
+        transaction_orphan_threshold_minutes,
     )
+    open_transaction_identifiers = [str(row["transaction_id"]) for row in transaction_rows]
     return (
         metric_samples,
         query_samples,
         blocking_events,
         transaction_events,
+        open_transaction_identifiers,
         product_version,
         version_major,
     )
@@ -558,6 +592,129 @@ def _connect_and_collect_backup_status(
     ]
 
 
+def _connect_and_collect_deadlocks(
+    connection: ConnectionParams,
+    instance_id: UUID,
+    query_timeout_seconds: float,
+) -> list[NormalizedDeadlockEvent]:
+    """Helper sincrono (mesmo padrao de `_connect_and_collect_missing_indexes`): le o ring buffer
+    `system_health` e extrai os eventos `xml_deadlock_report` acumulados recentemente."""
+    login_timeout_seconds = int(connection.connect_timeout_seconds)
+    conn = pymssql.connect(
+        server=connection.host,
+        port=str(connection.port),
+        user=connection.username,
+        password=connection.secret_value,
+        timeout=int(query_timeout_seconds),
+        login_timeout=login_timeout_seconds,
+    )
+    try:
+        cursor = conn.cursor(as_dict=True)
+        cursor.execute(_DEADLOCK_RING_BUFFER_QUERY)
+        rows = list(cursor.fetchall())
+        cursor.close()
+    finally:
+        conn.close()
+
+    return _build_deadlock_events(rows, instance_id)
+
+
+def _build_deadlock_events(rows: list[dict], instance_id: UUID) -> list[NormalizedDeadlockEvent]:
+    """Faz o parse do XML do ring buffer (uma linha por target `ring_buffer` — normalmente 1 só)
+    e extrai cada evento `xml_deadlock_report` como um `NormalizedDeadlockEvent`.
+
+    O `<deadlock>` de cada evento tem `<victim-list>` (id do processo vitima, escolhido pelo
+    motor pra rollback) e `<process-list>` (todos os processos envolvidos no ciclo, com `spid` e
+    `<inputbuf>` = statement em execucao). Melhor esforco para o caso mais comum (ciclo de 2
+    processos): sobrevivente = qualquer processo que nao seja a vitima. Deadlocks de 3+ processos
+    tem mais de um "sobrevivente" — so o primeiro encontrado e guardado (o XML bruto mascarado em
+    `raw_xml_masked` preserva o grafo completo para quem precisar de mais detalhe).
+    """
+    events: list[NormalizedDeadlockEvent] = []
+    for row in rows:
+        target_data = row.get("target_data")
+        if not target_data:
+            continue
+        try:
+            root = ElementTree.fromstring(target_data)
+        except ElementTree.ParseError:
+            logger.warning(
+                "Ring buffer system_health com XML invalido para instance_id=%s - ignorado",
+                instance_id,
+            )
+            continue
+
+        for event_el in root.findall(".//event[@name='xml_deadlock_report']"):
+            deadlock_el = event_el.find("./data[@name='xml_report']/value/deadlock")
+            if deadlock_el is None:
+                continue
+
+            timestamp_raw = event_el.get("timestamp")
+            time_value = _parse_xe_timestamp(timestamp_raw)
+
+            processes = deadlock_el.findall("./process-list/process")
+            victim_ids = {
+                v.get("id")
+                for v in deadlock_el.findall("./victim-list/victimProcess")
+                if v.get("id")
+            }
+            victim_process = next((p for p in processes if p.get("id") in victim_ids), None)
+            survivor_process = next((p for p in processes if p.get("id") not in victim_ids), None)
+
+            resource_el = deadlock_el.find("./resource-list")
+            resource_description = None
+            if resource_el is not None and len(resource_el) > 0:
+                first_resource = resource_el[0]
+                object_name = first_resource.get("objectname")
+                resource_description = (
+                    f"{first_resource.tag} ({object_name})" if object_name else first_resource.tag
+                )
+
+            raw_xml = ElementTree.tostring(deadlock_el, encoding="unicode")
+
+            events.append(
+                NormalizedDeadlockEvent(
+                    instance_id=instance_id,
+                    time=time_value,
+                    victim_session_id=_deadlock_process_session_id(victim_process),
+                    victim_sql_text_masked=_deadlock_process_query_text(victim_process),
+                    survivor_session_id=_deadlock_process_session_id(survivor_process),
+                    survivor_sql_text_masked=_deadlock_process_query_text(survivor_process),
+                    resource_description=resource_description,
+                    raw_xml_masked=mask_sql_literals(raw_xml),
+                )
+            )
+    return events
+
+
+def _parse_xe_timestamp(timestamp_raw: str | None) -> datetime:
+    """`event/@timestamp` do Extended Events vem em ISO8601 UTC (ex.
+    `"2026-09-15T14:23:01.123Z"`) — `datetime.fromisoformat` (Python 3.11+) ja aceita o sufixo
+    `Z` diretamente. `now(UTC)` como fallback so no caso (nunca visto na pratica) do atributo
+    estar ausente ou mal formado."""
+    if timestamp_raw is None:
+        return datetime.now(UTC)
+    try:
+        return datetime.fromisoformat(timestamp_raw)
+    except ValueError:
+        return datetime.now(UTC)
+
+
+def _deadlock_process_session_id(process: ElementTree.Element | None) -> str | None:
+    if process is None:
+        return None
+    spid = process.get("spid")
+    return str(spid) if spid is not None else None
+
+
+def _deadlock_process_query_text(process: ElementTree.Element | None) -> str | None:
+    if process is None:
+        return None
+    inputbuf = process.find("./inputbuf")
+    text = inputbuf.text if inputbuf is not None else None
+    return mask_sql_literals(text) if text else None
+
+
 def _connect_and_fetch_execution_plan(
     connection: ConnectionParams,
     sql_hash: str,
@@ -650,6 +807,7 @@ def _build_blocking_events(
     blocked_object_rows: list[dict],
     transaction_id_by_session_id: dict[str, str],
     database_name_by_transaction_id: dict[str, str | None],
+    begin_time_by_transaction_id: dict[str, datetime | None],
     instance_id: UUID,
     collected_at: datetime,
 ) -> list[NormalizedBlockingEvent]:
@@ -694,6 +852,12 @@ def _build_blocking_events(
             return database_name_by_transaction_id.get(transaction_id)
         return None
 
+    def _transaction_begin_time(session_id: int) -> datetime | None:
+        transaction_id = transaction_id_by_session_id.get(str(session_id))
+        if transaction_id is None:
+            return None
+        return begin_time_by_transaction_id.get(transaction_id)
+
     events: list[NormalizedBlockingEvent] = []
     for row in session_rows:
         blocking_session_id = row["blocking_session_id"]
@@ -733,6 +897,8 @@ def _build_blocking_events(
                 blocked_transaction_id=transaction_id_by_session_id.get(str(row["session_id"])),
                 blocker_database_name=_database_name(blocking_session_id),
                 blocked_database_name=_database_name(row["session_id"]),
+                blocker_transaction_begin_time=_transaction_begin_time(blocking_session_id),
+                blocked_transaction_begin_time=_transaction_begin_time(row["session_id"]),
             )
         )
     return events
@@ -764,10 +930,16 @@ def _build_transaction_events(
     transaction_rows: list[dict],
     transaction_database_rows: list[dict],
     session_rows: list[dict],
+    blocking_events: list[NormalizedBlockingEvent],
     instance_id: UUID,
+    collected_at: datetime,
+    orphan_threshold_minutes: int,
 ) -> list[NormalizedTransactionEvent]:
-    """Transacoes ABERTAS neste ciclo — `_TRANSACTION_QUERY` (join `sys.dm_tran_session_
-    transactions`/`sys.dm_tran_active_transactions`). `transaction_uow` (GUID) so preenchido
+    """Transacoes DIGNAS DE NOTA neste ciclo — `_TRANSACTION_QUERY` (join `sys.dm_tran_session_
+    transactions`/`sys.dm_tran_active_transactions`) enumera toda transacao ABERTA, mas so vira
+    `NormalizedTransactionEvent` quando `compute_flag_reason` acha pelo menos 1 motivo (bloqueio,
+    erro, orfa) — redesenho pos-uso real: log de incidente retido, nao espelho de toda transacao
+    aberta (ver `app.collectors.transaction_flagging`). `transaction_uow` (GUID) so preenchido
     quando a transacao e uma distribuida promovida pelo MSDTC (unico caso em que correlacionar 2
     transacoes entre instancias e confiavel — ver `ARCHITECTURE_SPEC.md`). `last_error_code` e
     melhor esforco (`sys.dm_exec_requests.prev_error`, so em `session_rows` — so existe enquanto
@@ -776,6 +948,12 @@ def _build_transaction_events(
         str(row["transaction_id"]): row["database_name"] for row in transaction_database_rows
     }
     prev_error_by_session_id = {str(row["session_id"]): row["prev_error"] for row in session_rows}
+    blocking_involved_transaction_ids = {
+        tx_id
+        for e in blocking_events
+        for tx_id in (e.blocker_transaction_id, e.blocked_transaction_id)
+        if tx_id is not None
+    }
     events: list[NormalizedTransactionEvent] = []
     for row in transaction_rows:
         transaction_id = str(row["transaction_id"])
@@ -784,6 +962,17 @@ def _build_transaction_events(
         transaction_state_code = row["transaction_state"]
         transaction_uow = row["transaction_uow"]
         prev_error = prev_error_by_session_id.get(session_id)
+        last_error_code = int(prev_error) if prev_error is not None and prev_error != 0 else None
+        begin_time = row["transaction_begin_time"]
+        flag_reason = compute_flag_reason(
+            involved_in_blocking=transaction_id in blocking_involved_transaction_ids,
+            has_error=last_error_code is not None,
+            begin_time=begin_time,
+            now=collected_at,
+            orphan_threshold_minutes=orphan_threshold_minutes,
+        )
+        if flag_reason is None:
+            continue
         events.append(
             NormalizedTransactionEvent(
                 instance_id=instance_id,
@@ -799,13 +988,12 @@ def _build_transaction_events(
                     and str(transaction_uow) != "00000000-0000-0000-0000-000000000000"
                     else None
                 ),
-                begin_time=row["transaction_begin_time"],
+                begin_time=begin_time,
                 state=_TRANSACTION_STATE_LABELS.get(
                     transaction_state_code, f"código {transaction_state_code}"
                 ),
-                last_error_code=(
-                    int(prev_error) if prev_error is not None and prev_error != 0 else None
-                ),
+                last_error_code=last_error_code,
+                flag_reason=flag_reason,
             )
         )
     return events
@@ -969,6 +1157,7 @@ class SQLServerCollector:
             query_samples,
             blocking_events,
             transaction_events,
+            open_transaction_identifiers,
             product_version,
             version_major,
         ) = await asyncio.wait_for(
@@ -979,6 +1168,7 @@ class SQLServerCollector:
                 settings.collection_query_timeout_seconds,
                 settings.collection_max_rows,
                 collected_at,
+                settings.transaction_orphan_threshold_minutes,
             ),
             timeout=overall_timeout,
         )
@@ -992,6 +1182,7 @@ class SQLServerCollector:
             query_samples=query_samples,
             blocking_events=blocking_events,
             transaction_events=transaction_events,
+            open_transaction_identifiers=open_transaction_identifiers,
             engine_version=product_version,
             engine_version_major=version_major,
         )
@@ -1041,6 +1232,31 @@ class SQLServerCollector:
                 self._instance_id,
                 settings.collection_query_timeout_seconds,
                 settings.collection_max_rows,
+            ),
+            timeout=overall_timeout,
+        )
+
+    async def collect_deadlock_events(self) -> list[NormalizedDeadlockEvent]:
+        """Ring buffer `system_health` (Etapa 10, item 7) — sempre ativo por padrao desde o SQL
+        Server 2008, sem precisar criar nenhuma Extended Events session nova. Instancia inteira
+        numa unica chamada, retido/deduplicado pelo repositorio (o mesmo deadlock pode aparecer
+        em chamadas consecutivas enquanto ainda estiver no ring buffer)."""
+        if self._instance_id is None:
+            raise ValueError(
+                "SQLServerCollector.collect_deadlock_events requer instance_id de uma instancia "
+                "ja cadastrada."
+            )
+        settings = get_settings()
+        overall_timeout = (
+            self._connection_params.connect_timeout_seconds
+            + settings.collection_query_timeout_seconds
+        )
+        return await asyncio.wait_for(
+            asyncio.to_thread(
+                _connect_and_collect_deadlocks,
+                self._connection_params,
+                self._instance_id,
+                settings.collection_query_timeout_seconds,
             ),
             timeout=overall_timeout,
         )

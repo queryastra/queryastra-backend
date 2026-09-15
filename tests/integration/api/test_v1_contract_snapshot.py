@@ -46,6 +46,7 @@ EXPECTED_REST_PATHS = {
     "/api/v1/queries/users-by-day/{instance_id}",
     "/api/v1/queries/users-by-hour/{instance_id}",
     "/api/v1/waits-blocking/blocking/{instance_id}",
+    "/api/v1/waits-blocking/blocking/{instance_id}/incidents",
     "/api/v1/waits-blocking/blocking/{instance_id}/session/{session_id}",
     "/api/v1/waits-blocking/waits/{instance_id}",
     "/api/v1/alerts/rules",
@@ -57,6 +58,7 @@ EXPECTED_REST_PATHS = {
     "/api/v1/backup-status/{instance_id}",
     "/api/v1/transactions/{instance_id}",
     "/api/v1/transactions/{instance_id}/{transaction_identifier}",
+    "/api/v1/deadlocks/{instance_id}",
 }
 
 EXPECTED_WEBSOCKET_PATH = "/api/v1/ws/live"

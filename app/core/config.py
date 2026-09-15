@@ -128,6 +128,34 @@ class Settings(BaseSettings):
         default=86400, alias="BACKUP_STATUS_CHECK_INTERVAL_SECONDS"
     )
 
+    # Etapa 10, redesenho: por quanto tempo reter transacoes/bloqueios ja ENCERRADOS e deadlocks
+    # antes de expurgar de vez (app/workers/problem_events_retention_worker.py). Confirmado com o
+    # usuario: 90 dias — mesma ordem de grandeza ja usada no projeto para dado de detalhe
+    # (retention_policy de metric_samples e 30 dias; escolhido um valor maior aqui porque
+    # locks/transacoes/deadlocks problematicos sao eventos raros, nao volumosos como metricas).
+    problem_events_retention_days: int = Field(default=90, alias="PROBLEM_EVENTS_RETENTION_DAYS")
+    # Liga o worker de expurgo (ProblemEventsRetentionWorker) no lifespan do backend. Default
+    # false - mesma politica de seguranca dos demais workers.
+    problem_events_retention_worker_enabled: bool = Field(
+        default=False, alias="PROBLEM_EVENTS_RETENTION_WORKER_ENABLED"
+    )
+    # Intervalo (segundos) entre rodadas de expurgo. Default 1 dia - expurgo por idade nao precisa
+    # rodar com mais frequencia que isso.
+    problem_events_retention_check_interval_seconds: int = Field(
+        default=86400, alias="PROBLEM_EVENTS_RETENTION_CHECK_INTERVAL_SECONDS"
+    )
+
+    # Etapa 10, item 7 (Deadlocks) - liga o supervisor de extracao de deadlocks
+    # (DeadlockSupervisor, so SQL Server) no lifespan do backend. Default false - mesma politica
+    # de seguranca dos demais workers.
+    deadlock_supervisor_enabled: bool = Field(default=False, alias="DEADLOCK_SUPERVISOR_ENABLED")
+    # Intervalo (segundos) entre leituras do ring buffer system_health por instancia ativa.
+    # Default 5 minutos - o ring buffer ja retem historico recente sozinho, nao precisa ser
+    # raspado a cada poucos segundos como a coleta de alta frequencia.
+    deadlock_check_interval_seconds: int = Field(
+        default=300, alias="DEADLOCK_CHECK_INTERVAL_SECONDS"
+    )
+
     # Canal de e-mail de notificacao de alerta (`app.workers.alerting_worker`). Todos vazios por
     # padrao = canal desabilitado (nenhum envio real, mesmo default seguro do webhook). So
     # `alert_smtp_host` habilita o envio; `alert_email_to` (lista separada por virgula) precisa

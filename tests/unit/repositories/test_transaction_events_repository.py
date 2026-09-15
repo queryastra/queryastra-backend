@@ -1,7 +1,9 @@
 """Testes de `TransactionEventsRepository` contra o banco real `ab_xql_pm_dev`.
 
-Caso principal: `upsert_batch` reconcilia o conjunto inteiro de transacoes abertas por
-instancia a cada chamada — upsert nas vistas, DELETE das que sumiram (ja fecharam).
+Caso principal (redesenho pos-uso real — log de incidente retido): `upsert_batch` grava/atualiza
+as transacoes FLAGGED do ciclo (`flag_reason` uniao de todos os motivos ja vistos) e FECHA
+(`closed_at`, nunca deleta) qualquer transacao ja rastreada que nao esta mais entre as abertas do
+ciclo (`open_transaction_identifiers`).
 """
 
 from __future__ import annotations
@@ -33,8 +35,10 @@ async def test_upsert_batch_inserts_new_transactions(
                 begin_time=begin_time,
                 state="ativa",
                 last_error_code=None,
+                flag_reason="orfa",
             ),
         ],
+        {"tx-1"},
         datetime.now(UTC),
     )
 
@@ -43,13 +47,15 @@ async def test_upsert_batch_inserts_new_transactions(
     assert rows[0].transaction_identifier == "tx-1"
     assert rows[0].session_id == "55"
     assert rows[0].database_name == "AB_COBRANCA"
+    assert rows[0].flag_reason == "orfa"
+    assert rows[0].closed_at is None
 
 
-async def test_upsert_batch_removes_transactions_no_longer_open(
+async def test_upsert_batch_closes_transactions_no_longer_open(
     db_session: AsyncSession, test_instance: Instance
 ) -> None:
     """Reconciliacao: uma transacao vista num ciclo mas ausente no proximo (ja fechou) precisa
-    sumir da tabela — nao pode ficar "presa" pra sempre como se ainda estivesse aberta."""
+    ganhar `closed_at` — NUNCA deletada, so deixa de aparecer na listagem `open_only` (padrao)."""
     repo = TransactionEventsRepository(db_session)
     now = datetime.now(UTC)
     await repo.upsert_batch(
@@ -65,16 +71,114 @@ async def test_upsert_batch_removes_transactions_no_longer_open(
                 begin_time=now,
                 state="ativa",
                 last_error_code=None,
+                flag_reason="bloqueio",
             ),
         ],
+        {"tx-closes-soon"},
         now,
     )
     assert len(await repo.list_for_instance(test_instance.id, 10)) == 1
 
-    # Proximo ciclo: a transacao ja fechou, nao aparece mais na lista de abertas.
-    await repo.upsert_batch(test_instance.id, [], datetime.now(UTC))
+    # Proximo ciclo: a transacao ja fechou, nao aparece mais entre as abertas.
+    closed_at = datetime.now(UTC)
+    await repo.upsert_batch(test_instance.id, [], set(), closed_at)
 
     assert await repo.list_for_instance(test_instance.id, 10) == []
+    row = await repo.get_by_identifier(test_instance.id, "tx-closes-soon")
+    assert row is not None
+    assert row.closed_at is not None
+    assert row.state == "encerrada"
+    # Continua acessivel via list_for_instance(open_only=False) e get_by_identifier.
+    open_and_closed = await repo.list_for_instance(test_instance.id, 10, open_only=False)
+    assert [row.transaction_identifier for row in open_and_closed] == ["tx-closes-soon"]
+
+
+async def test_upsert_batch_does_not_close_transaction_still_open_but_not_reflagged(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """Uma transacao ja flagged que continua aberta mas nao e re-flagged neste ciclo (ex.:
+    bloqueio resolveu, ainda nao virou orfa) NAO deve ser fechada — so falta atualizacao ate ser
+    re-flagged ou realmente fechar."""
+    repo = TransactionEventsRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.upsert_batch(
+        test_instance.id,
+        [
+            NormalizedTransactionEvent(
+                instance_id=test_instance.id,
+                transaction_identifier="tx-still-open",
+                session_id="61",
+                database_name="AB_COBRANCA",
+                transaction_type="local",
+                transaction_uow=None,
+                begin_time=now,
+                state="ativa",
+                last_error_code=None,
+                flag_reason="bloqueio",
+            ),
+        ],
+        {"tx-still-open"},
+        now,
+    )
+
+    # Proximo ciclo: nao re-flagged (sem eventos), mas ainda ABERTA (open_transaction_identifiers).
+    await repo.upsert_batch(test_instance.id, [], {"tx-still-open"}, datetime.now(UTC))
+
+    row = await repo.get_by_identifier(test_instance.id, "tx-still-open")
+    assert row is not None
+    assert row.closed_at is None
+
+
+async def test_upsert_batch_merges_flag_reason_tags(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """`flag_reason` e uma UNIAO de todas as tags ja vistas, nao uma sobrescrita — uma transacao
+    que foi flagged por bloqueio num ciclo e por orfa depois preserva as duas."""
+    repo = TransactionEventsRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.upsert_batch(
+        test_instance.id,
+        [
+            NormalizedTransactionEvent(
+                instance_id=test_instance.id,
+                transaction_identifier="tx-multi-reason",
+                session_id="62",
+                database_name="AB_COBRANCA",
+                transaction_type="local",
+                transaction_uow=None,
+                begin_time=now,
+                state="ativa",
+                last_error_code=None,
+                flag_reason="bloqueio",
+            ),
+        ],
+        {"tx-multi-reason"},
+        now,
+    )
+
+    await repo.upsert_batch(
+        test_instance.id,
+        [
+            NormalizedTransactionEvent(
+                instance_id=test_instance.id,
+                transaction_identifier="tx-multi-reason",
+                session_id="62",
+                database_name="AB_COBRANCA",
+                transaction_type="local",
+                transaction_uow=None,
+                begin_time=now,
+                state="ativa",
+                last_error_code=None,
+                flag_reason="orfa",
+            ),
+        ],
+        {"tx-multi-reason"},
+        datetime.now(UTC),
+    )
+
+    row = await repo.get_by_identifier(test_instance.id, "tx-multi-reason")
+    assert row is not None
+    assert set(row.flag_reason.split(",")) == {"bloqueio", "orfa"}
 
 
 async def test_upsert_batch_preserves_first_seen_at_on_update(
@@ -96,8 +200,10 @@ async def test_upsert_batch_preserves_first_seen_at_on_update(
                 begin_time=begin_time,
                 state="ativa",
                 last_error_code=None,
+                flag_reason="orfa",
             ),
         ],
+        {"tx-long-lived"},
         first_observed,
     )
 
@@ -115,8 +221,10 @@ async def test_upsert_batch_preserves_first_seen_at_on_update(
                 begin_time=begin_time,
                 state="ativa",
                 last_error_code=None,
+                flag_reason="orfa",
             ),
         ],
+        {"tx-long-lived"},
         second_observed,
     )
 
@@ -151,6 +259,7 @@ async def test_list_for_instance_orders_oldest_first(
                 begin_time=now - timedelta(minutes=1),
                 state="ativa",
                 last_error_code=None,
+                flag_reason="orfa",
             ),
             NormalizedTransactionEvent(
                 instance_id=test_instance.id,
@@ -162,10 +271,92 @@ async def test_list_for_instance_orders_oldest_first(
                 begin_time=now - timedelta(hours=2),
                 state="ativa",
                 last_error_code=None,
+                flag_reason="orfa",
             ),
         ],
+        {"tx-recent", "tx-old"},
         now,
     )
 
     rows = await repo.list_for_instance(test_instance.id, 10)
     assert [row.transaction_identifier for row in rows] == ["tx-old", "tx-recent"]
+
+
+async def test_tag_open_transactions_by_session_adds_deadlock_tag(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """Correlacao assincrona com deadlock: uma transacao aberta com `session_id` batendo ganha
+    `"deadlock"` em `flag_reason`, sem perder a tag anterior."""
+    repo = TransactionEventsRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.upsert_batch(
+        test_instance.id,
+        [
+            NormalizedTransactionEvent(
+                instance_id=test_instance.id,
+                transaction_identifier="tx-deadlock-victim",
+                session_id="90",
+                database_name="AB_COBRANCA",
+                transaction_type="local",
+                transaction_uow=None,
+                begin_time=now,
+                state="ativa",
+                last_error_code=None,
+                flag_reason="bloqueio",
+            ),
+        ],
+        {"tx-deadlock-victim"},
+        now,
+    )
+
+    await repo.tag_open_transactions_by_session(test_instance.id, ["90"], "deadlock")
+
+    row = await repo.get_by_identifier(test_instance.id, "tx-deadlock-victim")
+    assert row is not None
+    assert set(row.flag_reason.split(",")) == {"bloqueio", "deadlock"}
+
+
+async def test_purge_closed_before_removes_only_old_closed_rows(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    repo = TransactionEventsRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.upsert_batch(
+        test_instance.id,
+        [
+            NormalizedTransactionEvent(
+                instance_id=test_instance.id,
+                transaction_identifier="tx-old-closed",
+                session_id="91",
+                database_name="AB_COBRANCA",
+                transaction_type="local",
+                transaction_uow=None,
+                begin_time=now,
+                state="ativa",
+                last_error_code=None,
+                flag_reason="orfa",
+            ),
+            NormalizedTransactionEvent(
+                instance_id=test_instance.id,
+                transaction_identifier="tx-still-open-2",
+                session_id="92",
+                database_name="AB_COBRANCA",
+                transaction_type="local",
+                transaction_uow=None,
+                begin_time=now,
+                state="ativa",
+                last_error_code=None,
+                flag_reason="orfa",
+            ),
+        ],
+        {"tx-old-closed", "tx-still-open-2"},
+        now,
+    )
+    # Fecha so "tx-old-closed" (mantendo "tx-still-open-2" aberta).
+    await repo.upsert_batch(test_instance.id, [], {"tx-still-open-2"}, now)
+
+    purged = await repo.purge_closed_before(datetime.now(UTC) + timedelta(seconds=1))
+
+    assert purged == 1
+    assert await repo.get_by_identifier(test_instance.id, "tx-old-closed") is None
+    assert await repo.get_by_identifier(test_instance.id, "tx-still-open-2") is not None

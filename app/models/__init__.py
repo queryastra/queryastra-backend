@@ -7,6 +7,8 @@ sao Fase 2 (`Docs/database-schema.md` §5) e ficam fora deste MVP de proposito.
 
 from app.models.alert import Alert, AlertNotification, AlertRule, AlertSilence
 from app.models.backup_status import BackupStatus
+from app.models.blocking_incident import BlockingIncident
+from app.models.deadlock_event import DeadlockEvent
 from app.models.instance import Instance, InstanceMaintenanceWindow
 from app.models.missing_index_suggestion import MissingIndexSuggestion
 from app.models.server import InstanceServer, Server
@@ -24,4 +26,6 @@ __all__ = [
     "MissingIndexSuggestion",
     "BackupStatus",
     "TransactionEvent",
+    "BlockingIncident",
+    "DeadlockEvent",
 ]

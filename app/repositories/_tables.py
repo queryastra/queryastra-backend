@@ -82,6 +82,15 @@ blocking_events_table = sa.Table(
     # NormalizedBlockingEvent para a logica de fallback do lado bloqueador ocioso.
     sa.Column("blocker_database_name", sa.Text(), nullable=True),
     sa.Column("blocked_database_name", sa.Text(), nullable=True),
+    # Inicio da transacao de cada lado — denormalizado dos mesmos dados de transacao ja lidos no
+    # ciclo (SQL Server: _TRANSACTION_QUERY; PostgreSQL: xact_start), sem query extra. Persistido
+    # aqui tambem (alem de em `blocking_incidents`) so para manter o log bruto por ciclo completo;
+    # o ciclo de vida do INCIDENTE em si (started_at/ended_at) vive em `blocking_incidents` — esta
+    # tabela e uma hypertable (particionada por `time`) e NAO suporta upsert-in-place por chave de
+    # negocio sem incluir `time` na constraint unica, o que descaracterizaria "started_at" (ver
+    # `app/models/blocking_incident.py`).
+    sa.Column("blocker_transaction_begin_time", sa.DateTime(timezone=True), nullable=True),
+    sa.Column("blocked_transaction_begin_time", sa.DateTime(timezone=True), nullable=True),
 )
 
 sql_exclusions_table = sa.Table(

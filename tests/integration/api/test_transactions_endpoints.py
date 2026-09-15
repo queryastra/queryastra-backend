@@ -41,6 +41,7 @@ async def test_list_transactions_flags_old_transaction_as_orphan_candidate(
                 begin_time=now - timedelta(hours=1),
                 state="ativa",
                 last_error_code=None,
+                flag_reason="orfa",
             ),
             NormalizedTransactionEvent(
                 instance_id=test_instance.id,
@@ -52,8 +53,10 @@ async def test_list_transactions_flags_old_transaction_as_orphan_candidate(
                 begin_time=now,
                 state="ativa",
                 last_error_code=None,
+                flag_reason="bloqueio",
             ),
         ],
+        {"tx-orphan", "tx-fresh"},
         now,
     )
 
@@ -84,8 +87,10 @@ async def test_get_transaction_returns_detail(
                 begin_time=now,
                 state="ativa",
                 last_error_code=547,
+                flag_reason="erro",
             ),
         ],
+        {"tx-detail"},
         now,
     )
 
