@@ -53,7 +53,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 from xml.etree import ElementTree
 
@@ -360,6 +360,26 @@ def _parse_major_version(product_version: str) -> int:
     return int(product_version.split(".")[0])
 
 
+def _as_utc(value: datetime | None, server_utc_offset: timedelta) -> datetime | None:
+    """`pymssql` devolve `datetime`/`datetime2` do SQL Server como datetime NAIVE (sem tzinfo) —
+    e, confirmado ao vivo, no horario LOCAL do servidor (ex.: America/Sao_Paulo, UTC-3), NAO em
+    UTC. So anexar `tzinfo=UTC` sem converter (primeira tentativa desta correcao) produzia uma
+    diferenca de ~3h em relacao ao `datetime.now(UTC)` deste processo, fazendo TODA transacao
+    parecer "orfa" instantaneamente (idade aparente inflada pela diferenca de fuso). Correcao:
+    soma `server_utc_offset` (= `GETUTCDATE() - GETDATE()`, calculado uma vez por ciclo em
+    `_connect_and_collect`) antes de anexar `tzinfo=UTC` — converte de verdade pro instante UTC
+    correto, nao so relabela.
+
+    Bug relacionado tambem encontrado ao vivo: SEM nenhum tratamento (nem relabel), comparar este
+    valor naive contra `datetime.now(UTC)` (aware) em `compute_flag_reason`/`_is_orphan_candidate`
+    levantava `TypeError: can't subtract offset-naive and offset-aware datetimes` a cada ciclo,
+    derrubando o ciclo de coleta INTEIRO (capturado pelo try/except do `PollingWorker`, sem
+    persistir NADA naquele ciclo — nao so transacoes)."""
+    if value is None or value.tzinfo is not None:
+        return value
+    return (value + server_utc_offset).replace(tzinfo=UTC)
+
+
 def _connect_and_collect(
     connection: ConnectionParams,
     instance_id: UUID,
@@ -415,6 +435,20 @@ def _connect_and_collect(
             version_major,
         )
 
+        # Offset entre o horario LOCAL do servidor (o que `transaction_begin_time`/demais
+        # colunas `datetime` naive de fato representam, confirmado ao vivo) e UTC de verdade —
+        # ver docstring de `_as_utc`. Calculado 1x por ciclo (a diferenca de fuso nao muda dentro
+        # de um mesmo ciclo de poll).
+        cursor.execute("SELECT GETUTCDATE() AS utc_now, GETDATE() AS local_now")
+        offset_row = cursor.fetchone()
+        server_utc_now = offset_row["utc_now"] if offset_row is not None else None
+        server_local_now = offset_row["local_now"] if offset_row is not None else None
+        server_utc_offset = (
+            server_utc_now - server_local_now
+            if isinstance(server_utc_now, datetime) and isinstance(server_local_now, datetime)
+            else timedelta(0)
+        )
+
         cursor.execute(_SESSION_ACTIVITY_QUERY)
         session_rows = list(cursor.fetchall())[:max_rows]
 
@@ -448,7 +482,7 @@ def _connect_and_collect(
     }
     begin_time_by_transaction_id: dict[str, datetime | None] = {
         str(row["transaction_id"]): (
-            row["transaction_begin_time"]
+            _as_utc(row["transaction_begin_time"], server_utc_offset)
             if isinstance(row["transaction_begin_time"], datetime)
             else None
         )
@@ -474,6 +508,7 @@ def _connect_and_collect(
         instance_id,
         collected_at,
         transaction_orphan_threshold_minutes,
+        server_utc_offset,
     )
     open_transaction_identifiers = [str(row["transaction_id"]) for row in transaction_rows]
     return (
@@ -934,6 +969,7 @@ def _build_transaction_events(
     instance_id: UUID,
     collected_at: datetime,
     orphan_threshold_minutes: int,
+    server_utc_offset: timedelta,
 ) -> list[NormalizedTransactionEvent]:
     """Transacoes DIGNAS DE NOTA neste ciclo — `_TRANSACTION_QUERY` (join `sys.dm_tran_session_
     transactions`/`sys.dm_tran_active_transactions`) enumera toda transacao ABERTA, mas so vira
@@ -963,7 +999,7 @@ def _build_transaction_events(
         transaction_uow = row["transaction_uow"]
         prev_error = prev_error_by_session_id.get(session_id)
         last_error_code = int(prev_error) if prev_error is not None and prev_error != 0 else None
-        begin_time = row["transaction_begin_time"]
+        begin_time = _as_utc(row["transaction_begin_time"], server_utc_offset)
         flag_reason = compute_flag_reason(
             involved_in_blocking=transaction_id in blocking_involved_transaction_ids,
             has_error=last_error_code is not None,

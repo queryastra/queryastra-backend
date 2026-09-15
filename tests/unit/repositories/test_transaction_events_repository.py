@@ -355,8 +355,11 @@ async def test_purge_closed_before_removes_only_old_closed_rows(
     # Fecha so "tx-old-closed" (mantendo "tx-still-open-2" aberta).
     await repo.upsert_batch(test_instance.id, [], {"tx-still-open-2"}, now)
 
-    purged = await repo.purge_closed_before(datetime.now(UTC) + timedelta(seconds=1))
+    # `purge_closed_before` age sobre a tabela inteira (sem filtro por instancia, por design —
+    # e um expurgo global por idade) — o banco de dev compartilhado pode ja ter outras linhas
+    # fechadas de testes/sessoes anteriores, entao so verificamos que ESTAS duas linhas terminam
+    # no estado esperado, sem exigir uma contagem exata de linhas removidas.
+    await repo.purge_closed_before(datetime.now(UTC) + timedelta(seconds=1))
 
-    assert purged == 1
     assert await repo.get_by_identifier(test_instance.id, "tx-old-closed") is None
     assert await repo.get_by_identifier(test_instance.id, "tx-still-open-2") is not None

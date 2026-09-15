@@ -86,6 +86,11 @@ class _FakeCursor:
     def execute(self, query: str) -> None:
         if "SERVERPROPERTY" in query:
             self._pending = [self._version_row]
+        elif "GETUTCDATE" in query:
+            # Offset 0 (mesmo instante pros dois lados) - testes usam datetimes naive ja
+            # tratados como UTC diretamente, sem diferenca de fuso a simular.
+            _now = datetime(2026, 1, 1)
+            self._pending = [{"utc_now": _now, "local_now": _now}]
         elif "dm_exec_requests" in query:
             self._pending = self._session_rows
         elif "dm_tran_locks" in query:

@@ -214,8 +214,11 @@ async def test_purge_ended_before_removes_only_old_ended_incidents(
         now,
     )
 
-    purged = await repo.purge_ended_before(datetime.now(UTC) + timedelta(seconds=1))
+    # `purge_ended_before` age sobre a tabela inteira (sem filtro por instancia, por design) — o
+    # banco de dev compartilhado pode ja ter outras linhas encerradas de sessoes anteriores,
+    # entao so verificamos o estado desta instancia (via `list_incidents`), sem exigir uma
+    # contagem exata de linhas removidas globalmente.
+    await repo.purge_ended_before(datetime.now(UTC) + timedelta(seconds=1))
 
-    assert purged == 1
     remaining = await repo.list_incidents(test_instance.id, 10)
     assert [r.blocker_session_id for r in remaining] == ["keep-b"]
