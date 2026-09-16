@@ -28,6 +28,11 @@ SQLSERVER_PAGE_LIFE_EXPECTANCY = "sqlserver_page_life_expectancy_seconds"
 SQLSERVER_PROCESSES_BLOCKED = "sqlserver_processes_blocked"
 SQLSERVER_TARGET_SERVER_MEMORY_KB = "sqlserver_target_server_memory_kb"
 SQLSERVER_TOTAL_SERVER_MEMORY_KB = "sqlserver_total_server_memory_kb"
+# `sys.dm_os_ring_buffers` (RING_BUFFER_SCHEDULER_MONITOR) — sem permissao especial alem de VIEW
+# SERVER STATE, ja mandatoria. So SQL Server: PostgreSQL nao expoe CPU do processo nem do SO via
+# SQL (sem view equivalente). Ambas em % (0-100).
+SQLSERVER_INSTANCE_CPU_PERCENT = "sqlserver_instance_cpu_percent"
+SQLSERVER_OS_CPU_PERCENT = "sqlserver_os_cpu_percent"
 
 COLLECTOR_CYCLE_DURATION_MS = "collector_cycle_duration_ms"
 COLLECTOR_CYCLE_ERROR_COUNT = "collector_cycle_error_count"

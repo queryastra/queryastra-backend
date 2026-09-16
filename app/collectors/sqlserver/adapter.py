@@ -76,6 +76,8 @@ from app.core.logging import get_logger
 from app.masking.sql_masking import mask_sql_literals
 from app.normalizers.metric_names import (
     SQLSERVER_ACTIVE_SESSION_COUNT,
+    SQLSERVER_INSTANCE_CPU_PERCENT,
+    SQLSERVER_OS_CPU_PERCENT,
     SQLSERVER_RAW_COUNTER_TO_METRIC_NAME,
 )
 from app.normalizers.models import (
@@ -213,6 +215,36 @@ _PERFORMANCE_COUNTERS_QUERY = """
           'Target Server Memory (KB)', 'Total Server Memory (KB)'
       )
       AND RTRIM(instance_name) = ''
+"""
+
+# Consulta oficial da Microsoft pra CPU via o ring buffer de scheduler monitor (atualizado a cada
+# ~1 minuto pelo proprio motor, independente do intervalo de poll) — sem permissao alem de VIEW
+# SERVER STATE (ja mandatoria). `SystemIdle` = % ocioso do SO inteiro; `SQLProcessUtilization` = %
+# do SO consumido pelo PROCESSO do SQL Server (a instancia). "CPU do SO" (gráfico 2 pedido pelo
+# usuário) = 100 - SystemIdle (todo consumo, SQL Server + outros processos) — o ring buffer só
+# guarda um histórico curto (ring buffer, não persistente), por isso este valor precisa ser
+# amostrado a cada ciclo de poll como qualquer outra métrica, não recuperado retroativamente.
+_CPU_UTILIZATION_QUERY = """
+    SELECT TOP (1)
+        SQLProcessUtilization,
+        SystemIdle
+    FROM (
+        SELECT
+            record.value('(./Record/@id)[1]', 'int') AS record_id,
+            record.value(
+                '(./Record/SchedulerMonitorEvent/SystemHealth/SystemIdle)[1]', 'int'
+            ) AS SystemIdle,
+            record.value(
+                '(./Record/SchedulerMonitorEvent/SystemHealth/ProcessUtilization)[1]', 'int'
+            ) AS SQLProcessUtilization
+        FROM (
+            SELECT CONVERT(xml, record) AS record
+            FROM sys.dm_os_ring_buffers
+            WHERE ring_buffer_type = N'RING_BUFFER_SCHEDULER_MONITOR'
+              AND record LIKE '%<SystemHealth>%'
+        ) AS raw_records
+    ) AS parsed
+    ORDER BY record_id DESC
 """
 
 # Baseado no exemplo oficial da Microsoft para este exato caso de uso (Docs/collector-queries.md
@@ -468,6 +500,9 @@ def _connect_and_collect(
         cursor.execute(_PERFORMANCE_COUNTERS_QUERY)
         counter_rows = list(cursor.fetchall())[:max_rows]
 
+        cursor.execute(_CPU_UTILIZATION_QUERY)
+        cpu_row = cursor.fetchone()
+
         cursor.close()
     finally:
         conn.close()
@@ -500,7 +535,9 @@ def _connect_and_collect(
         instance_id,
         collected_at,
     )
-    metric_samples = _build_metric_samples(session_rows, counter_rows, instance_id, collected_at)
+    metric_samples = _build_metric_samples(
+        session_rows, counter_rows, cpu_row, instance_id, collected_at
+    )
     transaction_events = _build_transaction_events(
         transaction_rows,
         transaction_database_rows,
@@ -1042,7 +1079,22 @@ def _build_transaction_events(
     quando a transacao e uma distribuida promovida pelo MSDTC (unico caso em que correlacionar 2
     transacoes entre instancias e confiavel — ver `ARCHITECTURE_SPEC.md`). `last_error_code` e
     melhor esforco (`sys.dm_exec_requests.prev_error`, so em `session_rows` — so existe enquanto
-    a sessao ainda tem request ativa; ausente quando a transacao ja ficou idle apos o erro)."""
+    a sessao ainda tem request ativa; ausente quando a transacao ja ficou idle apos o erro).
+
+    BUG REAL corrigido (relatado pelo usuario ao vivo, tela de Transacoes travando com volume
+    alto): `prev_error` NAO significa "esta transacao falhou/deu rollback" — e' literalmente "o
+    numero do ultimo erro, de qualquer severidade, levantado por QUALQUER statement da sessao",
+    incluindo mensagens rotineiras sem nenhum impacto (confirmado ao vivo contra
+    `sys.messages`: codigo 16945 = "The cursor was not declared.", severidade 16, tipicamente
+    codigo defensivo de limpeza de cursor que nao chegou a ser aberto — nao aborta a transacao,
+    nao causa rollback, a transacao seguinte fecha normalmente). Como a severidade sozinha NAO
+    distingue isso de erro real (violacao de constraint tambem e' severidade 14-16, mesma faixa),
+    nao ha como confirmar de forma confiavel que UM erro especifico derrubou a transacao sem
+    Extended Events (`sqlserver.error_reported` correlacionado a rollback - ja registrado como
+    trabalho futuro, nao implementado). Por isso `has_error` NUNCA mais alimenta `flag_reason`
+    (nao e' mais motivo pra gravar uma transacao sozinho) - `last_error_code` continua capturado
+    e exibido, mas so como contexto informativo quando a transacao ja foi gravada por outro
+    motivo (bloqueio/orfa/deadlock)."""
     database_name_by_transaction_id = {
         str(row["transaction_id"]): row["database_name"] for row in transaction_database_rows
     }
@@ -1065,7 +1117,10 @@ def _build_transaction_events(
         begin_time = _as_utc(row["transaction_begin_time"], server_utc_offset)
         flag_reason = compute_flag_reason(
             involved_in_blocking=transaction_id in blocking_involved_transaction_ids,
-            has_error=last_error_code is not None,
+            # `prev_error` nao e' confiavel como sinal de falha real (ver docstring da funcao) —
+            # nunca sozinho motivo pra gravar a transacao. `last_error_code` continua no evento
+            # normalizado abaixo, so como contexto quando ha outro motivo de flag.
+            has_error=False,
             begin_time=begin_time,
             now=collected_at,
             orphan_threshold_minutes=orphan_threshold_minutes,
@@ -1101,6 +1156,7 @@ def _build_transaction_events(
 def _build_metric_samples(
     session_rows: list[dict],
     counter_rows: list[dict],
+    cpu_row: dict | None,
     instance_id: UUID,
     collected_at: datetime,
 ) -> list[NormalizedMetricSample]:
@@ -1113,6 +1169,29 @@ def _build_metric_samples(
             value=float(len(session_rows)),
         )
     ]
+    if cpu_row is not None:
+        sql_process_utilization = cpu_row.get("SQLProcessUtilization")
+        system_idle = cpu_row.get("SystemIdle")
+        if sql_process_utilization is not None:
+            samples.append(
+                NormalizedMetricSample(
+                    time=collected_at,
+                    target_type="instance",
+                    target_id=instance_id,
+                    metric_name=SQLSERVER_INSTANCE_CPU_PERCENT,
+                    value=float(sql_process_utilization),
+                )
+            )
+        if system_idle is not None:
+            samples.append(
+                NormalizedMetricSample(
+                    time=collected_at,
+                    target_type="instance",
+                    target_id=instance_id,
+                    metric_name=SQLSERVER_OS_CPU_PERCENT,
+                    value=float(100 - system_idle),
+                )
+            )
     for row in counter_rows:
         counter_name = str(row["counter_name"]).strip()
         metric_name = SQLSERVER_RAW_COUNTER_TO_METRIC_NAME.get(counter_name)

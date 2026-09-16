@@ -7,7 +7,7 @@ Usa um fake de `pymssql.connect`/cursor (`as_dict=True`), sem I/O de rede real, 
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
@@ -73,6 +73,7 @@ class _FakeCursor:
         blocked_object_rows: list,
         transaction_rows: list,
         transaction_database_rows: list,
+        cpu_row: dict[str, Any] | None = None,
     ) -> None:
         self._version_row = version_row
         self._session_rows = session_rows
@@ -81,6 +82,7 @@ class _FakeCursor:
         self._blocked_object_rows = blocked_object_rows
         self._transaction_rows = transaction_rows
         self._transaction_database_rows = transaction_database_rows
+        self._cpu_row = cpu_row
         self._pending: list[dict[str, Any]] = []
 
     def execute(self, query: str) -> None:
@@ -103,6 +105,10 @@ class _FakeCursor:
             self._pending = self._all_session_rows
         elif "dm_os_performance_counters" in query:
             self._pending = self._counter_rows
+        elif "dm_os_ring_buffers" in query:
+            # Sem linha por padrão (ring buffer vazio/instância recém-iniciada) — `cpu_row=None`
+            # é tratado como ausência honesta, não erro.
+            self._pending = [self._cpu_row] if self._cpu_row is not None else []
         else:
             raise AssertionError(f"execute inesperado: {query}")
 
@@ -126,6 +132,7 @@ class _FakeConnection:
         blocked_object_rows: list,
         transaction_rows: list,
         transaction_database_rows: list,
+        cpu_row: dict[str, Any] | None = None,
     ) -> None:
         self._version_row = version_row
         self._session_rows = session_rows
@@ -134,6 +141,7 @@ class _FakeConnection:
         self._blocked_object_rows = blocked_object_rows
         self._transaction_rows = transaction_rows
         self._transaction_database_rows = transaction_database_rows
+        self._cpu_row = cpu_row
         self.closed = False
 
     def cursor(self, as_dict: bool = False) -> _FakeCursor:
@@ -146,6 +154,7 @@ class _FakeConnection:
             self._blocked_object_rows,
             self._transaction_rows,
             self._transaction_database_rows,
+            self._cpu_row,
         )
 
     def close(self) -> None:
@@ -161,6 +170,7 @@ def _patch_connect(
     blocked_object_rows: list | None = None,
     transaction_rows: list | None = None,
     transaction_database_rows: list | None = None,
+    cpu_row: dict[str, Any] | None = None,
 ) -> _FakeConnection:
     # `all_session_rows` default: identidade equivalente a `session_rows` (converte cada linha de
     # request pras 4 colunas de `_ALL_SESSIONS_QUERY`) — suficiente pra maioria dos testes, que
@@ -183,6 +193,7 @@ def _patch_connect(
         blocked_object_rows if blocked_object_rows is not None else [],
         transaction_rows if transaction_rows is not None else [],
         transaction_database_rows if transaction_database_rows is not None else [],
+        cpu_row,
     )
 
     def fake_connect(**kwargs: object) -> _FakeConnection:
@@ -198,6 +209,88 @@ _COUNTER_ROWS = [
     {"counter_name": "Target Server Memory (KB)", "cntr_value": 1024000},
     {"counter_name": "Total Server Memory (KB)", "cntr_value": 512000},
 ]
+
+
+async def test_collect_parses_cpu_utilization_from_ring_buffer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Etapa 10, itens 12/13: `sqlserver_instance_cpu_percent` vem direto do ring buffer
+    (`SQLProcessUtilization`); `sqlserver_os_cpu_percent` e' `100 - SystemIdle` (todo consumo do
+    SO, nao so o processo do SQL Server)."""
+    _patch_connect(
+        monkeypatch,
+        version_row={"product_version": "16.0.1000.6"},
+        session_rows=[],
+        counter_rows=_COUNTER_ROWS,
+        cpu_row={"SQLProcessUtilization": 12, "SystemIdle": 80},
+    )
+
+    collector = SQLServerCollector(connection=_CONNECTION, instance_id=uuid4())
+    result = await collector.collect()
+
+    by_name = {sample.metric_name: sample.value for sample in result.metric_samples}
+    assert by_name["sqlserver_instance_cpu_percent"] == 12.0
+    assert by_name["sqlserver_os_cpu_percent"] == 20.0
+
+
+async def test_collect_does_not_flag_transaction_for_a_benign_prev_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bug real corrigido (relatado ao vivo pelo usuario, tela de Transacoes travando com volume
+    alto): `prev_error` sozinho (sem bloqueio, sem estar orfa) nao deve mais gerar um
+    transaction_event - codigo 16945 ("The cursor was not declared.", severidade 16, confirmado
+    ao vivo contra sys.messages) e' rotineiro e nao indica que a transacao de fato falhou/deu
+    rollback (ver docstring de `_build_transaction_events`)."""
+    just_started = datetime.now(UTC).replace(tzinfo=None)
+    session_rows = [
+        _request_row(
+            session_id=70, query_text="EXEC dbo.some_proc", transaction_id=999, prev_error=16945
+        ),
+    ]
+    transaction_rows = [
+        {
+            "transaction_id": 999,
+            "session_id": 70,
+            "transaction_begin_time": just_started,
+            "transaction_type": 1,
+            "transaction_state": 2,
+            "transaction_uow": None,
+        }
+    ]
+    transaction_database_rows = [{"transaction_id": 999, "database_name": "app_db"}]
+    _patch_connect(
+        monkeypatch,
+        version_row={"product_version": "16.0.1000.6"},
+        session_rows=session_rows,
+        counter_rows=_COUNTER_ROWS,
+        transaction_rows=transaction_rows,
+        transaction_database_rows=transaction_database_rows,
+    )
+
+    collector = SQLServerCollector(connection=_CONNECTION, instance_id=uuid4())
+    result = await collector.collect()
+
+    assert result.transaction_events == []
+
+
+async def test_collect_omits_cpu_metrics_when_ring_buffer_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ring buffer vazio (instancia recem-iniciada) - ausencia honesta, nao um valor inventado
+    (ex.: 0%, que pareceria "CPU ociosa" quando na verdade e' "sem dado")."""
+    _patch_connect(
+        monkeypatch,
+        version_row={"product_version": "16.0.1000.6"},
+        session_rows=[],
+        counter_rows=_COUNTER_ROWS,
+    )
+
+    collector = SQLServerCollector(connection=_CONNECTION, instance_id=uuid4())
+    result = await collector.collect()
+
+    names = {sample.metric_name for sample in result.metric_samples}
+    assert "sqlserver_instance_cpu_percent" not in names
+    assert "sqlserver_os_cpu_percent" not in names
 
 
 async def test_collect_treats_negative_blocking_session_id_as_no_block(
