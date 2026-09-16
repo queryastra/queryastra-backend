@@ -318,6 +318,19 @@ async def list_instances(
     return summaries
 
 
+@router.delete("/{instance_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_instance(
+    instance_id: UUID,
+    repository: Annotated[InstancesRepository, Depends(get_instances_repository)],
+) -> None:
+    """Exclui o cadastro da instância e seus dados dependentes."""
+    deleted = await repository.delete(instance_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Instancia nao encontrada."
+        )
+
+
 @router.get("/{instance_id}", response_model=InstanceDetailResponse)
 async def get_instance(
     instance_id: UUID,

@@ -52,6 +52,15 @@ class InstancesRepository(BaseRepository):
         await self._session.refresh(instance)
         return instance
 
+    async def delete(self, instance_id: UUID) -> bool:
+        """Remove uma instância e os dados dependentes protegidos por cascade."""
+        instance = await self.get_by_id(instance_id)
+        if instance is None:
+            return False
+        await self._session.delete(instance)
+        await self._session.commit()
+        return True
+
     async def update_settings(
         self,
         instance_id: UUID,
