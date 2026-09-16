@@ -27,8 +27,9 @@ linhas truncado em Python apos o fetch (`settings.collection_max_rows`):
       contra o servidor monitorado. Sentinela negativo (-2 a -5) = bloqueador nao determinavel —
       NAO tratado como erro, so ignorado (nenhum `NormalizedBlockingEvent` gerado para essa
       linha). `_ALL_SESSIONS_QUERY` identifica bloqueadores OCIOSOS (sem request ativa);
-      `_BLOCKED_OBJECT_QUERY` (`sys.dm_tran_locks`/`sys.partitions`) resolve o objeto bloqueado,
-      melhor esforco.
+      `_BLOCKED_LOCKS_QUERY`/`_resolve_hobt_object_names` (`sys.dm_tran_locks`/`sys.partitions`,
+      esta última com uma conexão curta por banco quando necessário) resolve o objeto bloqueado,
+      melhor esforço.
     - `sys.dm_os_wait_stats`/`sys.dm_exec_session_wait_stats` (cumulativo, via `LAG()`): **nao
       implementado** (corte de escopo) — so o `wait_type`/`wait_time` instantaneo de
       `sys.dm_exec_requests` por sessao ativa.
@@ -54,7 +55,7 @@ import asyncio
 import hashlib
 import time
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 from xml.etree import ElementTree
 
@@ -152,27 +153,103 @@ _ALL_SESSIONS_QUERY = """
 # Etapa 9 — resolve o OBJETO bloqueado (nao so o recurso bruto de `wait_resource`, ja selecionado
 # em `_SESSION_ACTIVITY_QUERY`) pra sessoes atualmente esperando por um lock (`request_status =
 # 'WAIT'`). Padrao oficial da Microsoft: pra `resource_type = 'OBJECT'`,
-# `resource_associated_entity_id` JA E o `object_id` (usavel direto em `OBJECT_NAME`); pra
-# `'PAGE'/'KEY'/'RID'`, e o `hobt_id` — precisa de `sys.partitions` pra achar o `object_id`.
-# `sys.partitions` e uma view POR BANCO (so enxerga o banco atual da conexao) — o join com
-# `resource_database_id = DB_ID()` deliberadamente so resolve `blocked_object` quando o lock e no
-# mesmo banco da conexao; bloqueio cross-database (banco monitorado != banco da conexao) fica com
-# `blocked_object = NULL`, so o `wait_resource` bruto (corte de escopo documentado, nao um bug).
-_BLOCKED_OBJECT_QUERY = """
+# `resource_associated_entity_id` JA E o `object_id` (`OBJECT_NAME` resolve cross-database direto,
+# passando `resource_database_id` — sem depender do banco da conexao). Pra `'PAGE'/'KEY'/'RID'`,
+# `resource_associated_entity_id` e o `hobt_id` — so resolvivel via `sys.partitions`, uma view POR
+# BANCO (sem variante cross-database) - BUG REAL CORRIGIDO (relatado pelo usuario ao vivo,
+# `blocked_object` sempre None mesmo pra um lock comum de RID/heap): a versao anterior desta
+# query juntava `sys.partitions` (sempre escopada ao banco ATUAL DA CONEXAO) contra
+# `resource_database_id = DB_ID()` - `DB_ID()` e o banco da conexao (tipicamente o banco padrao
+# do login, nao necessariamente o banco onde o lock realmente esta), entao o join praticamente
+# NUNCA batia pra bancos de usuario reais. Corrigido: esta query so devolve o dado bruto
+# (resolve OBJECT direto, que nao precisa de sys.partitions); PAGE/KEY/RID sao resolvidos depois,
+# em Python, com uma conexao curta NO BANCO CERTO (`_resolve_hobt_object_names`) - so pros bancos
+# que de fato tem um hobt_id pendente agora (tipicamente 0-1 banco por ciclo, nao todos).
+_BLOCKED_LOCKS_QUERY = """
     SELECT
         l.request_session_id AS session_id,
         l.resource_type,
-        CASE l.resource_type
-            WHEN 'OBJECT' THEN OBJECT_NAME(l.resource_associated_entity_id, l.resource_database_id)
-            ELSE OBJECT_NAME(p.object_id, l.resource_database_id)
-        END AS blocked_object
+        l.resource_database_id,
+        DB_NAME(l.resource_database_id) AS resource_database_name,
+        l.resource_associated_entity_id,
+        CASE WHEN l.resource_type = 'OBJECT'
+             THEN OBJECT_NAME(l.resource_associated_entity_id, l.resource_database_id)
+             ELSE NULL
+        END AS resolved_object_name
     FROM sys.dm_tran_locks AS l
-    LEFT JOIN sys.partitions AS p
-        ON l.resource_type IN ('PAGE', 'KEY', 'RID')
-        AND l.resource_database_id = DB_ID()
-        AND p.hobt_id = l.resource_associated_entity_id
     WHERE l.request_status = 'WAIT'
+      AND l.resource_type IN ('OBJECT', 'PAGE', 'KEY', 'RID')
 """
+
+
+def _resolve_hobt_object_names(
+    connection: ConnectionParams,
+    query_timeout_seconds: float,
+    hobt_ids_by_database: dict[str, set[int]],
+) -> dict[tuple[str, int], str | None]:
+    """Resolve nome de objeto pra locks PAGE/KEY/RID (chave = `hobt_id`) — `sys.partitions` so
+    enxerga o banco ATUAL da conexao, sem equivalente cross-database, entao conecta uma vez por
+    banco com pelo menos 1 `hobt_id` pendente agora (nao itera todos os bancos da instancia -
+    normalmente 0-1 conexao extra por ciclo, so quando ha bloqueio de verdade acontecendo). Melhor
+    esforco: falha de conexao/permissao num banco especifico so deixa aquele lock sem
+    `blocked_object` (o `wait_resource` bruto continua disponivel), nao derruba o ciclo inteiro.
+
+    Verificado ao vivo (Autklinux20/21): resolve corretamente o nome real da tabela pra locks
+    KEY/RID em bancos de usuario de verdade — o bug antigo (join contra `DB_ID()`, banco da
+    conexao, nunca o banco do lock) tornava isso impossivel pra qualquer banco != o da conexao.
+    `blocked_object` ainda pode sair `None` ocasionalmente mesmo com a correcao: a resolucao roda
+    numa SEGUNDA consulta (`sys.dm_tran_locks` primeiro, esta depois), e um lock pode mudar/ser
+    liberado no intervalo entre as duas — limitacao inerente de qualquer abordagem por snapshot
+    contra estado volatil (mesma familia de ressalva ja documentada pra arvore de bloqueio, "foto
+    do ultimo ciclo de poll"), nao um bug desta funcao.
+    """
+    login_timeout_seconds = int(connection.connect_timeout_seconds)
+    result: dict[tuple[str, int], str | None] = {}
+    for database_name, hobt_ids in hobt_ids_by_database.items():
+        if not hobt_ids:
+            continue
+        try:
+            conn = pymssql.connect(
+                server=connection.host,
+                port=str(connection.port),
+                user=connection.username,
+                password=connection.secret_value,
+                database=database_name,
+                timeout=int(query_timeout_seconds),
+                login_timeout=login_timeout_seconds,
+            )
+        except Exception:
+            logger.warning(
+                "Falha ao conectar no banco %s pra resolver objeto bloqueado - melhor esforco, "
+                "wait_resource bruto continua disponivel",
+                database_name,
+                exc_info=True,
+            )
+            continue
+        try:
+            cursor = conn.cursor(as_dict=True)
+            placeholders = ",".join(["%s"] * len(hobt_ids))
+            cursor.execute(
+                f"SELECT hobt_id, OBJECT_NAME(object_id) AS object_name "
+                f"FROM sys.partitions WHERE hobt_id IN ({placeholders})",
+                tuple(hobt_ids),
+            )
+            for row in cursor.fetchall():
+                object_name = row["object_name"]
+                result[(database_name, cast(int, row["hobt_id"]))] = (
+                    str(object_name) if object_name is not None else None
+                )
+        except Exception:
+            logger.warning(
+                "Falha ao resolver nome de objeto (hobt_id) no banco %s - melhor esforco, "
+                "wait_resource bruto continua disponivel",
+                database_name,
+                exc_info=True,
+            )
+        finally:
+            conn.close()
+    return result
+
 
 # Etapa 10 (rastreamento de transacoes) — toda transacao ABERTA no ciclo, join documentado pela
 # propria Microsoft (`sys.dm_tran_session_transactions` linka pra `sys.dm_tran_active_
@@ -488,8 +565,8 @@ def _connect_and_collect(
         cursor.execute(_ALL_SESSIONS_QUERY)
         all_session_rows = list(cursor.fetchall())[:max_rows]
 
-        cursor.execute(_BLOCKED_OBJECT_QUERY)
-        blocked_object_rows = list(cursor.fetchall())[:max_rows]
+        cursor.execute(_BLOCKED_LOCKS_QUERY)
+        blocked_lock_rows = list(cursor.fetchall())[:max_rows]
 
         cursor.execute(_TRANSACTION_QUERY)
         transaction_rows = list(cursor.fetchall())[:max_rows]
@@ -506,6 +583,39 @@ def _connect_and_collect(
         cursor.close()
     finally:
         conn.close()
+
+    # Resolve PAGE/KEY/RID (hobt_id) por banco — so pros bancos que de fato tem 1+ lock pendente
+    # agora (ver docstring de `_resolve_hobt_object_names`). OBJECT ja vem resolvido direto na
+    # query principal (`resolved_object_name`), sem precisar de conexao extra.
+    hobt_ids_by_database: dict[str, set[int]] = {}
+    for row in blocked_lock_rows:
+        database_name_raw = row["resource_database_name"]
+        if row["resource_type"] == "OBJECT" or database_name_raw is None:
+            continue
+        hobt_ids_by_database.setdefault(str(database_name_raw), set()).add(
+            cast(int, row["resource_associated_entity_id"])
+        )
+    hobt_object_names = (
+        _resolve_hobt_object_names(connection, query_timeout_seconds, hobt_ids_by_database)
+        if hobt_ids_by_database
+        else {}
+    )
+    blocked_object_rows = [
+        {
+            "session_id": row["session_id"],
+            "blocked_object": (
+                row["resolved_object_name"]
+                if row["resource_type"] == "OBJECT"
+                else hobt_object_names.get(
+                    (
+                        str(row["resource_database_name"]),
+                        cast(int, row["resource_associated_entity_id"]),
+                    )
+                )
+            ),
+        }
+        for row in blocked_lock_rows
+    ]
 
     transaction_id_by_session_id = {
         str(row["session_id"]): str(row["transaction_id"]) for row in transaction_rows
@@ -956,7 +1066,8 @@ def _build_blocking_events(
     request ativa) e cai pra `all_session_rows` (identidade de QUALQUER sessao conectada) quando
     a sessao nao tem request ativa — o caso do bloqueador ocioso, que de outra forma ficaria sem
     nenhuma identidade. `blocked_object`/`blocked_wait_resource` sao melhor esforco (ver
-    `_BLOCKED_OBJECT_QUERY`/docstring de `NormalizedBlockingEvent`) — so preenchidos pro lado
+    `_BLOCKED_LOCKS_QUERY`/`_resolve_hobt_object_names`/docstring de `NormalizedBlockingEvent`) —
+    so preenchidos pro lado
     BLOQUEADO (e quem esta de fato esperando por um recurso).
 
     Banco de dados (`blocker_database_name`/`blocked_database_name`, a pedido explicito do

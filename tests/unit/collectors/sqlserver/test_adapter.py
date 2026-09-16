@@ -74,6 +74,7 @@ class _FakeCursor:
         transaction_rows: list,
         transaction_database_rows: list,
         cpu_row: dict[str, Any] | None = None,
+        partitions_rows: list | None = None,
     ) -> None:
         self._version_row = version_row
         self._session_rows = session_rows
@@ -83,9 +84,10 @@ class _FakeCursor:
         self._transaction_rows = transaction_rows
         self._transaction_database_rows = transaction_database_rows
         self._cpu_row = cpu_row
+        self._partitions_rows = partitions_rows or []
         self._pending: list[dict[str, Any]] = []
 
-    def execute(self, query: str) -> None:
+    def execute(self, query: str, params: tuple[object, ...] | None = None) -> None:
         if "SERVERPROPERTY" in query:
             self._pending = [self._version_row]
         elif "GETUTCDATE" in query:
@@ -95,6 +97,11 @@ class _FakeCursor:
             self._pending = [{"utc_now": _now, "local_now": _now}]
         elif "dm_exec_requests" in query:
             self._pending = self._session_rows
+        elif "sys.partitions" in query:
+            # `_resolve_hobt_object_names` - conexao curta POR BANCO reaproveita o mesmo fake
+            # (monkeypatch ignora os kwargs de `pymssql.connect`), entao so precisa de mais um
+            # branch de dispatch, nao de uma segunda `_FakeConnection`.
+            self._pending = self._partitions_rows
         elif "dm_tran_locks" in query:
             self._pending = self._blocked_object_rows
         elif "dm_tran_database_transactions" in query:
@@ -133,6 +140,7 @@ class _FakeConnection:
         transaction_rows: list,
         transaction_database_rows: list,
         cpu_row: dict[str, Any] | None = None,
+        partitions_rows: list | None = None,
     ) -> None:
         self._version_row = version_row
         self._session_rows = session_rows
@@ -142,6 +150,7 @@ class _FakeConnection:
         self._transaction_rows = transaction_rows
         self._transaction_database_rows = transaction_database_rows
         self._cpu_row = cpu_row
+        self._partitions_rows = partitions_rows
         self.closed = False
 
     def cursor(self, as_dict: bool = False) -> _FakeCursor:
@@ -155,6 +164,7 @@ class _FakeConnection:
             self._transaction_rows,
             self._transaction_database_rows,
             self._cpu_row,
+            self._partitions_rows,
         )
 
     def close(self) -> None:
@@ -171,6 +181,7 @@ def _patch_connect(
     transaction_rows: list | None = None,
     transaction_database_rows: list | None = None,
     cpu_row: dict[str, Any] | None = None,
+    partitions_rows: list | None = None,
 ) -> _FakeConnection:
     # `all_session_rows` default: identidade equivalente a `session_rows` (converte cada linha de
     # request pras 4 colunas de `_ALL_SESSIONS_QUERY`) — suficiente pra maioria dos testes, que
@@ -194,6 +205,7 @@ def _patch_connect(
         transaction_rows if transaction_rows is not None else [],
         transaction_database_rows if transaction_database_rows is not None else [],
         cpu_row,
+        partitions_rows,
     )
 
     def fake_connect(**kwargs: object) -> _FakeConnection:
@@ -388,8 +400,11 @@ async def test_collect_populates_blocked_object_from_dm_tran_locks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Etapa 9 — `blocked_object`/`blocked_wait_resource` vem de `wait_resource` (bruto, ja em
-    `_SESSION_ACTIVITY_QUERY`) e `sys.dm_tran_locks`/`sys.partitions` (nome resolvido) — so pro
-    lado BLOQUEADO."""
+    `_SESSION_ACTIVITY_QUERY`) e `sys.dm_tran_locks` (tipo KEY/PAGE/RID: precisa de uma segunda
+    consulta a `sys.partitions`, NO BANCO CERTO, pra resolver hobt_id -> nome do objeto — bug real
+    corrigido: a versao anterior juntava `sys.partitions` contra `DB_ID()` (banco da conexao, nao
+    o banco do lock), entao nunca resolvia pra bancos de usuario de verdade) — so pro lado
+    BLOQUEADO."""
     session_rows = [
         _request_row(session_id=100, query_text="UPDATE t SET a=1", blocking_session_id=0),
         _request_row(
@@ -399,7 +414,60 @@ async def test_collect_populates_blocked_object_from_dm_tran_locks(
             wait_resource="KEY: 5:72057594051690496 (ffeb27d6a833)",
         ),
     ]
-    blocked_object_rows = [{"session_id": 101, "resource_type": "KEY", "blocked_object": "dbo.t"}]
+    blocked_object_rows = [
+        {
+            "session_id": 101,
+            "resource_type": "KEY",
+            "resource_database_name": "app_db",
+            "resource_associated_entity_id": 72057594051690496,
+            "resolved_object_name": None,
+        }
+    ]
+    partitions_rows = [{"hobt_id": 72057594051690496, "object_name": "dbo.t"}]
+    _patch_connect(
+        monkeypatch,
+        version_row={"product_version": "16.0.1000.6"},
+        session_rows=session_rows,
+        counter_rows=_COUNTER_ROWS,
+        blocked_object_rows=blocked_object_rows,
+        partitions_rows=partitions_rows,
+    )
+
+    collector = SQLServerCollector(connection=_CONNECTION, instance_id=uuid4())
+    result = await collector.collect()
+
+    assert len(result.blocking_events) == 1
+    event = result.blocking_events[0]
+    assert event.blocked_object == "dbo.t"
+    assert event.blocked_wait_resource == "KEY: 5:72057594051690496 (ffeb27d6a833)"
+
+
+async def test_collect_resolves_blocked_object_for_a_database_lock_directly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`resource_type = 'OBJECT'` resolve direto na query principal (`OBJECT_NAME` aceita
+    `resource_database_id`, cross-database, sem precisar de `sys.partitions`) — sem conexao
+    extra."""
+    session_rows = [
+        _request_row(
+            session_id=200, query_text="ALTER TABLE t ADD COLUMN x INT", blocking_session_id=0
+        ),
+        _request_row(
+            session_id=201,
+            query_text="SELECT * FROM t",
+            blocking_session_id=200,
+            wait_resource="OBJECT: 5:1234567890",
+        ),
+    ]
+    blocked_object_rows = [
+        {
+            "session_id": 201,
+            "resource_type": "OBJECT",
+            "resource_database_name": "app_db",
+            "resource_associated_entity_id": 1234567890,
+            "resolved_object_name": "dbo.t",
+        }
+    ]
     _patch_connect(
         monkeypatch,
         version_row={"product_version": "16.0.1000.6"},
@@ -412,9 +480,7 @@ async def test_collect_populates_blocked_object_from_dm_tran_locks(
     result = await collector.collect()
 
     assert len(result.blocking_events) == 1
-    event = result.blocking_events[0]
-    assert event.blocked_object == "dbo.t"
-    assert event.blocked_wait_resource == "KEY: 5:72057594051690496 (ffeb27d6a833)"
+    assert result.blocking_events[0].blocked_object == "dbo.t"
 
 
 async def test_collect_maps_raw_counters_correctly(monkeypatch: pytest.MonkeyPatch) -> None:
