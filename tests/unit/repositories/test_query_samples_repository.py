@@ -1249,6 +1249,51 @@ async def test_latest_by_session_returns_most_recent_row(
     assert result["session-1"].db_user == "new_user"
 
 
+async def test_latest_text_by_sql_hash_resolves_by_hash_not_session(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """Item 22: ao contrario de `latest_by_session`, resolve pelo `sql_hash` (estavel) — uma
+    amostra ANTIGA de uma sessao que foi reciclada por outra query depois nao deve "vazar" o texto
+    errado pro hash antigo (aqui simulado como 2 hashes distintos na mesma sessao, em momentos
+    diferentes: o mais recente da SESSAO tem um hash diferente do que estamos resolvendo)."""
+    repo = QuerySamplesRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=now - timedelta(minutes=10),
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-old-incident",
+                sql_text_masked="SELECT ? FROM old_incident",
+                session_id="session-1",
+            ),
+            # Sessao reciclada depois pra outra query — `latest_by_session` pegaria este, o
+            # errado, se fosse usado aqui.
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-new-unrelated",
+                sql_text_masked="SELECT ? FROM new_unrelated",
+                session_id="session-1",
+            ),
+        ]
+    )
+
+    result = await repo.latest_text_by_sql_hash(test_instance.id, ["hash-old-incident"])
+
+    assert result == {"hash-old-incident": "SELECT ? FROM old_incident"}
+
+
+async def test_latest_text_by_sql_hash_omits_unknown_hash(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    repo = QuerySamplesRepository(db_session)
+    result = await repo.latest_text_by_sql_hash(test_instance.id, ["never-seen-hash"])
+    assert result == {}
+
+
 async def test_top_wait_types_excludes_benign_wait_from_group_by(
     db_session: AsyncSession, test_instance: Instance
 ) -> None:

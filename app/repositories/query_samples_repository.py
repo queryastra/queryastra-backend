@@ -1030,3 +1030,29 @@ class QuerySamplesRepository(BaseRepository):
             {"instance_id": instance_id, "session_ids": list(session_ids), "since": since},
         )
         return {row.session_id: row for row in result.fetchall()}
+
+    async def latest_text_by_sql_hash(
+        self, instance_id: UUID, sql_hashes: Sequence[str]
+    ) -> dict[str, str]:
+        """Resolve `sql_hash` -> `sql_text_masked` (uma amostra QUALQUER com aquele hash, a mais
+        recente) — usado pelo histórico de incidentes de bloqueio (`GET /blocking/{id}/incidents`,
+        item 22) para exibir o "Comando" de cada lado sem o problema real que `latest_by_session`
+        teria aqui: um incidente antigo (já encerrado há dias) referencia um `session_id` que o
+        motor pode ter RECICLADO pra uma sessão completamente diferente depois — resolver pelo
+        hash (endereçamento por conteúdo, estável) em vez da sessão evita mostrar o comando errado.
+        Sem filtro de tempo — `query_samples` não tem retenção configurada (ao contrário de
+        `metric_samples`), então um hash de um incidente antigo ainda deve ser resolvível; sem
+        amostra nenhuma com aquele hash, o hash simplesmente não entra no dict (não inventa
+        dado)."""
+        if not sql_hashes:
+            return {}
+        stmt = sa.text("""
+            SELECT DISTINCT ON (sql_hash) sql_hash, sql_text_masked
+            FROM query_samples
+            WHERE instance_id = :instance_id AND sql_hash = ANY(:sql_hashes)
+            ORDER BY sql_hash, time DESC
+        """)
+        result = await self._session.execute(
+            stmt, {"instance_id": instance_id, "sql_hashes": list(sql_hashes)}
+        )
+        return {row.sql_hash: row.sql_text_masked for row in result.fetchall()}

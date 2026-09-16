@@ -146,6 +146,66 @@ async def test_list_blocking_events_builds_multi_level_tree(
     assert node_c["children"] == []
 
 
+async def test_list_blocking_incidents_includes_machine_and_command(
+    client: AsyncClient, db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """Item 22: o historico plano (`GET /blocking/{id}/incidents`) precisa mostrar os mesmos
+    campos que a arvore ja mostra — `blocker_machine`/`blocked_machine` ja existiam no model mas
+    nao eram expostos, e `blocker_sql_text_masked`/`blocked_sql_text_masked` sao resolvidos por
+    `sql_hash` (nao por sessao) contra `query_samples`."""
+    now = datetime.now(UTC)
+
+    query_repo = QuerySamplesRepository(db_session)
+    await query_repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-blocker-22",
+                sql_text_masked="UPDATE t SET x = ?",
+                session_id="blocker-22",
+            ),
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-blocked-22",
+                sql_text_masked="SELECT ? FROM t",
+                session_id="blocked-22",
+            ),
+        ]
+    )
+
+    blocking_repo = BlockingIncidentsRepository(db_session)
+    await blocking_repo.upsert_batch(
+        test_instance.id,
+        [
+            NormalizedBlockingEvent(
+                time=now,
+                instance_id=test_instance.id,
+                blocker_session_id="blocker-22",
+                blocked_session_id="blocked-22",
+                blocker_sql_hash="hash-blocker-22",
+                blocked_sql_hash="hash-blocked-22",
+                wait_time_ms=999,
+                blocker_machine="WKS-01",
+                blocked_machine="WKS-02",
+            )
+        ],
+        now,
+    )
+
+    response = await client.get(f"/api/v1/waits-blocking/blocking/{test_instance.id}/incidents")
+
+    assert response.status_code == 200
+    [incident] = response.json()
+    assert incident["blocker_machine"] == "WKS-01"
+    assert incident["blocked_machine"] == "WKS-02"
+    assert incident["blocker_sql_text_masked"] == "UPDATE t SET x = ?"
+    assert incident["blocked_sql_text_masked"] == "SELECT ? FROM t"
+
+
 async def test_list_blocking_events_empty_when_no_events(
     client: AsyncClient, test_instance: Instance
 ) -> None:

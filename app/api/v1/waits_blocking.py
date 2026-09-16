@@ -142,6 +142,9 @@ class BlockingIncidentResponse(BaseModel):
     blocked_db_user: str | None
     blocker_program: str | None
     blocked_program: str | None
+    # Item 22 — faltava no histórico plano (já existe em `blocking_incidents`/no nó da árvore).
+    blocker_machine: str | None
+    blocked_machine: str | None
     blocker_transaction_id: str | None
     blocked_transaction_id: str | None
     blocker_transaction_begin_time: datetime | None
@@ -151,6 +154,12 @@ class BlockingIncidentResponse(BaseModel):
     started_at: datetime
     last_seen_at: datetime
     ended_at: datetime | None
+    # Item 22 — unificação de colunas com a árvore (`BlockingTreeNodeResponse` já tinha
+    # `sql_text_masked`): resolvido por `sql_hash` (não por `session_id` — ver docstring de
+    # `QuerySamplesRepository.latest_text_by_sql_hash`), preenchido pelo endpoint, não vem direto
+    # do model (`BlockingIncident` só guarda o hash).
+    blocker_sql_text_masked: str | None = None
+    blocked_sql_text_masked: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -326,6 +335,7 @@ async def list_blocking_incidents(
     blocking_repo: Annotated[
         BlockingIncidentsRepository, Depends(get_blocking_incidents_repository)
     ],
+    query_repo: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
     open_only: Annotated[bool, Query()] = False,
     database_name: Annotated[str | None, Query()] = None,
     since: Annotated[datetime | None, Query(alias="from")] = None,
@@ -346,7 +356,26 @@ async def list_blocking_incidents(
         since=since,
         until=until,
     )
-    return [BlockingIncidentResponse.model_validate(row) for row in rows]
+    # Item 22: "Comando" precisa aparecer no histórico plano tanto quanto já aparece na árvore
+    # (`sql_text_masked` do nó) — resolvido por hash (estável), não por sessão (ver docstring de
+    # `latest_text_by_sql_hash`: sessão pode ter sido reciclada entre o incidente e agora).
+    sql_hashes = {r.blocker_sql_hash for r in rows if r.blocker_sql_hash} | {
+        r.blocked_sql_hash for r in rows if r.blocked_sql_hash
+    }
+    text_by_hash = await query_repo.latest_text_by_sql_hash(instance_id, list(sql_hashes))
+    return [
+        BlockingIncidentResponse.model_validate(row).model_copy(
+            update={
+                "blocker_sql_text_masked": text_by_hash.get(row.blocker_sql_hash)
+                if row.blocker_sql_hash
+                else None,
+                "blocked_sql_text_masked": text_by_hash.get(row.blocked_sql_hash)
+                if row.blocked_sql_hash
+                else None,
+            }
+        )
+        for row in rows
+    ]
 
 
 @router.get(
