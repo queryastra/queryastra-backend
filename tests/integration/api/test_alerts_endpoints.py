@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from uuid import UUID, uuid4
 
+import sqlalchemy as sa
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -232,4 +233,43 @@ async def test_close_alert_succeeds_then_conflicts_on_second_call(
 
 async def test_close_alert_returns_404_when_not_found(client: AsyncClient) -> None:
     response = await client.post(f"/api/v1/alerts/{uuid4()}/close")
+    assert response.status_code == 404
+
+
+async def test_delete_alert_rule_removes_rule_and_dependent_alerts(
+    client: AsyncClient, db_session: AsyncSession, test_instance: Instance
+) -> None:
+    repo = AlertsRepository(db_session)
+    rule = await repo.create_alert_rule(
+        AlertRule(
+            name="regra-para-excluir",
+            target_type="instance",
+            metric_name="test_metric",
+            comparison="gte",
+            threshold_warning=10.0,
+        )
+    )
+    alert = await repo.create_alert(
+        Alert(
+            alert_rule_id=rule.id,
+            target_type="instance",
+            target_id=test_instance.id,
+            severity="warning",
+        )
+    )
+
+    response = await client.delete(f"/api/v1/alerts/rules/{rule.id}")
+    assert response.status_code == 204
+
+    # `rule`/`alert` ja estao no identity map desta sessao (criados via `repo` acima) - uma
+    # query SQL direta (nao `.get()`) evita devolver o objeto em memoria em vez de reconsultar
+    # o banco real apos a exclusao (feita por uma sessao diferente, a do client).
+    remaining_rules = await db_session.execute(sa.select(AlertRule).where(AlertRule.id == rule.id))
+    assert remaining_rules.scalar_one_or_none() is None
+    remaining_alerts = await db_session.execute(sa.select(Alert).where(Alert.id == alert.id))
+    assert remaining_alerts.scalar_one_or_none() is None
+
+
+async def test_delete_alert_rule_returns_404_when_not_found(client: AsyncClient) -> None:
+    response = await client.delete(f"/api/v1/alerts/rules/{uuid4()}")
     assert response.status_code == 404

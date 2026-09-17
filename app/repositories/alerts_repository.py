@@ -52,6 +52,33 @@ class AlertsRepository(BaseRepository):
         await self._session.refresh(rule)
         return rule
 
+    async def delete_alert_rule(self, rule_id: UUID) -> bool:
+        """Remove a regra e todo o historico dependente — `False` se a regra ja nao existe.
+
+        `alert_escalation_levels` cascade automaticamente (`ondelete="CASCADE"` no FK), mas
+        `alerts`/`alert_notifications`/`alert_silences` nao tem `ondelete` (perderiam o
+        `alert_rule_id` sem aviso se cascateassem sozinhos) — apagados aqui explicitamente, na
+        ordem certa (notificacoes antes dos alertas que elas referenciam), antes da regra. Uma
+        regra excluida junto com seu historico e a semantica esperada: sem a regra, os alertas
+        associados perdem o contexto (nome, comparacao, limiares) que os tornaria uteis."""
+        rule = await self._session.get(AlertRule, rule_id)
+        if rule is None:
+            return False
+
+        alert_ids_subquery = (
+            select(Alert.id).where(Alert.alert_rule_id == rule_id).scalar_subquery()
+        )
+        await self._session.execute(
+            sa.delete(AlertNotification).where(AlertNotification.alert_id.in_(alert_ids_subquery))
+        )
+        await self._session.execute(sa.delete(Alert).where(Alert.alert_rule_id == rule_id))
+        await self._session.execute(
+            sa.delete(AlertSilence).where(AlertSilence.alert_rule_id == rule_id)
+        )
+        await self._session.delete(rule)
+        await self._session.commit()
+        return True
+
     async def get_open_alert(self, alert_rule_id: UUID, target_id: UUID) -> Alert | None:
         """Episodio ainda nao fechado (state != 'closed') — inclui 'acknowledged', que
         continua sendo o mesmo episodio (reconhecimento nao fecha o alerta)."""

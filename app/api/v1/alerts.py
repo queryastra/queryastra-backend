@@ -261,6 +261,20 @@ async def list_alert_rules(
     return result
 
 
+@router.delete("/rules/{rule_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_alert_rule(
+    rule_id: UUID,
+    repository: Annotated[AlertsRepository, Depends(get_alerts_repository)],
+) -> None:
+    """Remove uma regra de alerta e todo o historico de `Alert`/notificacao/silenciamento
+    associado (ver docstring de `AlertsRepository.delete_alert_rule`)."""
+    deleted = await repository.delete_alert_rule(rule_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Regra de alerta nao encontrada."
+        )
+
+
 @router.get("", response_model=list[AlertResponse])
 async def list_alerts(
     repository: Annotated[AlertsRepository, Depends(get_alerts_repository)],

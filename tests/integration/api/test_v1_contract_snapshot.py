@@ -50,6 +50,7 @@ EXPECTED_REST_PATHS = {
     "/api/v1/waits-blocking/blocking/{instance_id}/session/{session_id}",
     "/api/v1/waits-blocking/waits/{instance_id}",
     "/api/v1/alerts/rules",
+    "/api/v1/alerts/rules/{rule_id}",
     "/api/v1/alerts",
     "/api/v1/alerts/{alert_id}/acknowledge",
     "/api/v1/alerts/{alert_id}/close",
