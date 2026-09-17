@@ -27,7 +27,11 @@ from app.db.base import Base
 
 
 class AlertRule(Base):
-    """Regra de alerta: threshold Min/Max (semiaberto) por metrica ou wait time anomaly."""
+    """Regra de alerta: threshold Min/Max (semiaberto) por metrica, ou um dos `rule_type`
+    especiais da Fase 2 (anomaly detection, recorrencia de bloqueio, SQL customizado, plano com
+    timeout de compilacao) — ver `app.workers.alerting_worker` para a logica de avaliacao de
+    cada tipo e `Docs/product-vision-and-roadmap.md` para o desenho completo.
+    """
 
     __tablename__ = "alert_rules"
     __table_args__ = (
@@ -35,6 +39,16 @@ class AlertRule(Base):
         CheckConstraint(
             "comparison IN ('gt', 'lt', 'gte', 'lte') OR comparison IS NULL",
             name="ck_alert_rules_comparison",
+        ),
+        CheckConstraint(
+            "rule_type IN ('threshold', 'anomaly', 'custom_sql', 'blocking_recurrence', "
+            "'plan_compile_timeout')",
+            name="ck_alert_rules_rule_type",
+        ),
+        CheckConstraint(
+            "reset_mode IN ('auto_when_false', 'auto_after_duration', 'no_reset_every_poll', "
+            "'no_reset_manual')",
+            name="ck_alert_rules_reset_mode",
         ),
     )
 
@@ -52,6 +66,26 @@ class AlertRule(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+    # --- Fase 2, itens 1-5 (Docs/product-vision-and-roadmap.md) ---------------------------------
+    # Discrimina qual metodo de avaliacao o worker usa. `'threshold'` (default) preserva o
+    # comportamento de todas as regras ja existentes sem migracao de dado. `freespace`/
+    # `replication_lag` (item 2) NAO tem rule_type proprio - sao so um `metric_name` novo,
+    # avaliados como `threshold` comum.
+    rule_type: Mapped[str] = mapped_column(String, nullable=False, server_default="threshold")
+    # Item 1 (anomaly): janela de baseline em dias (media/desvio padrao dos ultimos N dias).
+    baseline_window_days: Mapped[int | None] = mapped_column(nullable=True)
+    # Item 2 (custom_sql): query validada por `app.services.custom_sql_guard` antes de rodar -
+    # nunca persistida sem passar por essa checagem (ver `create_alert_rule` na API).
+    custom_sql: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Item 3: modo de reset (4 dos 5 modos do SAM/Orion - "condicao customizada" fora de escopo).
+    reset_mode: Mapped[str] = mapped_column(
+        String, nullable=False, server_default="auto_when_false"
+    )
+    reset_after_seconds: Mapped[int | None] = mapped_column(nullable=True)
+    # Item 4 (recorrencia): NULL/NULL = recorrencia desligada para esta regra (default).
+    recurrence_threshold_count: Mapped[int | None] = mapped_column(nullable=True)
+    recurrence_window_days: Mapped[int | None] = mapped_column(nullable=True)
 
 
 class Alert(Base):
@@ -85,6 +119,10 @@ class Alert(Base):
         DateTime(timezone=True), nullable=True
     )
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Item 3 (escalonamento): ultimo nivel de `AlertEscalationLevel.level_number` ja notificado
+    # para este episodio - 0 = nenhum nivel de escalonamento disparado ainda (so o nivel 1
+    # implicito, a notificacao normal de `triggered`).
+    last_escalation_level: Mapped[int] = mapped_column(nullable=False, server_default="0")
 
 
 class AlertNotification(Base):
@@ -137,3 +175,26 @@ class AlertSilence(Base):
     silenced_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class AlertEscalationLevel(Base):
+    """Nivel de escalonamento de uma `AlertRule` (Fase 2, item 3) — nivel 1 e implicito (a
+    notificacao normal de `triggered`); cada linha aqui e um nivel 2+ que so dispara se o
+    `Alert` continuar `open` (nao reconhecido) por `wait_minutes` desde `triggered_at`.
+    `email_recipients=NULL` usa os destinatarios globais do canal e-mail (mesmo remetente/SMTP
+    configurado em `Settings`, so uma lista de destinatarios diferente por nivel)."""
+
+    __tablename__ = "alert_escalation_levels"
+    __table_args__ = (
+        CheckConstraint("level_number >= 2", name="ck_alert_escalation_levels_level_number"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    alert_rule_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("alert_rules.id", ondelete="CASCADE"), nullable=False
+    )
+    level_number: Mapped[int] = mapped_column(nullable=False)
+    wait_minutes: Mapped[int] = mapped_column(nullable=False)
+    email_recipients: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)

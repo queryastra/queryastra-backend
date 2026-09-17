@@ -231,6 +231,17 @@ class BlockingIncidentsRepository(BaseRepository):
         )
         return list((await self._session.execute(stmt)).scalars().all())
 
+    async def count_incidents_since(self, instance_id: UUID, since: datetime) -> int:
+        """Quantos incidentes (`started_at >= since`, em andamento ou ja encerrados) essa
+        instancia teve — base do `rule_type="blocking_recurrence"` (Fase 2, item 4):
+        `app.workers.alerting_worker` avalia essa CONTAGEM como se fosse o valor de uma metrica
+        de threshold comum (`threshold_warning`/`_critical` viram contagem de incidentes)."""
+        stmt = sa.select(sa.func.count()).where(
+            BlockingIncident.instance_id == instance_id,
+            BlockingIncident.started_at >= since,
+        )
+        return (await self._session.execute(stmt)).scalar_one()
+
     async def purge_ended_before(self, cutoff: datetime) -> int:
         """Expurgo por idade — so incidentes JA ENCERRADOS ha mais tempo que `cutoff`; um
         incidente ainda em andamento nunca e removido."""

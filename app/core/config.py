@@ -168,6 +168,40 @@ class Settings(BaseSettings):
     # lista separada por virgula
     alert_email_to: str | None = Field(default=None, alias="ALERT_EMAIL_TO")
 
+    # Fase 2, item 2 (rule_type="custom_sql") - timeout de QUERY para a execucao periodica de SQL
+    # customizado escrito pelo usuario (`Collector.run_scalar_query`). Independente de
+    # `collection_query_timeout_seconds` porque e um subsistema diferente (avaliacao de alerta,
+    # nao coleta de rotina) — pode ter um timeout mais generoso sem afetar o ciclo de poll.
+    custom_sql_alert_timeout_seconds: float = Field(
+        default=5.0, alias="CUSTOM_SQL_ALERT_TIMEOUT_SECONDS"
+    )
+
+    # Fase 2, item 2 (catalogo de alertas expandido: freespace + replicacao) - liga o worker de
+    # baixa frequencia que coleta essas metricas (ExtendedHealthMetricsSupervisor). Default false -
+    # mesma politica de seguranca dos demais workers.
+    extended_health_metrics_supervisor_enabled: bool = Field(
+        default=False, alias="EXTENDED_HEALTH_METRICS_SUPERVISOR_ENABLED"
+    )
+    # Intervalo (segundos) entre coletas de freespace/replicacao por instancia ativa. Default 1
+    # hora - freespace/replicacao nao mudam o suficiente para justificar o ciclo de poll rapido,
+    # mas tambem nao sao tao estaveis quanto backup/missing-index (1x/dia).
+    extended_health_metrics_check_interval_seconds: int = Field(
+        default=3600, alias="EXTENDED_HEALTH_METRICS_CHECK_INTERVAL_SECONDS"
+    )
+
+    # Fase 2, item 5 (rule_type="plan_compile_timeout") - liga o worker de baixa frequencia que
+    # escaneia o cache de planos do SQL Server procurando timeout/limite de memoria de compilacao
+    # (PlanCompileTimeoutSupervisor). Default false - mesma politica de seguranca dos demais
+    # workers. So SQL Server (Postgres nao tem cache de plano exposto do mesmo jeito).
+    plan_compile_timeout_supervisor_enabled: bool = Field(
+        default=False, alias="PLAN_COMPILE_TIMEOUT_SUPERVISOR_ENABLED"
+    )
+    # Intervalo (segundos) entre varreduras do cache de planos por instancia ativa. Default 1 dia -
+    # mesma cadencia baixa do MissingIndexSupervisor/BackupStatusSupervisor.
+    plan_compile_timeout_check_interval_seconds: int = Field(
+        default=86400, alias="PLAN_COMPILE_TIMEOUT_CHECK_INTERVAL_SECONDS"
+    )
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -265,3 +265,20 @@ class NormalizedDeadlockEvent(BaseModel):
     resource_description: str | None = None
     raw_xml_masked: str | None = None
     detail: dict[str, Any] = Field(default_factory=dict)
+
+
+class NormalizedPlanCompileTimeoutFinding(BaseModel):
+    """Plano em cache cujo XML sinaliza que o OTIMIZADOR abortou cedo por timeout ou limite de
+    memoria (Fase 2, item 5) — `StatementOptmEarlyAbortReason` em `{"TimeOutReached",
+    "MemoryLimitExceeded"}` num elemento `StmtSimple` do `ShowPlanXML`. So SQL Server (Postgres
+    nao tem cache de plano exposto do mesmo jeito, devolve lista vazia sempre).
+
+    Nao e uma metrica nem um evento com timestamp de ocorrencia real — e um ACHADO da varredura
+    periodica do cache (`app.workers.plan_compile_timeout_supervisor`), que cria/dedupe um
+    `Alert` por `sql_hash` novo encontrado."""
+
+    model_config = ConfigDict(frozen=True)
+
+    sql_hash: str
+    reason: str
+    statement_text_masked: str

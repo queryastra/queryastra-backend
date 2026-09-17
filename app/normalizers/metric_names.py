@@ -34,6 +34,22 @@ SQLSERVER_TOTAL_SERVER_MEMORY_KB = "sqlserver_total_server_memory_kb"
 SQLSERVER_INSTANCE_CPU_PERCENT = "sqlserver_instance_cpu_percent"
 SQLSERVER_OS_CPU_PERCENT = "sqlserver_os_cpu_percent"
 
+# Fase 2, item 2 (catalogo de alertas expandido) — coletados por um worker de baixa frequencia
+# proprio (`app.workers.extended_health_supervisor`, nao o ciclo de poll rapido), ver
+# `Docs/product-vision-and-roadmap.md`. Uma linha por volume/replica, com `labels` identificando
+# qual (ex. `{"volume": "C:\\"}`, `{"replica": "AUTKLINUX20-SECONDARY"}`).
+#
+# Freespace: so SQL Server (`sys.dm_os_volume_stats`) — PostgreSQL nao expoe espaco livre de
+# disco via SQL puro sem acesso ao SO (mesma classe de limitacao ja documentada pra CPU/deadlock
+# neste projeto: "SQL Server pode, Postgres nao pode").
+SQLSERVER_VOLUME_FREE_PERCENT = "sqlserver_volume_free_percent"
+# Replicacao: SQL Server (Always On AG, fila de log/redo em KB — quanto maior, mais atrasada a
+# replica) e PostgreSQL (streaming replication, atraso de replay em segundos). Sem replicacao
+# configurada, a metrica simplesmente nunca aparece (mesmo padrao de degradacao graciosa).
+SQLSERVER_REPLICA_LOG_SEND_QUEUE_KB = "sqlserver_replica_log_send_queue_kb"
+SQLSERVER_REPLICA_REDO_QUEUE_KB = "sqlserver_replica_redo_queue_kb"
+PG_REPLICA_REPLAY_LAG_SECONDS = "postgresql_replica_replay_lag_seconds"
+
 COLLECTOR_CYCLE_DURATION_MS = "collector_cycle_duration_ms"
 COLLECTOR_CYCLE_ERROR_COUNT = "collector_cycle_error_count"
 

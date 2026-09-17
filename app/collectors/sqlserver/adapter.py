@@ -80,6 +80,9 @@ from app.normalizers.metric_names import (
     SQLSERVER_INSTANCE_CPU_PERCENT,
     SQLSERVER_OS_CPU_PERCENT,
     SQLSERVER_RAW_COUNTER_TO_METRIC_NAME,
+    SQLSERVER_REPLICA_LOG_SEND_QUEUE_KB,
+    SQLSERVER_REPLICA_REDO_QUEUE_KB,
+    SQLSERVER_VOLUME_FREE_PERCENT,
 )
 from app.normalizers.models import (
     NormalizedBackupStatus,
@@ -87,6 +90,7 @@ from app.normalizers.models import (
     NormalizedDeadlockEvent,
     NormalizedMetricSample,
     NormalizedMissingIndexSuggestion,
+    NormalizedPlanCompileTimeoutFinding,
     NormalizedQuerySample,
     NormalizedTransactionEvent,
 )
@@ -356,6 +360,33 @@ _BACKUP_STATUS_QUERY = """
     GROUP BY database_name
 """
 
+# Fase 2, item 2 (freespace) — `sys.dm_os_volume_stats` devolve espaco por VOLUME (nao por
+# banco); `DISTINCT` porque varios arquivos de bancos diferentes costumam compartilhar o mesmo
+# volume fisico (ex. todos os .mdf no mesmo drive D:) — sem isso a mesma linha repetiria uma vez
+# por arquivo. So SQL Server: nao ha equivalente PostgreSQL sem acesso ao SO (ver
+# `Docs/product-vision-and-roadmap.md`).
+_VOLUME_FREESPACE_QUERY = """
+    SELECT DISTINCT
+        vs.volume_mount_point,
+        vs.total_bytes,
+        vs.available_bytes
+    FROM sys.master_files AS mf
+    CROSS APPLY sys.dm_os_volume_stats(mf.database_id, mf.file_id) AS vs
+"""
+
+# Fase 2, item 2 (replicacao) — Always On Availability Groups. Sem AG configurado, devolve 0
+# linhas (nao e um erro) - degradacao graciosa, mesmo padrao ja usado em toda capacidade
+# especifica de motor deste projeto.
+_REPLICA_STATE_QUERY = """
+    SELECT
+        ars.replica_server_name,
+        DB_NAME(drs.database_id) AS database_name,
+        drs.log_send_queue_size,
+        drs.redo_queue_size
+    FROM sys.dm_hadr_database_replica_states AS drs
+    INNER JOIN sys.availability_replicas AS ars ON ars.replica_id = drs.replica_id
+"""
+
 # Etapa 10, item 7 (Deadlocks) — ring buffer `system_health`, sessao Extended Events nativa e
 # sempre ativa por padrao desde o SQL Server 2008 (nunca precisa ser criada). `target_data` e um
 # XML com varios tipos de evento acumulados recentemente (buffer circular, poucos MB) — filtrar
@@ -411,6 +442,35 @@ _EXECUTION_PLAN_SEARCH_QUERY = """
 """
 
 _EXECUTION_PLAN_XML_QUERY = "SELECT query_plan FROM sys.dm_exec_query_plan(%s)"
+
+# Fase 2, item 5 (plan_compile_timeout) — mesmo padrao de scan do cache de plano de
+# `_EXECUTION_PLAN_SEARCH_QUERY`, mas ja trazendo o XML do plano numa unica query (nao precisa
+# de um `sql_hash` alvo — varre o cache inteiro procurando o motivo de aborto do otimizador).
+# `TOP (500)`: worker de baixa frequencia (1x/dia por padrao), nao acao sob demanda — escopo
+# menor que os 2000 do plano sob demanda e suficiente pra essa varredura periodica.
+_PLAN_COMPILE_TIMEOUT_SCAN_QUERY = """
+    SELECT TOP (500)
+        qp.query_plan,
+        SUBSTRING(
+            st.text,
+            (qs.statement_start_offset / 2) + 1,
+            (
+                (CASE qs.statement_end_offset
+                     WHEN -1 THEN DATALENGTH(st.text)
+                     ELSE qs.statement_end_offset
+                 END - qs.statement_start_offset) / 2
+            ) + 1
+        ) AS statement_text
+    FROM sys.dm_exec_query_stats AS qs
+    CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) AS st
+    CROSS APPLY sys.dm_exec_query_plan(qs.plan_handle) AS qp
+    WHERE st.text IS NOT NULL AND qp.query_plan IS NOT NULL
+    ORDER BY qs.last_execution_time DESC
+"""
+
+# `StatementOptmEarlyAbortReason` em `StmtSimple` — os 2 motivos que indicam o otimizador abortou
+# a busca de plano cedo, nao um "timeout de execucao" (isso seria outra coisa, wait/blocking).
+_PLAN_COMPILE_TIMEOUT_REASONS = frozenset({"TimeOutReached", "MemoryLimitExceeded"})
 
 
 def _connect_and_check(connection: ConnectionParams) -> list[CapabilityResult]:
@@ -775,6 +835,141 @@ def _connect_and_collect_backup_status(
     ]
 
 
+def _connect_and_collect_freespace(
+    connection: ConnectionParams,
+    instance_id: UUID,
+    query_timeout_seconds: float,
+) -> list[NormalizedMetricSample]:
+    """Helper sincrono (mesmo padrao de `_connect_and_collect_missing_indexes`) — Fase 2, item 2
+    (freespace). `labels={"volume": ...}` identifica o volume dentro da metrica generica
+    (`metric_samples` ja tem uma coluna `labels` JSONB, sem migracao nova pra isso)."""
+    login_timeout_seconds = int(connection.connect_timeout_seconds)
+    conn = pymssql.connect(
+        server=connection.host,
+        port=str(connection.port),
+        user=connection.username,
+        password=connection.secret_value,
+        timeout=int(query_timeout_seconds),
+        login_timeout=login_timeout_seconds,
+    )
+    try:
+        cursor = conn.cursor(as_dict=True)
+        cursor.execute(_VOLUME_FREESPACE_QUERY)
+        rows: list[dict] = list(cursor.fetchall())
+        cursor.close()
+    finally:
+        conn.close()
+
+    collected_at = datetime.now(UTC)
+    samples: list[NormalizedMetricSample] = []
+    for row in rows:
+        total_bytes = row["total_bytes"]
+        available_bytes = row["available_bytes"]
+        if not total_bytes:  # pragma: no cover - defensivo, nao deveria acontecer
+            continue
+        free_percent = (available_bytes / total_bytes) * 100
+        samples.append(
+            NormalizedMetricSample(
+                time=collected_at,
+                target_type="instance",
+                target_id=instance_id,
+                metric_name=SQLSERVER_VOLUME_FREE_PERCENT,
+                value=float(free_percent),
+                labels={"volume": str(row["volume_mount_point"])},
+            )
+        )
+    return samples
+
+
+def _connect_and_collect_replication_lag(
+    connection: ConnectionParams,
+    instance_id: UUID,
+    query_timeout_seconds: float,
+) -> list[NormalizedMetricSample]:
+    """Helper sincrono (mesmo padrao de `_connect_and_collect_missing_indexes`) — Fase 2, item 2
+    (replicacao, Always On AG). Sem AG configurado, `_REPLICA_STATE_QUERY` devolve 0 linhas (nao
+    e erro) e este helper devolve lista vazia — a metrica simplesmente nunca aparece."""
+    login_timeout_seconds = int(connection.connect_timeout_seconds)
+    conn = pymssql.connect(
+        server=connection.host,
+        port=str(connection.port),
+        user=connection.username,
+        password=connection.secret_value,
+        timeout=int(query_timeout_seconds),
+        login_timeout=login_timeout_seconds,
+    )
+    try:
+        cursor = conn.cursor(as_dict=True)
+        cursor.execute(_REPLICA_STATE_QUERY)
+        rows: list[dict] = list(cursor.fetchall())
+        cursor.close()
+    finally:
+        conn.close()
+
+    collected_at = datetime.now(UTC)
+    samples: list[NormalizedMetricSample] = []
+    for row in rows:
+        labels = {
+            "replica": str(row["replica_server_name"]),
+            "database": str(row["database_name"]),
+        }
+        samples.append(
+            NormalizedMetricSample(
+                time=collected_at,
+                target_type="instance",
+                target_id=instance_id,
+                metric_name=SQLSERVER_REPLICA_LOG_SEND_QUEUE_KB,
+                value=float(row["log_send_queue_size"]),
+                labels=labels,
+            )
+        )
+        samples.append(
+            NormalizedMetricSample(
+                time=collected_at,
+                target_type="instance",
+                target_id=instance_id,
+                metric_name=SQLSERVER_REPLICA_REDO_QUEUE_KB,
+                value=float(row["redo_queue_size"]),
+                labels=labels,
+            )
+        )
+    return samples
+
+
+def _connect_and_run_scalar_query(
+    connection: ConnectionParams,
+    sql: str,
+    query_timeout_seconds: float,
+) -> float | None:
+    """Helper sincrono pro alerta `custom_sql` (Fase 2, item 2) — roda uma query JA VALIDADA
+    (ver `app.services.custom_sql_guard`, chamado antes desta funcao, nunca depois) e espera a
+    PRIMEIRA coluna da PRIMEIRA linha como um numero. Qualquer outro formato (0 linhas, valor nao
+    numerico) devolve `None` — o worker trata como "sem avaliar este ciclo", nao inventa valor."""
+    login_timeout_seconds = int(connection.connect_timeout_seconds)
+    conn = pymssql.connect(
+        server=connection.host,
+        port=str(connection.port),
+        user=connection.username,
+        password=connection.secret_value,
+        timeout=int(query_timeout_seconds),
+        login_timeout=login_timeout_seconds,
+    )
+    try:
+        cursor = conn.cursor()
+        cursor.execute(sql)
+        row: tuple | None = cursor.fetchone()
+        cursor.close()
+    finally:
+        conn.close()
+
+    if row is None or row[0] is None:
+        return None
+    try:
+        return float(row[0])
+    except (TypeError, ValueError):
+        return None
+
+
 def _connect_and_collect_deadlocks(
     connection: ConnectionParams,
     instance_id: UUID,
@@ -1006,6 +1201,69 @@ def _hash_query_text(query_text: str | None) -> str | None:
     if not query_text:
         return None
     return hashlib.sha256(mask_sql_literals(query_text).encode("utf-8")).hexdigest()
+
+
+def _plan_xml_compile_timeout_reason(plan_xml: str) -> str | None:
+    """Procura `StatementOptmEarlyAbortReason` em qualquer `StmtSimple` do plano — devolve o
+    motivo (`"TimeOutReached"`/`"MemoryLimitExceeded"`) do primeiro achado, ou `None`. Ignora
+    namespace do ShowPlanXML (`{http://schemas.microsoft.com/...}StmtSimple`) comparando so o
+    nome local da tag - mais simples que registrar o namespace pra uma checagem pontual."""
+    try:
+        root = ElementTree.fromstring(plan_xml)
+    except ElementTree.ParseError:
+        return None
+    for element in root.iter():
+        local_tag = element.tag.rsplit("}", maxsplit=1)[-1]
+        if local_tag != "StmtSimple":
+            continue
+        reason = element.get("StatementOptmEarlyAbortReason")
+        if reason in _PLAN_COMPILE_TIMEOUT_REASONS:
+            return reason
+    return None
+
+
+def _connect_and_scan_plan_compile_timeouts(
+    connection: ConnectionParams,
+    query_timeout_seconds: float,
+) -> list[NormalizedPlanCompileTimeoutFinding]:
+    """Helper sincrono (mesmo padrao de `_connect_and_fetch_execution_plan`) — Fase 2, item 5:
+    varre o cache de planos e devolve um achado por `sql_hash` distinto cujo plano sinaliza
+    timeout/limite de memoria de compilacao."""
+    login_timeout_seconds = int(connection.connect_timeout_seconds)
+    conn = pymssql.connect(
+        server=connection.host,
+        port=str(connection.port),
+        user=connection.username,
+        password=connection.secret_value,
+        timeout=int(query_timeout_seconds),
+        login_timeout=login_timeout_seconds,
+    )
+    try:
+        cursor = conn.cursor(as_dict=True)
+        cursor.execute(_PLAN_COMPILE_TIMEOUT_SCAN_QUERY)
+        rows: list[dict] = list(cursor.fetchall())
+        cursor.close()
+    finally:
+        conn.close()
+
+    findings: dict[str, NormalizedPlanCompileTimeoutFinding] = {}
+    for row in rows:
+        statement_text = row["statement_text"]
+        plan_xml = row["query_plan"]
+        if not statement_text or not plan_xml:
+            continue
+        reason = _plan_xml_compile_timeout_reason(str(plan_xml))
+        if reason is None:
+            continue
+        masked = mask_sql_literals(statement_text)
+        sql_hash = hashlib.sha256(masked.encode("utf-8")).hexdigest()
+        findings.setdefault(
+            sql_hash,
+            NormalizedPlanCompileTimeoutFinding(
+                sql_hash=sql_hash, reason=reason, statement_text_masked=masked
+            ),
+        )
+    return list(findings.values())
 
 
 def _build_query_samples(
@@ -1521,6 +1779,87 @@ class SQLServerCollector:
                 self._instance_id,
                 settings.collection_query_timeout_seconds,
                 settings.collection_max_rows,
+            ),
+            timeout=overall_timeout,
+        )
+
+    async def collect_freespace_metrics(self) -> list[NormalizedMetricSample]:
+        """Fase 2, item 2 (freespace) — instancia inteira numa unica chamada, uma linha por
+        volume de disco usado pelos arquivos de dados/log (`sys.dm_os_volume_stats`)."""
+        if self._instance_id is None:
+            raise ValueError(
+                "SQLServerCollector.collect_freespace_metrics requer instance_id de uma "
+                "instancia ja cadastrada."
+            )
+        settings = get_settings()
+        overall_timeout = (
+            self._connection_params.connect_timeout_seconds
+            + settings.collection_query_timeout_seconds
+        )
+        return await asyncio.wait_for(
+            asyncio.to_thread(
+                _connect_and_collect_freespace,
+                self._connection_params,
+                self._instance_id,
+                settings.collection_query_timeout_seconds,
+            ),
+            timeout=overall_timeout,
+        )
+
+    async def collect_replication_lag_metrics(self) -> list[NormalizedMetricSample]:
+        """Fase 2, item 2 (replicacao) — Always On AG. Sem AG configurado devolve lista vazia
+        (nao e erro, `sys.dm_hadr_database_replica_states` so tem linhas se houver replica)."""
+        if self._instance_id is None:
+            raise ValueError(
+                "SQLServerCollector.collect_replication_lag_metrics requer instance_id de uma "
+                "instancia ja cadastrada."
+            )
+        settings = get_settings()
+        overall_timeout = (
+            self._connection_params.connect_timeout_seconds
+            + settings.collection_query_timeout_seconds
+        )
+        return await asyncio.wait_for(
+            asyncio.to_thread(
+                _connect_and_collect_replication_lag,
+                self._connection_params,
+                self._instance_id,
+                settings.collection_query_timeout_seconds,
+            ),
+            timeout=overall_timeout,
+        )
+
+    async def run_scalar_query(self, sql: str, timeout_seconds: float) -> float | None:
+        """Fase 2, item 2 (`rule_type="custom_sql"`) — `sql` ja deve ter passado por
+        `app.services.custom_sql_guard` (bloqueio por palavra-chave) ANTES de chegar aqui; este
+        metodo so executa, nunca valida. `timeout_seconds` e o timeout de QUERY (o timeout de
+        conexao segue vindo de `self._connection_params`, mesmo padrao dos demais metodos)."""
+        overall_timeout = self._connection_params.connect_timeout_seconds + timeout_seconds
+        return await asyncio.wait_for(
+            asyncio.to_thread(
+                _connect_and_run_scalar_query,
+                self._connection_params,
+                sql,
+                timeout_seconds,
+            ),
+            timeout=overall_timeout,
+        )
+
+    async def scan_plan_compile_timeouts(self) -> list[NormalizedPlanCompileTimeoutFinding]:
+        """Fase 2, item 5 — varre o cache de planos procurando
+        `StatementOptmEarlyAbortReason` (timeout/limite de memoria de compilacao). Roda num
+        worker de baixa frequencia (`app/workers/plan_compile_timeout_supervisor.py`),
+        instancia inteira numa unica chamada."""
+        settings = get_settings()
+        overall_timeout = (
+            self._connection_params.connect_timeout_seconds
+            + settings.collection_query_timeout_seconds
+        )
+        return await asyncio.wait_for(
+            asyncio.to_thread(
+                _connect_and_scan_plan_compile_timeouts,
+                self._connection_params,
+                settings.collection_query_timeout_seconds,
             ),
             timeout=overall_timeout,
         )

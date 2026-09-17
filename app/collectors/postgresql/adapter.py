@@ -70,6 +70,7 @@ from app.normalizers.metric_names import (
     PG_CHECKPOINTS_TIMED,
     PG_DEADLOCKS,
     PG_NUMBACKENDS,
+    PG_REPLICA_REPLAY_LAG_SECONDS,
     PG_TEMP_BYTES,
     PG_TEMP_FILES,
     PG_TUP_DELETED,
@@ -86,6 +87,7 @@ from app.normalizers.models import (
     NormalizedDeadlockEvent,
     NormalizedMetricSample,
     NormalizedMissingIndexSuggestion,
+    NormalizedPlanCompileTimeoutFinding,
     NormalizedQuerySample,
     NormalizedTransactionEvent,
 )
@@ -188,6 +190,16 @@ _ARCHIVER_STATUS_QUERY = """
     SELECT archived_count, last_archived_wal, last_archived_time,
            failed_count, last_failed_wal, last_failed_time, stats_reset
     FROM pg_stat_archiver
+"""
+
+# Fase 2, item 2 (replicacao) — streaming replication. Sem replica conectada devolve 0 linhas
+# (nao e erro, mesmo padrao de degradacao graciosa ja usado no resto do projeto).
+_REPLICATION_LAG_QUERY = """
+    SELECT
+        application_name,
+        EXTRACT(EPOCH FROM replay_lag) AS replay_lag_seconds
+    FROM pg_stat_replication
+    WHERE replay_lag IS NOT NULL
 """
 
 
@@ -895,6 +907,75 @@ class PostgreSQLCollector:
         vazia, sem tentar conectar (mesmo padrao ja usado pro plano de execucao sob demanda no
         PostgreSQL, Etapa 11)."""
         return []
+
+    async def collect_freespace_metrics(self) -> list[NormalizedMetricSample]:
+        """PostgreSQL nao expoe espaco livre de disco via SQL puro sem acesso ao SO — sempre
+        lista vazia, sem tentar conectar (mesma classe de limitacao ja documentada pra CPU/
+        deadlock neste projeto: "SQL Server pode, Postgres nao pode")."""
+        return []
+
+    async def collect_replication_lag_metrics(self) -> list[NormalizedMetricSample]:
+        """Fase 2, item 2 (replicacao) — `pg_stat_replication.replay_lag`, em segundos. Sem
+        streaming replication configurada devolve lista vazia (mesma degradacao graciosa)."""
+        if self._instance_id is None:
+            raise ValueError(
+                "PostgreSQLCollector.collect_replication_lag_metrics requer instance_id de uma "
+                "instancia ja cadastrada."
+            )
+        instance_id: UUID = self._instance_id
+        settings = get_settings()
+
+        conn = await asyncio.wait_for(
+            self._connect(), timeout=self._connection_params.connect_timeout_seconds
+        )
+        try:
+            rows = await asyncio.wait_for(
+                conn.fetch(_REPLICATION_LAG_QUERY),
+                timeout=settings.collection_query_timeout_seconds,
+            )
+        finally:
+            await conn.close()
+
+        collected_at = datetime.now(UTC)
+        return [
+            NormalizedMetricSample(
+                time=collected_at,
+                target_type="instance",
+                target_id=instance_id,
+                metric_name=PG_REPLICA_REPLAY_LAG_SECONDS,
+                value=float(row["replay_lag_seconds"]),
+                labels={"replica": str(row["application_name"])},
+            )
+            for row in rows
+        ]
+
+    async def scan_plan_compile_timeouts(self) -> list[NormalizedPlanCompileTimeoutFinding]:
+        """PostgreSQL nao tem cache de plano exposto do mesmo jeito que o SQL Server — sempre
+        lista vazia, sem tentar conectar (mesma classe de limitacao ja documentada)."""
+        return []
+
+    async def run_scalar_query(self, sql: str, timeout_seconds: float) -> float | None:
+        """Fase 2, item 2 (`rule_type="custom_sql"`) — `sql` ja deve ter passado por
+        `app.services.custom_sql_guard` ANTES de chegar aqui; este metodo so executa, nunca
+        valida. Espera a PRIMEIRA coluna da PRIMEIRA linha como numero; qualquer outro formato
+        (0 linhas, valor nao numerico) devolve `None`."""
+        conn = await asyncio.wait_for(
+            self._connect(), timeout=self._connection_params.connect_timeout_seconds
+        )
+        try:
+            value = await asyncio.wait_for(
+                conn.fetchval(sql),
+                timeout=timeout_seconds,
+            )
+        finally:
+            await conn.close()
+
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
     async def close(self) -> None:
         """Sem estado persistente entre chamadas (cada `check_capabilities` fecha sua conexao)."""

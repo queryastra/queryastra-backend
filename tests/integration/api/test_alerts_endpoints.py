@@ -166,3 +166,70 @@ async def test_create_list_and_delete_alert_silence(
 async def test_delete_alert_silence_returns_404_when_not_found(client: AsyncClient) -> None:
     response = await client.delete(f"/api/v1/alerts/silences/{uuid4()}")
     assert response.status_code == 404
+
+
+async def test_create_alert_rule_rejects_custom_sql_with_blocked_keyword(
+    client: AsyncClient,
+) -> None:
+    response = await client.post(
+        "/api/v1/alerts/rules",
+        json=_rule_payload(
+            metric_name=None,
+            rule_type="custom_sql",
+            custom_sql="DELETE FROM t",
+            comparison="gt",
+            threshold_warning=1.0,
+            threshold_critical=None,
+        ),
+    )
+    assert response.status_code == 422
+
+
+async def test_create_alert_rule_with_escalation_levels(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    response = await client.post(
+        "/api/v1/alerts/rules",
+        json=_rule_payload(
+            name="regra-com-escalonamento",
+            escalation_levels=[{"level_number": 2, "wait_minutes": 30}],
+        ),
+    )
+    assert response.status_code == 201
+    body = response.json()
+    assert body["rule_type"] == "threshold"
+    assert body["reset_mode"] == "auto_when_false"
+    assert len(body["escalation_levels"]) == 1
+    assert body["escalation_levels"][0]["level_number"] == 2
+    assert body["escalation_levels"][0]["wait_minutes"] == 30
+
+    rule = await db_session.get(AlertRule, UUID(body["id"]))
+    assert rule is not None
+    await db_session.delete(rule)
+    await db_session.commit()
+
+
+async def test_close_alert_succeeds_then_conflicts_on_second_call(
+    client: AsyncClient, db_session: AsyncSession, test_instance: Instance, alert_rule: AlertRule
+) -> None:
+    repo = AlertsRepository(db_session)
+    created = await repo.create_alert(
+        Alert(
+            alert_rule_id=alert_rule.id,
+            target_type="instance",
+            target_id=test_instance.id,
+            severity="warning",
+        )
+    )
+
+    response = await client.post(f"/api/v1/alerts/{created.id}/close")
+    assert response.status_code == 200
+    assert response.json()["state"] == "closed"
+
+    conflict_response = await client.post(f"/api/v1/alerts/{created.id}/close")
+    assert conflict_response.status_code == 409
+
+
+async def test_close_alert_returns_404_when_not_found(client: AsyncClient) -> None:
+    response = await client.post(f"/api/v1/alerts/{uuid4()}/close")
+    assert response.status_code == 404

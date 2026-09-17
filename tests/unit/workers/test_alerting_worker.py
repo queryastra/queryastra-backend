@@ -157,6 +157,16 @@ class _FakeAlertsRepository:
         self._store.notifications.append(notification)
         return notification
 
+    async def count_recent_alerts(self, rule_id: UUID, target_id: UUID, since: datetime) -> int:
+        return sum(
+            1
+            for a in self._store.alerts.values()
+            if a.alert_rule_id == rule_id and a.target_id == target_id and a.triggered_at >= since
+        )
+
+    async def list_escalation_levels(self, rule_id: UUID) -> list:
+        return []
+
 
 def _alerts_repository_factory(store: _AlertsStore):  # noqa: ANN201 - fake factory
     def factory(session: object) -> _FakeAlertsRepository:

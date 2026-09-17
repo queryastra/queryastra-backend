@@ -26,6 +26,7 @@ from app.normalizers.models import (
     NormalizedDeadlockEvent,
     NormalizedMetricSample,
     NormalizedMissingIndexSuggestion,
+    NormalizedPlanCompileTimeoutFinding,
     NormalizedQuerySample,
     NormalizedTransactionEvent,
 )
@@ -157,5 +158,40 @@ class Collector(Protocol):
         `system_health`, sempre ativo por padrao, evento `xml_deadlock_report`) — PostgreSQL nao
         expoe detalhe de deadlock via SQL, devolve lista vazia sempre (so o contador agregado
         `pg_stat_database.deadlocks`, ja coletado como metrica em `collect()`).
+        """
+        ...
+
+    async def collect_freespace_metrics(self) -> list[NormalizedMetricSample]:
+        """Fase 2, item 2 (expansao do catalogo de alertas) — roda num worker de baixa
+        frequencia proprio. So SQL Server (`sys.dm_os_volume_stats`) — PostgreSQL nao expoe
+        espaco livre de disco via SQL puro sem acesso ao SO, devolve lista vazia sempre (mesma
+        classe de limitacao ja documentada pra CPU/deadlock neste projeto).
+        """
+        ...
+
+    async def collect_replication_lag_metrics(self) -> list[NormalizedMetricSample]:
+        """Fase 2, item 2 (expansao do catalogo de alertas) — roda num worker de baixa
+        frequencia proprio, nao a cada ciclo de poll rapido. SQL Server:
+        `sys.dm_hadr_database_replica_states` (Always On AG, fila de log/redo em KB).
+        PostgreSQL: `pg_stat_replication` (`replay_lag`, em segundos). Sem replica configurada,
+        devolve lista vazia em ambos os motores — nao e erro.
+        """
+        ...
+
+    async def run_scalar_query(self, sql: str, timeout_seconds: float) -> float | None:
+        """Executa `sql` (ja validada por `app.services.custom_sql_guard` — este metodo nunca
+        valida, so executa) e devolve a primeira coluna da primeira linha como numero, ou `None`
+        se nao houver linha ou o valor nao for numerico. Usado por `rule_type="custom_sql"`
+        (Fase 2, item 2).
+        """
+        ...
+
+    async def scan_plan_compile_timeouts(self) -> list[NormalizedPlanCompileTimeoutFinding]:
+        """Varre o cache de planos procurando `StatementOptmEarlyAbortReason` (Fase 2, item 5).
+
+        Roda num worker de baixa frequencia proprio
+        (`app/workers/plan_compile_timeout_supervisor.py`). So SQL Server (cache de plano via
+        `sys.dm_exec_query_stats`/`sys.dm_exec_query_plan`) — PostgreSQL nao tem cache de plano
+        exposto do mesmo jeito, devolve lista vazia sempre.
         """
         ...

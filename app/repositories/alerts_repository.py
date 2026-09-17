@@ -8,12 +8,13 @@ este repositorio para ler/gravar estado — a logica de decisao fica no worker/s
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from uuid import UUID
 
 import sqlalchemy as sa
 from sqlalchemy import select
 
-from app.models.alert import Alert, AlertNotification, AlertRule, AlertSilence
+from app.models.alert import Alert, AlertEscalationLevel, AlertNotification, AlertRule, AlertSilence
 from app.models.instance import Instance
 from app.models.server import Server
 from app.repositories.base import BaseRepository
@@ -21,10 +22,15 @@ from app.repositories.base import BaseRepository
 
 @dataclass(frozen=True, slots=True)
 class AlertWithNames:
-    """Um Alert com o nome da regra e do alvo ja resolvidos (denormalizados para a API)."""
+    """Um Alert com o nome da regra e do alvo ja resolvidos (denormalizados para a API).
+
+    `rule_type` (Fase 2) tambem denormalizado aqui — a UI usa pra decidir o badge/rotulo certo
+    (ex.: "Recorrencia de bloqueio" para `blocking_recurrence`) sem precisar de uma 2a consulta
+    por alerta."""
 
     alert: Alert
     alert_name: str
+    rule_type: str
     target_name: str
 
 
@@ -64,6 +70,39 @@ class AlertsRepository(BaseRepository):
     async def get_alert_by_id(self, alert_id: UUID) -> Alert | None:
         return await self._session.get(Alert, alert_id)
 
+    async def get_rule_by_id(self, rule_id: UUID) -> AlertRule | None:
+        return await self._session.get(AlertRule, rule_id)
+
+    async def get_rule_by_name(self, name: str) -> AlertRule | None:
+        """Usado por `PlanCompileTimeoutSupervisor` (Fase 2, item 5) para achar/criar a regra
+        auto-gerada "uma por instancia" antes de criar um `Alert` — nao ha coluna dedicada pra
+        essa associacao, o nome (unico por instancia, montado pelo supervisor) e a chave."""
+        stmt = select(AlertRule).where(AlertRule.name == name)
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def list_open_alerts(self, alert_rule_id: UUID, target_id: UUID) -> list[Alert]:
+        """Todos os episodios ainda nao fechados desse par (regra, alvo) — ao contrario de
+        `get_open_alert` (so o mais recente), usado quando mais de um `Alert` simultaneo faz
+        sentido pro mesmo par (ex.: `plan_compile_timeout`, um por `sql_hash` distinto)."""
+        stmt = select(Alert).where(
+            Alert.alert_rule_id == alert_rule_id,
+            Alert.target_id == target_id,
+            Alert.state != "closed",
+        )
+        return list((await self._session.execute(stmt)).scalars().all())
+
+    async def count_recent_alerts(self, rule_id: UUID, target_id: UUID, since: datetime) -> int:
+        """Quantos `Alert` (episodios, nao notificacoes) desse par (regra, alvo) foram
+        disparados desde `since` — base do escalonamento por recorrencia (Fase 2, item 4):
+        conta o proprio `triggered_at`, entao um episodio que ainda esta aberto conta uma vez so
+        (nao cresce enquanto continua aberto), so novos disparos aumentam a contagem."""
+        stmt = select(sa.func.count()).where(
+            Alert.alert_rule_id == rule_id,
+            Alert.target_id == target_id,
+            Alert.triggered_at >= since,
+        )
+        return (await self._session.execute(stmt)).scalar_one()
+
     async def count_open_alerts_by_target(self, target_ids: list[UUID]) -> dict[UUID, int]:
         """Quantos alertas ainda nao fechados (`state != 'closed'`, mesmo criterio de
         `get_open_alert`) cada alvo tem — usado por `GET /instances` (coluna "Saude" do resumo).
@@ -96,7 +135,7 @@ class AlertsRepository(BaseRepository):
 
     async def list_alerts(self, state: str | None, limit: int) -> list[AlertWithNames]:
         stmt = (
-            select(Alert, AlertRule.name)
+            select(Alert, AlertRule.name, AlertRule.rule_type)
             .join(AlertRule, AlertRule.id == Alert.alert_rule_id)
             .order_by(Alert.triggered_at.desc())
             .limit(limit)
@@ -107,10 +146,12 @@ class AlertsRepository(BaseRepository):
         alerts = [row[0] for row in rows]
         names = await self._resolve_target_names(alerts)
         result: list[AlertWithNames] = []
-        for alert, rule_name in rows:
+        for alert, rule_name, rule_type in rows:
             target_name = names[(alert.target_type, alert.target_id)]
             result.append(
-                AlertWithNames(alert=alert, alert_name=rule_name, target_name=target_name)
+                AlertWithNames(
+                    alert=alert, alert_name=rule_name, rule_type=rule_type, target_name=target_name
+                )
             )
         return result
 
@@ -120,9 +161,12 @@ class AlertsRepository(BaseRepository):
             return None
         rule = await self._session.get(AlertRule, alert.alert_rule_id)
         rule_name = rule.name if rule is not None else f"regra-removida:{alert.alert_rule_id}"
+        rule_type = rule.rule_type if rule is not None else "threshold"
         names = await self._resolve_target_names([alert])
         target_name = names[(alert.target_type, alert.target_id)]
-        return AlertWithNames(alert=alert, alert_name=rule_name, target_name=target_name)
+        return AlertWithNames(
+            alert=alert, alert_name=rule_name, rule_type=rule_type, target_name=target_name
+        )
 
     async def _resolve_target_names(self, alerts: list[Alert]) -> dict[tuple[str, UUID], str]:
         """2 queries em lote (nunca N+1): instancia e servidor nao tem FK polimorfica real,
@@ -196,3 +240,24 @@ class AlertsRepository(BaseRepository):
         await self._session.delete(silence)
         await self._session.commit()
         return True
+
+    # --- Escalonamento em niveis (Fase 2, item 3) ------------------------------------------------
+
+    async def create_escalation_levels(
+        self, rule_id: UUID, levels: list[AlertEscalationLevel]
+    ) -> list[AlertEscalationLevel]:
+        for level in levels:
+            level.alert_rule_id = rule_id
+            self._session.add(level)
+        await self._session.commit()
+        for level in levels:
+            await self._session.refresh(level)
+        return levels
+
+    async def list_escalation_levels(self, rule_id: UUID) -> list[AlertEscalationLevel]:
+        stmt = (
+            select(AlertEscalationLevel)
+            .where(AlertEscalationLevel.alert_rule_id == rule_id)
+            .order_by(AlertEscalationLevel.level_number)
+        )
+        return list((await self._session.execute(stmt)).scalars().all())

@@ -25,7 +25,9 @@ from app.db.session import async_session_factory
 from app.workers.alerting_worker import AlertingWorker, EmailSettings
 from app.workers.backup_status_supervisor import BackupStatusSupervisor
 from app.workers.deadlock_supervisor import DeadlockSupervisor
+from app.workers.extended_health_metrics_supervisor import ExtendedHealthMetricsSupervisor
 from app.workers.missing_index_supervisor import MissingIndexSupervisor
+from app.workers.plan_compile_timeout_supervisor import PlanCompileTimeoutSupervisor
 from app.workers.polling_supervisor import PollingSupervisor
 from app.workers.problem_events_retention_worker import ProblemEventsRetentionWorker
 
@@ -48,6 +50,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     deadlock_task: asyncio.Task[None] | None = None
     problem_events_retention_worker: ProblemEventsRetentionWorker | None = None
     problem_events_retention_task: asyncio.Task[None] | None = None
+    extended_health_metrics_supervisor: ExtendedHealthMetricsSupervisor | None = None
+    extended_health_metrics_task: asyncio.Task[None] | None = None
+    plan_compile_timeout_supervisor: PlanCompileTimeoutSupervisor | None = None
+    plan_compile_timeout_task: asyncio.Task[None] | None = None
 
     if settings.polling_supervisor_enabled:
         supervisor = PollingSupervisor(
@@ -82,6 +88,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             settings.alert_critical_reminder_interval_seconds,
             webhook_url=settings.alert_webhook_url,
             email_settings=email_settings,
+            custom_sql_timeout_seconds=settings.custom_sql_alert_timeout_seconds,
         )
         alerting_task = asyncio.create_task(alerting_worker.run())
         logger.info(
@@ -145,6 +152,36 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "(PROBLEM_EVENTS_RETENTION_WORKER_ENABLED=false)"
         )
 
+    if settings.extended_health_metrics_supervisor_enabled:
+        extended_health_metrics_supervisor = ExtendedHealthMetricsSupervisor(
+            async_session_factory, settings.extended_health_metrics_check_interval_seconds
+        )
+        extended_health_metrics_task = asyncio.create_task(extended_health_metrics_supervisor.run())
+        logger.info(
+            "ExtendedHealthMetricsSupervisor habilitado (check_interval=%ss)",
+            settings.extended_health_metrics_check_interval_seconds,
+        )
+    else:
+        logger.info(
+            "ExtendedHealthMetricsSupervisor desabilitado "
+            "(EXTENDED_HEALTH_METRICS_SUPERVISOR_ENABLED=false)"
+        )
+
+    if settings.plan_compile_timeout_supervisor_enabled:
+        plan_compile_timeout_supervisor = PlanCompileTimeoutSupervisor(
+            async_session_factory, settings.plan_compile_timeout_check_interval_seconds
+        )
+        plan_compile_timeout_task = asyncio.create_task(plan_compile_timeout_supervisor.run())
+        logger.info(
+            "PlanCompileTimeoutSupervisor habilitado (check_interval=%ss)",
+            settings.plan_compile_timeout_check_interval_seconds,
+        )
+    else:
+        logger.info(
+            "PlanCompileTimeoutSupervisor desabilitado "
+            "(PLAN_COMPILE_TIMEOUT_SUPERVISOR_ENABLED=false)"
+        )
+
     yield
 
     if supervisor is not None and supervisor_task is not None:
@@ -165,6 +202,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if problem_events_retention_worker is not None and problem_events_retention_task is not None:
         problem_events_retention_worker.stop()
         await problem_events_retention_task
+    if extended_health_metrics_supervisor is not None and extended_health_metrics_task is not None:
+        extended_health_metrics_supervisor.stop()
+        await extended_health_metrics_task
+    if plan_compile_timeout_supervisor is not None and plan_compile_timeout_task is not None:
+        plan_compile_timeout_supervisor.stop()
+        await plan_compile_timeout_task
     logger.info("Lifespan finalizado")
 
 

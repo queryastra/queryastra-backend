@@ -111,6 +111,29 @@ class MetricSamplesRepository(BaseRepository):
         )
         return (await self._session.execute(stmt)).first()
 
+    async def get_baseline_stats(
+        self, target_type: str, target_id: UUID, metric_name: str, since: datetime
+    ) -> sa.Row | None:
+        """Media/desvio padrao amostral de uma metrica desde `since` — base do alerta de anomaly
+        detection (Fase 2, item 1: `AlertingWorker._evaluate_anomaly`, warning=media+2*stddev,
+        critical=media+3*stddev, mesmo modelo simples do SAM/Orion). `STDDEV_SAMP` (nao
+        `STDDEV_POP`) porque estamos estimando o desvio padrao da POPULACAO a partir de uma
+        AMOSTRA do historico, nao temos todos os valores possiveis. `sample_count` devolvido
+        pra quem chama decidir se ha dado suficiente pra confiar no baseline (ver docstring do
+        worker: menos de ~20 amostras e baseline instavel demais, resulta em nenhum alerta, nao
+        um alerta inventado)."""
+        stmt = sa.select(
+            sa.func.avg(metric_samples_table.c.value).label("mean"),
+            sa.func.stddev_samp(metric_samples_table.c.value).label("stddev"),
+            sa.func.count().label("sample_count"),
+        ).where(
+            metric_samples_table.c.target_type == target_type,
+            metric_samples_table.c.target_id == target_id,
+            metric_samples_table.c.metric_name == metric_name,
+            metric_samples_table.c.time >= since,
+        )
+        return (await self._session.execute(stmt)).first()
+
     async def count_distinct_metrics_since(
         self,
         target_type: str,
