@@ -875,7 +875,11 @@ def _connect_and_collect_freespace(
                 target_id=instance_id,
                 metric_name=SQLSERVER_VOLUME_FREE_PERCENT,
                 value=float(free_percent),
-                labels={"volume": str(row["volume_mount_point"])},
+                # `volume_mount_point` pode vir NULL de `sys.dm_os_volume_stats` (Microsoft
+                # documenta esse caso quando o arquivo nao tem ponto de montagem associado) -
+                # `str(None)` viraria a string literal "None", pior que so rotular como
+                # desconhecido (confirmado ao vivo contra Autklinux20).
+                labels={"volume": row["volume_mount_point"] or "desconhecido"},
             )
         )
     return samples

@@ -49,6 +49,14 @@ SQLSERVER_VOLUME_FREE_PERCENT = "sqlserver_volume_free_percent"
 SQLSERVER_REPLICA_LOG_SEND_QUEUE_KB = "sqlserver_replica_log_send_queue_kb"
 SQLSERVER_REPLICA_REDO_QUEUE_KB = "sqlserver_replica_redo_queue_kb"
 PG_REPLICA_REPLAY_LAG_SECONDS = "postgresql_replica_replay_lag_seconds"
+# Backup atrasado: coletado pelo `BackupStatusSupervisor` (ja existente, Etapa 10/Q16) a partir
+# do proprio `NormalizedBackupStatus` — 1 valor por INSTANCIA (pior caso entre os bancos, quando
+# ha mais de um), nao por banco. "Nunca fez backup" vira um valor bem alto
+# (`NEVER_BACKED_UP_SENTINEL_DAYS`, nao infinito) para que qualquer threshold razoavel dispare
+# critico sem exigir tratamento especial de "sem dado" no worker de alertas. Mesma engine
+# threshold comum de metrica (sem rule_type proprio), mesmo padrao de freespace/replicacao acima.
+SQLSERVER_BACKUP_DAYS_SINCE_LAST = "sqlserver_backup_days_since_last"
+PG_BACKUP_DAYS_SINCE_LAST = "postgresql_backup_days_since_last"
 
 COLLECTOR_CYCLE_DURATION_MS = "collector_cycle_duration_ms"
 COLLECTOR_CYCLE_ERROR_COUNT = "collector_cycle_error_count"

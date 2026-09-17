@@ -8,6 +8,12 @@ sequencia.
 
 Mesma politica de resiliencia dos demais supervisores: erro em uma instancia nunca derruba outra
 instancia nem o supervisor inteiro.
+
+Fase 2, item 2 (backup atrasado como alerta): alem de persistir `backup_status`, cada ciclo
+tambem grava uma metrica comum (`sqlserver_backup_days_since_last`/
+`postgresql_backup_days_since_last`, pior caso entre bancos) em `metric_samples` - avaliavel por
+uma `AlertRule` de threshold normal, sem `rule_type` proprio (mesmo padrao de freespace/
+replicacao em `app.workers.extended_health_metrics_supervisor`).
 """
 
 from __future__ import annotations
@@ -23,8 +29,11 @@ from app.collectors.base import Collector
 from app.collectors.connection import ConnectionParams
 from app.collectors.factory import create_collector
 from app.core.logging import get_logger
+from app.normalizers.metric_names import PG_BACKUP_DAYS_SINCE_LAST, SQLSERVER_BACKUP_DAYS_SINCE_LAST
+from app.normalizers.models import NormalizedBackupStatus, NormalizedMetricSample
 from app.repositories.backup_status_repository import BackupStatusRepository
 from app.repositories.instances_repository import InstancesRepository
+from app.repositories.metric_samples_repository import MetricSamplesRepository
 from app.security.credential_reference import (
     CredentialReference,
     CredentialResolutionError,
@@ -36,6 +45,39 @@ logger = get_logger(__name__)
 _CollectorFactory = Callable[..., Collector]
 _InstancesRepositoryFactory = Callable[[AsyncSession], InstancesRepository]
 _BackupStatusRepositoryFactory = Callable[[AsyncSession], BackupStatusRepository]
+_MetricSamplesRepositoryFactory = Callable[[AsyncSession], MetricSamplesRepository]
+
+# Fase 2, item 2 (backup atrasado como alerta) — "nunca fez backup" vira esse valor bem alto em
+# vez de um dado ausente/None, pra qualquer threshold razoavel (ex. 7 dias) disparar critico sem
+# o worker de alertas precisar de um caso especial de "sem dado" so pra essa metrica.
+_NEVER_BACKED_UP_SENTINEL_DAYS = 3650.0
+
+
+def _compute_backup_days_since_last(
+    rows: list[NormalizedBackupStatus], now: datetime
+) -> float | None:
+    """Pior caso (maior atraso) entre todos os bancos da instancia (SQL Server pode ter varios;
+    PostgreSQL sempre 1 linha, cluster-wide). `None` so quando `rows` esta vazio (nenhum dado
+    coletado neste ciclo - nao confundir com "nunca fez backup", que e o sentinela acima).
+
+    `pymssql` devolve `backup_finish_date` (msdb.dbo.backupset) como datetime NAIVE (SQL Server
+    `datetime` nao tem timezone) - tratado aqui como ja sendo UTC (mesma convencao usada no
+    resto do pipeline) antes de subtrair de `now` (timezone-aware), senao
+    `TypeError: can't subtract offset-naive and offset-aware datetimes` (confirmado ao vivo
+    contra Autklinux20 - o teste unitario com datetime ja aware nao pegava esse caso real)."""
+    if not rows:
+        return None
+    worst_days = 0.0
+    for row in rows:
+        if row.last_backup_at is None:
+            days = _NEVER_BACKED_UP_SENTINEL_DAYS
+        else:
+            last_backup_at = row.last_backup_at
+            if last_backup_at.tzinfo is None:
+                last_backup_at = last_backup_at.replace(tzinfo=UTC)
+            days = (now - last_backup_at).total_seconds() / 86400
+        worst_days = max(worst_days, days)
+    return worst_days
 
 
 class BackupStatusSupervisor:
@@ -51,6 +93,9 @@ class BackupStatusSupervisor:
         collector_factory: _CollectorFactory = create_collector,
         instances_repository_factory: _InstancesRepositoryFactory = InstancesRepository,
         backup_status_repository_factory: _BackupStatusRepositoryFactory = (BackupStatusRepository),
+        metric_samples_repository_factory: (
+            _MetricSamplesRepositoryFactory
+        ) = MetricSamplesRepository,
     ) -> None:
         self._session_factory = session_factory
         self._check_interval_seconds = check_interval_seconds
@@ -58,6 +103,7 @@ class BackupStatusSupervisor:
         self._create_collector = collector_factory
         self._instances_repository_factory = instances_repository_factory
         self._backup_status_repository_factory = backup_status_repository_factory
+        self._metric_samples_repository_factory = metric_samples_repository_factory
         self._stop_event = asyncio.Event()
 
     async def run(self) -> None:
@@ -136,9 +182,33 @@ class BackupStatusSupervisor:
                 )
                 try:
                     rows = await collector.collect_backup_status()
+                    now = datetime.now(UTC)
                     if rows:
                         repository = self._backup_status_repository_factory(session)
-                        await repository.upsert_batch(rows, datetime.now(UTC))
+                        await repository.upsert_batch(rows, now)
+
+                        # Fase 2, item 2 (backup atrasado como alerta) - "dias desde o ultimo
+                        # backup" (pior caso entre bancos) vira uma metrica comum, avaliavel por
+                        # uma AlertRule de threshold normal - sem rule_type proprio.
+                        days_since_last = _compute_backup_days_since_last(rows, now)
+                        if days_since_last is not None:
+                            metric_name = (
+                                SQLSERVER_BACKUP_DAYS_SINCE_LAST
+                                if instance.db_type == "sqlserver"
+                                else PG_BACKUP_DAYS_SINCE_LAST
+                            )
+                            metric_repository = self._metric_samples_repository_factory(session)
+                            await metric_repository.insert_batch(
+                                [
+                                    NormalizedMetricSample(
+                                        time=now,
+                                        target_type="instance",
+                                        target_id=instance.id,
+                                        metric_name=metric_name,
+                                        value=days_since_last,
+                                    )
+                                ]
+                            )
                     logger.info(
                         "Checagem de backup concluida instance_id=%s row_count=%s",
                         instance_id,

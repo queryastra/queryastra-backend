@@ -78,6 +78,23 @@ async def test_collect_freespace_metrics_computes_percent_free(
     assert samples[0].target_id == instance_id
 
 
+async def test_collect_freespace_metrics_labels_null_volume_as_desconhecido(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`sys.dm_os_volume_stats.volume_mount_point` pode vir NULL (Microsoft documenta esse
+    caso) - confirmado ao vivo contra Autklinux20. `str(None)` viraria a string literal "None"
+    no label, que e pior do que rotular como desconhecido."""
+    _patch_dict_connect(
+        monkeypatch,
+        [{"volume_mount_point": None, "total_bytes": 1000, "available_bytes": 500}],
+    )
+    collector = SQLServerCollector(connection=_CONNECTION, instance_id=uuid4())
+
+    samples = await collector.collect_freespace_metrics()
+
+    assert samples[0].labels == {"volume": "desconhecido"}
+
+
 async def test_collect_freespace_metrics_raises_value_error_without_instance_id() -> None:
     collector = SQLServerCollector(connection=_CONNECTION, instance_id=None)
     with pytest.raises(ValueError, match="instance_id"):
