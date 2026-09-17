@@ -57,6 +57,16 @@ class Settings(BaseSettings):
         default=3600, alias="API_READ_DEFAULT_LOOKBACK_SECONDS"
     )
 
+    # Tamanho do thread pool padrao do event loop (usado por TODA chamada `asyncio.to_thread` do
+    # processo — pymssql/pyodbc sao sincronos, cada coleta bloqueante ocupa 1 thread ate
+    # terminar). O default do proprio Python (`min(32, os.cpu_count() + 4)`) e baixo demais para
+    # varias instancias reais coletando em paralelo (confirmado ao vivo: com 7 instancias a
+    # polling_interval_seconds=1 + supervisores de baixa frequencia, o pool padrao de 12 threads
+    # nesta maquina de 8 nucleos saturava a ponto de ate leituras simples do proprio Postgres da
+    # aplicacao (sem nenhuma chamada bloqueante) sofrerem timeout). Aumentar isso NAO elimina o
+    # problema de fundo (poll agressivo demais continua caro), so da mais folga.
+    backend_executor_max_workers: int = Field(default=64, alias="BACKEND_EXECUTOR_MAX_WORKERS")
+
     # Liga o supervisor de coleta continua (PollingSupervisor) no lifespan do backend. Default
     # false - nunca ligar coleta real fora de um ambiente explicitamente configurado para isso.
     polling_supervisor_enabled: bool = Field(default=False, alias="POLLING_SUPERVISOR_ENABLED")

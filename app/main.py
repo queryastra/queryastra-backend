@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -38,6 +39,19 @@ logger = get_logger(__name__)
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Liga PollingSupervisor/AlertingWorker conforme os respectivos flags; no-op caso contrario."""
     settings = get_settings()
+
+    # Substitui o executor padrao do event loop (`min(32, os.cpu_count() + 4)`, baixo demais
+    # para varias instancias reais coletando em paralelo via pymssql/pyodbc sincrono) por um
+    # dimensionado explicitamente (`BACKEND_EXECUTOR_MAX_WORKERS`) - ver docstring da config.
+    # Precisa ser feito com o loop ja rodando (dentro do lifespan), antes de qualquer worker
+    # iniciar, senao workers que ja chamaram `asyncio.to_thread` pegam o executor antigo.
+    executor = ThreadPoolExecutor(max_workers=settings.backend_executor_max_workers)
+    asyncio.get_running_loop().set_default_executor(executor)
+    logger.info(
+        "Executor padrao do event loop dimensionado para %s threads (era min(32, cpu_count+4))",
+        settings.backend_executor_max_workers,
+    )
+
     supervisor: PollingSupervisor | None = None
     supervisor_task: asyncio.Task[None] | None = None
     alerting_worker: AlertingWorker | None = None
@@ -208,6 +222,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if plan_compile_timeout_supervisor is not None and plan_compile_timeout_task is not None:
         plan_compile_timeout_supervisor.stop()
         await plan_compile_timeout_task
+    executor.shutdown(wait=False, cancel_futures=True)
     logger.info("Lifespan finalizado")
 
 
