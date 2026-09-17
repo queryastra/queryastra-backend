@@ -185,7 +185,7 @@ async def test_collect_masks_sql_literal_before_hashing(monkeypatch: pytest.Monk
     assert len(result.query_samples) == 1
     sample = result.query_samples[0]
     assert "segredo" not in sample.sql_text_masked
-    assert sample.sql_text_masked == "SELECT * FROM t WHERE x = ?"
+    assert sample.sql_text_masked == "SELECT * FROM t WHERE x = '?'"
 
     import hashlib
 
