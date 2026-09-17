@@ -52,6 +52,7 @@ EXPECTED_REST_PATHS = {
     "/api/v1/alerts/rules",
     "/api/v1/alerts/rules/{rule_id}",
     "/api/v1/alerts",
+    "/api/v1/alerts/{alert_id}",
     "/api/v1/alerts/{alert_id}/acknowledge",
     "/api/v1/alerts/{alert_id}/close",
     "/api/v1/alerts/silences",

@@ -261,6 +261,50 @@ async def list_alert_rules(
     return result
 
 
+@router.get("/rules/{rule_id}", response_model=AlertRuleResponse)
+async def get_alert_rule(
+    rule_id: UUID,
+    repository: Annotated[AlertsRepository, Depends(get_alerts_repository)],
+) -> AlertRuleResponse:
+    """Busca uma regra por id — usado pela tela de edicao para pre-preencher o formulario."""
+    rule = await repository.get_rule_by_id(rule_id)
+    if rule is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Regra de alerta nao encontrada."
+        )
+    levels = await repository.list_escalation_levels(rule.id)
+    return _to_alert_rule_response(rule, levels)
+
+
+@router.patch("/rules/{rule_id}", response_model=AlertRuleResponse)
+async def update_alert_rule(
+    rule_id: UUID,
+    payload: AlertRuleCreateRequest,
+    repository: Annotated[AlertsRepository, Depends(get_alerts_repository)],
+) -> AlertRuleResponse:
+    """Atualiza uma regra existente — mesmo shape/validacao de `POST /rules` (substituicao
+    completa, nao um patch parcial: o formulario de edicao sempre manda todos os campos).
+    `escalation_levels` e substituido por inteiro (`replace_escalation_levels`)."""
+    fields = payload.model_dump(exclude={"escalation_levels"})
+    rule = await repository.update_alert_rule(rule_id, fields)
+    if rule is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Regra de alerta nao encontrada."
+        )
+    levels = await repository.replace_escalation_levels(
+        rule_id,
+        [
+            AlertEscalationLevel(
+                level_number=lv.level_number,
+                wait_minutes=lv.wait_minutes,
+                email_recipients=lv.email_recipients,
+            )
+            for lv in payload.escalation_levels
+        ],
+    )
+    return _to_alert_rule_response(rule, levels)
+
+
 @router.delete("/rules/{rule_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_alert_rule(
     rule_id: UUID,
@@ -279,10 +323,12 @@ async def delete_alert_rule(
 async def list_alerts(
     repository: Annotated[AlertsRepository, Depends(get_alerts_repository)],
     state: str | None = None,
+    target_id: UUID | None = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 200,
 ) -> list[AlertResponse]:
-    """Lista alertas disparados, mais recentes primeiro, opcionalmente filtrados por estado."""
-    items = await repository.list_alerts(state, limit)
+    """Lista alertas disparados, mais recentes primeiro, opcionalmente filtrados por estado
+    e/ou alvo (`target_id` — instancia ou servidor, conforme `target_type` do proprio alerta)."""
+    items = await repository.list_alerts(state, limit, target_id)
     return [_to_alert_response(i) for i in items]
 
 
@@ -332,6 +378,19 @@ async def close_alert(
     item = await repository.get_alert_with_names(alert_id)
     assert item is not None
     return _to_alert_response(item)
+
+
+@router.delete("/{alert_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_alert(
+    alert_id: UUID,
+    repository: Annotated[AlertsRepository, Depends(get_alerts_repository)],
+) -> None:
+    """Remove um alerta (registro completo, nao so o estado) — diferente de `close`, que so
+    muda `state` mantendo o historico. Usado para limpar alertas indesejados (ex.: gerados
+    durante testes) de uma instancia especifica."""
+    deleted = await repository.delete_alert(alert_id)
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Alerta nao encontrado.")
 
 
 @router.post("/silences", response_model=AlertSilenceResponse, status_code=status.HTTP_201_CREATED)

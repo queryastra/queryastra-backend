@@ -160,7 +160,9 @@ class AlertsRepository(BaseRepository):
         await self._session.refresh(alert)
         return alert
 
-    async def list_alerts(self, state: str | None, limit: int) -> list[AlertWithNames]:
+    async def list_alerts(
+        self, state: str | None, limit: int, target_id: UUID | None = None
+    ) -> list[AlertWithNames]:
         stmt = (
             select(Alert, AlertRule.name, AlertRule.rule_type)
             .join(AlertRule, AlertRule.id == Alert.alert_rule_id)
@@ -169,6 +171,8 @@ class AlertsRepository(BaseRepository):
         )
         if state is not None:
             stmt = stmt.where(Alert.state == state)
+        if target_id is not None:
+            stmt = stmt.where(Alert.target_id == target_id)
         rows = (await self._session.execute(stmt)).all()
         alerts = [row[0] for row in rows]
         names = await self._resolve_target_names(alerts)
@@ -194,6 +198,22 @@ class AlertsRepository(BaseRepository):
         return AlertWithNames(
             alert=alert, alert_name=rule_name, rule_type=rule_type, target_name=target_name
         )
+
+    async def delete_alert(self, alert_id: UUID) -> bool:
+        """Remove um `Alert` (episodio disparado) e suas `alert_notifications` — sem
+        `ondelete` no FK de notificacao, apagadas aqui explicitamente antes do alerta. `False`
+        se o alerta ja nao existe. Diferente de `close_alert` (que so muda `state`, mantendo o
+        historico): isso apaga o registro de verdade — usado para limpar alertas indesejados
+        de uma instancia (ex.: gerados durante testes), nao para o fluxo normal de resolucao."""
+        alert = await self._session.get(Alert, alert_id)
+        if alert is None:
+            return False
+        await self._session.execute(
+            sa.delete(AlertNotification).where(AlertNotification.alert_id == alert_id)
+        )
+        await self._session.delete(alert)
+        await self._session.commit()
+        return True
 
     async def _resolve_target_names(self, alerts: list[Alert]) -> dict[tuple[str, UUID], str]:
         """2 queries em lote (nunca N+1): instancia e servidor nao tem FK polimorfica real,
@@ -268,6 +288,19 @@ class AlertsRepository(BaseRepository):
         await self._session.commit()
         return True
 
+    async def update_alert_rule(self, rule_id: UUID, fields: dict[str, object]) -> AlertRule | None:
+        """Aplica `fields` (mesmo shape de `AlertRuleCreateRequest.model_dump()`, sem
+        `escalation_levels`) numa regra existente — `None` se a regra nao existe. Nao mexe em
+        `active`/`created_at`; edicao de regra nao reativa nem desativa por si so."""
+        rule = await self._session.get(AlertRule, rule_id)
+        if rule is None:
+            return None
+        for key, value in fields.items():
+            setattr(rule, key, value)
+        await self._session.commit()
+        await self._session.refresh(rule)
+        return rule
+
     # --- Escalonamento em niveis (Fase 2, item 3) ------------------------------------------------
 
     async def create_escalation_levels(
@@ -280,6 +313,20 @@ class AlertsRepository(BaseRepository):
         for level in levels:
             await self._session.refresh(level)
         return levels
+
+    async def replace_escalation_levels(
+        self, rule_id: UUID, levels: list[AlertEscalationLevel]
+    ) -> list[AlertEscalationLevel]:
+        """Substitui TODOS os niveis de escalonamento da regra pelos informados (edicao via
+        formulario manda a lista completa, nao um diff) — apaga os existentes e recria, mesmo
+        padrao simples ja usado por outras substituicoes completas neste projeto."""
+        await self._session.execute(
+            sa.delete(AlertEscalationLevel).where(AlertEscalationLevel.alert_rule_id == rule_id)
+        )
+        await self._session.commit()
+        if not levels:
+            return []
+        return await self.create_escalation_levels(rule_id, levels)
 
     async def list_escalation_levels(self, rule_id: UUID) -> list[AlertEscalationLevel]:
         stmt = (
