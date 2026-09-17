@@ -209,11 +209,15 @@ class SqlInsightAnalysisResponse(BaseModel):
 class ExecutionPlanResponse(BaseModel):
     """Resultado da busca sob demanda de plano de execucao (Etapa 11) — `reason` explica por que
     `available=False` (PostgreSQL sem suporte, plano fora do cache, credencial com problema),
-    nunca inventa um plano quando nao encontrado."""
+    nunca inventa um plano quando nao encontrado. `source` ("actual"|"cached", so quando
+    `available=True`) diz se e o plano REAL (contagens de execucao reais, so quando a sessao
+    original ainda esta rodando) ou o CACHEADO/estimado (o caso comum) — a tela sempre informa
+    qual dos dois esta mostrando."""
 
     available: bool
     plan_xml: str | None
     reason: str | None
+    source: str | None = None
 
 
 # --- Dependency providers -------------------------------------------------------------------
@@ -846,14 +850,18 @@ async def get_query_execution_plan(
     instances_repository: Annotated[InstancesRepository, Depends(get_instances_repository)],
     credential_resolver: Annotated[CredentialResolver, Depends(get_credential_resolver)],
 ) -> ExecutionPlanResponse:
-    """Busca sob demanda (nao parte do ciclo de coleta) do plano de execucao em cache do SQL
-    Server que corresponde a este `sql_hash` — Etapa 11. PostgreSQL: `available=False` direto,
-    sem tentar conectar (sem caminho SQL-acessivel para planos, ver
+    """Busca sob demanda (nao parte do ciclo de coleta) do plano de execucao do SQL Server que
+    corresponde a este `sql_hash` — tenta o plano REAL primeiro, cai pro cacheado/estimado
+    (Etapa 11) se a sessao original ja nao estiver mais rodando. PostgreSQL: `available=False`
+    direto, sem tentar conectar (sem caminho SQL-acessivel para planos, ver
     `app.services.execution_plan_service`)."""
     instance = await instances_repository.get_by_id(instance_id)
     if instance is None:
         raise HTTPException(status_code=404, detail="Instancia nao encontrada.")
     result = await fetch_execution_plan(instance, sql_hash, credential_resolver)
     return ExecutionPlanResponse(
-        available=result.available, plan_xml=result.plan_xml, reason=result.reason
+        available=result.available,
+        plan_xml=result.plan_xml,
+        reason=result.reason,
+        source=result.source,
     )

@@ -419,8 +419,8 @@ _DEADLOCK_RING_BUFFER_QUERY = """
 # So devolve o XML (segunda query, so quando ha match) via `sys.dm_exec_query_plan(plan_handle)`
 # — pode ser NULL se o plano ja saiu do cache (memoria, recompilacao) entre a amostra e esta
 # busca; XML e o plano CACHEADO/compilado (estimado), nao o "actual" com contagens reais de
-# execucao (isso exigiria Query Store — desligado por padrao on-premises — ou Extended Events,
-# caro; fora de escopo).
+# execucao — ver `_ACTIVE_STATEMENT_SEARCH_QUERY`/`_ACTUAL_PLAN_XML_QUERY` abaixo pro caminho
+# "real", tentado primeiro pelo service antes de cair pra este (`fetch_execution_plan`).
 _EXECUTION_PLAN_SEARCH_QUERY = """
     SELECT TOP (2000)
         qs.plan_handle,
@@ -442,6 +442,34 @@ _EXECUTION_PLAN_SEARCH_QUERY = """
 """
 
 _EXECUTION_PLAN_XML_QUERY = "SELECT query_plan FROM sys.dm_exec_query_plan(%s)"
+
+# Plano REAL (com contagens de linha/CPU/IO reais de execucao, nao so estimativa de
+# compilacao) — so possivel sem Query Store (desligado por padrao on-premises) quando a mesma
+# sessao que rodou `sql_hash` AINDA esta em execucao no momento da busca
+# (`sys.dm_exec_query_statistics_xml`, SQL Server 2016 SP1+). Mesmo padrao de fatiamento de
+# statement de `_SESSION_ACTIVITY_QUERY`, mas contra `sys.dm_exec_requests` (sessoes ativas
+# agora, nao o cache de plano). Tentado PRIMEIRO pelo service; se nao achar sessao ativa
+# correspondente (o caso comum — a maioria das queries olhadas no detalhe ja terminou ha
+# tempo), cai pro plano cacheado/estimado de `_EXECUTION_PLAN_SEARCH_QUERY` acima.
+_ACTIVE_STATEMENT_SEARCH_QUERY = """
+    SELECT
+        r.session_id,
+        SUBSTRING(
+            t.text,
+            (r.statement_start_offset / 2) + 1,
+            (
+                (CASE r.statement_end_offset
+                     WHEN -1 THEN DATALENGTH(t.text)
+                     ELSE r.statement_end_offset
+                 END - r.statement_start_offset) / 2
+            ) + 1
+        ) AS statement_text
+    FROM sys.dm_exec_requests AS r
+    CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) AS t
+    WHERE r.session_id <> @@SPID AND t.text IS NOT NULL
+"""
+
+_ACTUAL_PLAN_XML_QUERY = "SELECT query_plan FROM sys.dm_exec_query_statistics_xml(%s)"
 
 # Fase 2, item 5 (plan_compile_timeout) — mesmo padrao de scan do cache de plano de
 # `_EXECUTION_PLAN_SEARCH_QUERY`, mas ja trazendo o XML do plano numa unica query (nao precisa
@@ -1157,6 +1185,54 @@ def _parse_deadlock_resource(
         "owner_session_ids": _session_ids("owner-list", "owner"),
         "waiter_session_ids": _session_ids("waiter-list", "waiter"),
     }
+
+
+def _connect_and_fetch_actual_execution_plan(
+    connection: ConnectionParams,
+    sql_hash: str,
+    query_timeout_seconds: float,
+) -> str | None:
+    """Helper sincrono (mesmo padrao dos demais `_connect_and_*`): procura uma sessao AINDA EM
+    EXECUCAO cujo statement isolado+hasheado bate com `sql_hash`; no primeiro match, busca o
+    plano REAL (com contagens reais) via `sys.dm_exec_query_statistics_xml(session_id)`. `None`
+    quando nenhuma sessao ativa corresponde, OU quando a funcao nao existe/falha nesta versao/
+    permissao do SQL Server (2016 SP1+) — em qualquer um dos dois casos, o chamador
+    (`fetch_execution_plan`, service) cai pro plano cacheado/estimado, nunca propaga o erro."""
+    login_timeout_seconds = int(connection.connect_timeout_seconds)
+    conn = pymssql.connect(
+        server=connection.host,
+        port=str(connection.port),
+        user=connection.username,
+        password=connection.secret_value,
+        timeout=int(query_timeout_seconds),
+        login_timeout=login_timeout_seconds,
+    )
+    try:
+        cursor = conn.cursor(as_dict=True)
+        cursor.execute(_ACTIVE_STATEMENT_SEARCH_QUERY)
+        rows: list[dict] = list(cursor.fetchall())
+        cursor.close()
+
+        session_id = None
+        for row in rows:
+            if _hash_query_text(row["statement_text"]) == sql_hash:
+                session_id = row["session_id"]
+                break
+        if session_id is None:
+            return None
+
+        try:
+            cursor = conn.cursor(as_dict=True)
+            cursor.execute(_ACTUAL_PLAN_XML_QUERY, (session_id,))
+            plan_row: dict | None = cursor.fetchone()
+            cursor.close()
+        except Exception:  # noqa: BLE001 - degrada pro plano cacheado, nunca propaga
+            return None
+        if plan_row is None or not plan_row.get("query_plan"):
+            return None
+        return str(plan_row["query_plan"])
+    finally:
+        conn.close()
 
 
 def _connect_and_fetch_execution_plan(
@@ -1895,10 +1971,11 @@ class SQLServerCollector:
 
     async def fetch_execution_plan(self, sql_hash: str) -> str | None:
         """Busca sob demanda (Etapa 11) — NAO faz parte do ciclo de coleta, nao precisa de
-        `instance_id`. Devolve o XML `ShowPlanXML` (ainda NAO mascarado — mascaramento e
-        responsabilidade do chamador, `app.services.execution_plan_service`) do plano em cache
-        cujo statement isolado+hasheado bate com `sql_hash`, ou `None` quando nenhum corresponde
-        (pode ter saido do cache desde a ultima execucao)."""
+        `instance_id`. Devolve o XML `ShowPlanXML` CACHEADO/estimado (ainda NAO mascarado —
+        mascaramento e responsabilidade do chamador, `app.services.execution_plan_service`) do
+        plano cujo statement isolado+hasheado bate com `sql_hash`, ou `None` quando nenhum
+        corresponde (pode ter saido do cache desde a ultima execucao). Ver
+        `fetch_actual_execution_plan` pro plano REAL, tentado primeiro pelo service."""
         settings = get_settings()
         overall_timeout = (
             self._connection_params.connect_timeout_seconds
@@ -1907,6 +1984,28 @@ class SQLServerCollector:
         return await asyncio.wait_for(
             asyncio.to_thread(
                 _connect_and_fetch_execution_plan,
+                self._connection_params,
+                sql_hash,
+                settings.collection_query_timeout_seconds,
+            ),
+            timeout=overall_timeout,
+        )
+
+    async def fetch_actual_execution_plan(self, sql_hash: str) -> str | None:
+        """Busca sob demanda — plano REAL (com contagens de linha/CPU/IO reais de execucao),
+        so possivel sem Query Store quando a mesma sessao que rodou `sql_hash` AINDA esta em
+        execucao agora (`sys.dm_exec_query_statistics_xml`, SQL Server 2016 SP1+). `None`
+        quando nao ha sessao ativa correspondente (o caso comum) ou quando a funcao nao esta
+        disponivel nesta versao/permissao — o chamador sempre cai pro plano cacheado/estimado
+        de `fetch_execution_plan` nesses casos, nunca propaga erro."""
+        settings = get_settings()
+        overall_timeout = (
+            self._connection_params.connect_timeout_seconds
+            + settings.collection_query_timeout_seconds
+        )
+        return await asyncio.wait_for(
+            asyncio.to_thread(
+                _connect_and_fetch_actual_execution_plan,
                 self._connection_params,
                 sql_hash,
                 settings.collection_query_timeout_seconds,

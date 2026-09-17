@@ -26,11 +26,15 @@ from app.security.credential_reference import (
 @dataclass(frozen=True, slots=True)
 class ExecutionPlanResult:
     """Resultado da busca — `reason` sempre preenchido quando `available=False`, nunca inventa
-    dado quando o plano nao foi encontrado."""
+    dado quando o plano nao foi encontrado. `source` (`available=True` apenas) distingue
+    "actual" (contagens reais de execucao, so quando a sessao original ainda esta rodando) de
+    "cached" (plano cacheado/estimado, o caso comum) — a tela SEMPRE informa qual dos dois esta
+    mostrando, nunca apresenta um como se fosse o outro."""
 
     available: bool
     plan_xml: str | None
     reason: str | None
+    source: str | None = None
 
 
 _POSTGRESQL_NOT_SUPPORTED_REASON = (
@@ -50,8 +54,12 @@ _CREDENTIAL_RESOLUTION_FAILED_REASON = "Falha ao resolver a credencial da instan
 async def fetch_execution_plan(
     instance: Instance, sql_hash: str, credential_resolver: CredentialResolver
 ) -> ExecutionPlanResult:
-    """Busca o plano de execucao em cache do SQL Server que corresponde a `sql_hash`, mascarando
-    valores de parametro embutidos no XML antes de devolver (`mask_showplan_xml_literals`)."""
+    """Busca o plano de execucao do SQL Server que corresponde a `sql_hash`, mascarando valores
+    de parametro embutidos no XML antes de devolver (`mask_showplan_xml_literals`). Tenta
+    primeiro o plano REAL (`fetch_actual_execution_plan` — so funciona se a sessao original
+    ainda estiver executando, sem Query Store nao ha outro jeito de ter contagens reais); se
+    nao encontrar, cai pro plano cacheado/estimado (`fetch_execution_plan` do collector, o
+    caminho ja existente desde a Etapa 11)."""
     if instance.db_type != "sqlserver":
         return ExecutionPlanResult(
             available=False, plan_xml=None, reason=_POSTGRESQL_NOT_SUPPORTED_REASON
@@ -83,6 +91,14 @@ async def fetch_execution_plan(
     )
     collector = SQLServerCollector(connection=connection, instance_id=instance.id)
     try:
+        actual_plan_xml = await collector.fetch_actual_execution_plan(sql_hash)
+        if actual_plan_xml is not None:
+            return ExecutionPlanResult(
+                available=True,
+                plan_xml=mask_showplan_xml_literals(actual_plan_xml),
+                reason=None,
+                source="actual",
+            )
         plan_xml = await collector.fetch_execution_plan(sql_hash)
     finally:
         await collector.close()
@@ -90,5 +106,5 @@ async def fetch_execution_plan(
     if plan_xml is None:
         return ExecutionPlanResult(available=False, plan_xml=None, reason=_PLAN_NOT_FOUND_REASON)
     return ExecutionPlanResult(
-        available=True, plan_xml=mask_showplan_xml_literals(plan_xml), reason=None
+        available=True, plan_xml=mask_showplan_xml_literals(plan_xml), reason=None, source="cached"
     )

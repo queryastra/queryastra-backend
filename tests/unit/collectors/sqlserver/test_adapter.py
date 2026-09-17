@@ -905,3 +905,142 @@ async def test_fetch_execution_plan_returns_none_when_plan_evicted_from_cache(
     plan_xml = await collector.fetch_execution_plan(sql_hash)
 
     assert plan_xml is None
+
+
+# --- fetch_actual_execution_plan (plano REAL, sessao ainda em execucao) ------------------------
+
+
+class _FakeActualPlanCursor:
+    def __init__(
+        self,
+        active_rows: list[dict[str, Any]],
+        plan_xml_by_session: dict[int, str],
+        *,
+        raise_on_statistics_xml: bool = False,
+    ) -> None:
+        self._active_rows = active_rows
+        self._plan_xml_by_session = plan_xml_by_session
+        self._raise_on_statistics_xml = raise_on_statistics_xml
+        self._pending_rows: list[dict[str, Any]] = []
+        self._pending_one: dict[str, Any] | None = None
+
+    def execute(self, query: str, params: tuple[object, ...] | None = None) -> None:
+        if "dm_exec_requests" in query:
+            self._pending_rows = self._active_rows
+        elif "dm_exec_query_statistics_xml" in query:
+            if self._raise_on_statistics_xml:
+                raise RuntimeError("funcao nao disponivel nesta versao/permissao")
+            assert params is not None
+            session_id = params[0]
+            xml = self._plan_xml_by_session.get(session_id)
+            self._pending_one = {"query_plan": xml} if xml is not None else None
+        else:
+            raise AssertionError(f"execute inesperado: {query}")
+
+    def fetchall(self) -> list[dict[str, Any]]:
+        return self._pending_rows
+
+    def fetchone(self) -> dict[str, Any] | None:
+        return self._pending_one
+
+    def close(self) -> None:
+        pass
+
+
+class _FakeActualPlanConnection:
+    def __init__(
+        self,
+        active_rows: list[dict[str, Any]],
+        plan_xml_by_session: dict[int, str],
+        *,
+        raise_on_statistics_xml: bool = False,
+    ) -> None:
+        self._active_rows = active_rows
+        self._plan_xml_by_session = plan_xml_by_session
+        self._raise_on_statistics_xml = raise_on_statistics_xml
+        self.closed = False
+
+    def cursor(self, as_dict: bool = False) -> _FakeActualPlanCursor:
+        assert as_dict is True
+        return _FakeActualPlanCursor(
+            self._active_rows,
+            self._plan_xml_by_session,
+            raise_on_statistics_xml=self._raise_on_statistics_xml,
+        )
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _patch_actual_plan_connect(
+    monkeypatch: pytest.MonkeyPatch,
+    active_rows: list[dict[str, Any]],
+    plan_xml_by_session: dict[int, str] | None = None,
+    *,
+    raise_on_statistics_xml: bool = False,
+) -> _FakeActualPlanConnection:
+    fake_conn = _FakeActualPlanConnection(
+        active_rows, plan_xml_by_session or {}, raise_on_statistics_xml=raise_on_statistics_xml
+    )
+
+    def fake_connect(**kwargs: object) -> _FakeActualPlanConnection:
+        return fake_conn
+
+    monkeypatch.setattr(pymssql, "connect", fake_connect)
+    return fake_conn
+
+
+async def test_fetch_actual_execution_plan_returns_xml_for_active_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    statement = "SELECT * FROM t WHERE id = 42"
+    sql_hash = _masked_hash(statement)
+    _patch_actual_plan_connect(
+        monkeypatch,
+        active_rows=[
+            {"session_id": 51, "statement_text": "SELECT * FROM other WHERE x = 1"},
+            {"session_id": 52, "statement_text": statement},
+        ],
+        plan_xml_by_session={52: "<ShowPlanXML actual='1'>...</ShowPlanXML>"},
+    )
+
+    collector = SQLServerCollector(connection=_CONNECTION, instance_id=uuid4())
+    plan_xml = await collector.fetch_actual_execution_plan(sql_hash)
+
+    assert plan_xml == "<ShowPlanXML actual='1'>...</ShowPlanXML>"
+
+
+async def test_fetch_actual_execution_plan_returns_none_when_no_active_session_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_actual_plan_connect(
+        monkeypatch,
+        active_rows=[{"session_id": 51, "statement_text": "SELECT * FROM other WHERE x = 1"}],
+    )
+
+    collector = SQLServerCollector(connection=_CONNECTION, instance_id=uuid4())
+    plan_xml = await collector.fetch_actual_execution_plan(
+        _masked_hash("SELECT * FROM t WHERE id = 42")
+    )
+
+    assert plan_xml is None
+
+
+async def test_fetch_actual_execution_plan_degrades_gracefully_when_function_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`sys.dm_exec_query_statistics_xml` exige SQL Server 2016 SP1+ - se a chamada falhar
+    (versao antiga, permissao), degrada pra `None` (o service cai pro plano cacheado), nunca
+    propaga o erro."""
+    statement = "SELECT * FROM t WHERE id = 42"
+    sql_hash = _masked_hash(statement)
+    _patch_actual_plan_connect(
+        monkeypatch,
+        active_rows=[{"session_id": 52, "statement_text": statement}],
+        raise_on_statistics_xml=True,
+    )
+
+    collector = SQLServerCollector(connection=_CONNECTION, instance_id=uuid4())
+    plan_xml = await collector.fetch_actual_execution_plan(sql_hash)
+
+    assert plan_xml is None

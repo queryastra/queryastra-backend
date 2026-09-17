@@ -876,9 +876,17 @@ def _masked_hash(statement_text: str) -> str:
 
 
 class _FakeExecutionPlanCursor:
-    def __init__(self, search_rows: list[dict[str, Any]], plan_xml_by_handle: dict) -> None:
+    def __init__(
+        self,
+        search_rows: list[dict[str, Any]],
+        plan_xml_by_handle: dict,
+        active_rows: list[dict[str, Any]] | None = None,
+        actual_plan_xml_by_session: dict | None = None,
+    ) -> None:
         self._search_rows = search_rows
         self._plan_xml_by_handle = plan_xml_by_handle
+        self._active_rows = active_rows or []
+        self._actual_plan_xml_by_session = actual_plan_xml_by_session or {}
         self._pending_rows: list[dict[str, Any]] = []
         self._pending_one: dict[str, Any] | None = None
 
@@ -888,6 +896,14 @@ class _FakeExecutionPlanCursor:
         elif "dm_exec_query_plan" in query:
             assert params is not None
             xml = self._plan_xml_by_handle.get(params[0])
+            self._pending_one = {"query_plan": xml} if xml is not None else None
+        elif "dm_exec_requests" in query:
+            # `fetch_actual_execution_plan` (tentado primeiro pelo service) - sem sessao ativa
+            # por padrao, o service cai pro caminho cacheado ja testado abaixo.
+            self._pending_rows = self._active_rows
+        elif "dm_exec_query_statistics_xml" in query:
+            assert params is not None
+            xml = self._actual_plan_xml_by_session.get(params[0])
             self._pending_one = {"query_plan": xml} if xml is not None else None
         else:  # pragma: no cover - defensivo
             raise AssertionError(f"execute inesperado: {query}")
@@ -903,13 +919,26 @@ class _FakeExecutionPlanCursor:
 
 
 class _FakeExecutionPlanConnection:
-    def __init__(self, search_rows: list[dict[str, Any]], plan_xml_by_handle: dict) -> None:
+    def __init__(
+        self,
+        search_rows: list[dict[str, Any]],
+        plan_xml_by_handle: dict,
+        active_rows: list[dict[str, Any]] | None = None,
+        actual_plan_xml_by_session: dict | None = None,
+    ) -> None:
         self._search_rows = search_rows
         self._plan_xml_by_handle = plan_xml_by_handle
+        self._active_rows = active_rows
+        self._actual_plan_xml_by_session = actual_plan_xml_by_session
 
     def cursor(self, as_dict: bool = False) -> _FakeExecutionPlanCursor:
         assert as_dict is True
-        return _FakeExecutionPlanCursor(self._search_rows, self._plan_xml_by_handle)
+        return _FakeExecutionPlanCursor(
+            self._search_rows,
+            self._plan_xml_by_handle,
+            self._active_rows,
+            self._actual_plan_xml_by_session,
+        )
 
     def close(self) -> None:
         pass
@@ -955,3 +984,47 @@ async def test_get_query_execution_plan_returns_xml_for_sqlserver_instance(
     assert body["available"] is True
     assert body["plan_xml"] == "<ShowPlanXML>...</ShowPlanXML>"
     assert body["reason"] is None
+    assert body["source"] == "cached"
+
+
+async def test_get_query_execution_plan_prefers_actual_over_cached_when_session_active(
+    client: AsyncClient, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Quando a sessao que rodou `sql_hash` AINDA esta ativa, o service devolve o plano REAL
+    (`source="actual"`) sem sequer consultar o cache/plan_handle."""
+    instance = Instance(
+        name=f"test-instance-sqlserver-{uuid4()}",
+        db_type="sqlserver",
+        host="127.0.0.1",
+        port=1433,
+        criticality="standard",
+        polling_interval_seconds=10,
+        auth_method="integrated",
+    )
+    db_session.add(instance)
+    await db_session.commit()
+    await db_session.refresh(instance)
+
+    statement = "SELECT * FROM t WHERE id = 42"
+    sql_hash = _masked_hash(statement)
+    fake_conn = _FakeExecutionPlanConnection(
+        search_rows=[],
+        plan_xml_by_handle={},
+        active_rows=[{"session_id": 52, "statement_text": statement}],
+        actual_plan_xml_by_session={52: "<ShowPlanXML actual='1'>...</ShowPlanXML>"},
+    )
+    monkeypatch.setattr(pymssql, "connect", lambda **kwargs: fake_conn)
+
+    try:
+        response = await client.get(
+            f"/api/v1/queries/detail/{instance.id}/{sql_hash}/execution-plan"
+        )
+    finally:
+        await db_session.delete(instance)
+        await db_session.commit()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["available"] is True
+    assert body["plan_xml"] == "<ShowPlanXML actual='1'>...</ShowPlanXML>"
+    assert body["source"] == "actual"
