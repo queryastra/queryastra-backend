@@ -11,6 +11,7 @@ from app.models.blocking_incident import BlockingIncident
 from app.models.deadlock_event import DeadlockEvent
 from app.models.instance import Instance, InstanceMaintenanceWindow
 from app.models.missing_index_suggestion import MissingIndexSuggestion
+from app.models.query_plan_snapshot import QueryPlanSnapshot
 from app.models.server import InstanceServer, Server
 from app.models.transaction_event import TransactionEvent
 
@@ -28,4 +29,5 @@ __all__ = [
     "TransactionEvent",
     "BlockingIncident",
     "DeadlockEvent",
+    "QueryPlanSnapshot",
 ]

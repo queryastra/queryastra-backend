@@ -43,6 +43,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_db_session, resolve_time_window
 from app.core.config import get_settings
 from app.repositories.instances_repository import InstancesRepository
+from app.repositories.query_plan_snapshots_repository import QueryPlanSnapshotsRepository
 from app.repositories.query_samples_repository import QuerySamplesRepository
 from app.security.credential_reference import CredentialResolver
 from app.services.execution_plan_service import fetch_execution_plan
@@ -220,6 +221,20 @@ class ExecutionPlanResponse(BaseModel):
     source: str | None = None
 
 
+class PlanHistoryEntryResponse(BaseModel):
+    """Um plano DISTINTO visto para esta query numa varredura periodica do cache
+    (`PlanHistorySupervisor`, so SQL Server, desligado por padrao) — mais recente primeiro. Lista
+    vazia nao significa "sem histórico de verdade": tambem aparece vazia quando o worker esta
+    desligado, ou quando ele nunca viu essa query com plano no cache. Sempre `source="cached"`
+    (mesmo racional de `NormalizedPlanSnapshot` — um scan periodico nunca produz `"actual"`)."""
+
+    captured_at: datetime
+    plan_hash: str
+    plan_xml: str
+    last_execution_time: datetime | None
+    source: Literal["cached"] = "cached"
+
+
 # --- Dependency providers -------------------------------------------------------------------
 
 
@@ -242,6 +257,12 @@ def get_credential_resolver() -> CredentialResolver:
 def get_sql_insight_client() -> SqlInsightClient:
     settings = get_settings()
     return SqlInsightClient(settings.sql_insight_base_url, settings.sql_insight_timeout_seconds)
+
+
+def get_query_plan_snapshots_repository(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> QueryPlanSnapshotsRepository:
+    return QueryPlanSnapshotsRepository(session)
 
 
 # --- Endpoints -------------------------------------------------------------------------------
@@ -865,3 +886,30 @@ async def get_query_execution_plan(
         reason=result.reason,
         source=result.source,
     )
+
+
+@router.get(
+    "/detail/{instance_id}/{sql_hash}/plan-history", response_model=list[PlanHistoryEntryResponse]
+)
+async def get_query_plan_history(
+    instance_id: UUID,
+    sql_hash: str,
+    repository: Annotated[
+        QueryPlanSnapshotsRepository, Depends(get_query_plan_snapshots_repository)
+    ],
+) -> list[PlanHistoryEntryResponse]:
+    """Historico de planos DISTINTOS vistos em varreduras periodicas do cache
+    (`PlanHistorySupervisor`, so SQL Server, desligado por padrao) para esta query — mais
+    recente primeiro. Lista vazia quando o worker esta desligado ou nunca viu esta query com
+    plano no cache — nunca um erro, e a tela trata como "sem historico disponivel ainda"."""
+    settings = get_settings()
+    rows = await repository.list_for_query(instance_id, sql_hash, settings.api_read_max_rows)
+    return [
+        PlanHistoryEntryResponse(
+            captured_at=row.captured_at,
+            plan_hash=row.plan_hash,
+            plan_xml=row.plan_xml_masked,
+            last_execution_time=row.last_execution_time,
+        )
+        for row in rows
+    ]

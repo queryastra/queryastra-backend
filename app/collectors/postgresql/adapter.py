@@ -88,6 +88,7 @@ from app.normalizers.models import (
     NormalizedMetricSample,
     NormalizedMissingIndexSuggestion,
     NormalizedPlanCompileTimeoutFinding,
+    NormalizedPlanSnapshot,
     NormalizedQuerySample,
     NormalizedTransactionEvent,
 )
@@ -952,6 +953,11 @@ class PostgreSQLCollector:
     async def scan_plan_compile_timeouts(self) -> list[NormalizedPlanCompileTimeoutFinding]:
         """PostgreSQL nao tem cache de plano exposto do mesmo jeito que o SQL Server — sempre
         lista vazia, sem tentar conectar (mesma classe de limitacao ja documentada)."""
+        return []
+
+    async def scan_plan_history(self) -> list[NormalizedPlanSnapshot]:
+        """Mesma limitacao de `scan_plan_compile_timeouts` — sem cache de plano exposto via SQL,
+        sempre lista vazia, sem tentar conectar."""
         return []
 
     async def run_scalar_query(self, sql: str, timeout_seconds: float) -> float | None:

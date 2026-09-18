@@ -74,7 +74,7 @@ from app.collectors.connection import ConnectionParams
 from app.collectors.transaction_flagging import compute_flag_reason
 from app.core.config import get_settings
 from app.core.logging import get_logger
-from app.masking.sql_masking import mask_sql_literals
+from app.masking.sql_masking import mask_showplan_xml_literals, mask_sql_literals
 from app.normalizers.metric_names import (
     SQLSERVER_ACTIVE_SESSION_COUNT,
     SQLSERVER_INSTANCE_CPU_PERCENT,
@@ -91,6 +91,7 @@ from app.normalizers.models import (
     NormalizedMetricSample,
     NormalizedMissingIndexSuggestion,
     NormalizedPlanCompileTimeoutFinding,
+    NormalizedPlanSnapshot,
     NormalizedQuerySample,
     NormalizedTransactionEvent,
 )
@@ -479,6 +480,33 @@ _ACTUAL_PLAN_XML_QUERY = "SELECT query_plan FROM sys.dm_exec_query_statistics_xm
 _PLAN_COMPILE_TIMEOUT_SCAN_QUERY = """
     SELECT TOP (500)
         qp.query_plan,
+        SUBSTRING(
+            st.text,
+            (qs.statement_start_offset / 2) + 1,
+            (
+                (CASE qs.statement_end_offset
+                     WHEN -1 THEN DATALENGTH(st.text)
+                     ELSE qs.statement_end_offset
+                 END - qs.statement_start_offset) / 2
+            ) + 1
+        ) AS statement_text
+    FROM sys.dm_exec_query_stats AS qs
+    CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) AS st
+    CROSS APPLY sys.dm_exec_query_plan(qs.plan_handle) AS qp
+    WHERE st.text IS NOT NULL AND qp.query_plan IS NOT NULL
+    ORDER BY qs.last_execution_time DESC
+"""
+
+# Historico de plano de execucao (item priorizado pelo usuario apos a Fase 2) — mesma forma de
+# `_PLAN_COMPILE_TIMEOUT_SCAN_QUERY` (varre o cache inteiro, TOP 500 por recencia), mas sem
+# filtrar por motivo de aborto do otimizador: aqui queremos TODO plano em cache, pra detectar
+# quando ele MUDA em relacao ao ultimo conhecido (deduplicacao fica no repositorio). Inclui
+# `last_execution_time` — ajuda a correlacionar quando aquele plano estava de fato em uso, nao
+# so quando o worker aconteceu de varrer.
+_PLAN_HISTORY_SCAN_QUERY = """
+    SELECT TOP (500)
+        qp.query_plan,
+        qs.last_execution_time,
         SUBSTRING(
             st.text,
             (qs.statement_start_offset / 2) + 1,
@@ -1346,6 +1374,52 @@ def _connect_and_scan_plan_compile_timeouts(
     return list(findings.values())
 
 
+def _connect_and_scan_plan_history(
+    connection: ConnectionParams,
+    instance_id: UUID,
+    query_timeout_seconds: float,
+) -> list[NormalizedPlanSnapshot]:
+    """Helper sincrono (mesmo padrao de `_connect_and_scan_plan_compile_timeouts`) — devolve o
+    snapshot atual de TODA query com plano em cache, uma por `sql_hash` distinto. A deduplicacao
+    por mudanca de plano (so persistir quando o plano muda de fato) fica no repositorio."""
+    login_timeout_seconds = int(connection.connect_timeout_seconds)
+    conn = pymssql.connect(
+        server=connection.host,
+        port=str(connection.port),
+        user=connection.username,
+        password=connection.secret_value,
+        timeout=int(query_timeout_seconds),
+        login_timeout=login_timeout_seconds,
+    )
+    try:
+        cursor = conn.cursor(as_dict=True)
+        cursor.execute(_PLAN_HISTORY_SCAN_QUERY)
+        rows: list[dict] = list(cursor.fetchall())
+        cursor.close()
+    finally:
+        conn.close()
+
+    snapshots: dict[str, NormalizedPlanSnapshot] = {}
+    for row in rows:
+        statement_text = row["statement_text"]
+        plan_xml = row["query_plan"]
+        if not statement_text or not plan_xml:
+            continue
+        sql_hash = hashlib.sha256(mask_sql_literals(statement_text).encode("utf-8")).hexdigest()
+        if sql_hash in snapshots:
+            continue
+        plan_xml_masked = mask_showplan_xml_literals(str(plan_xml))
+        plan_hash = hashlib.sha256(plan_xml_masked.encode("utf-8")).hexdigest()
+        snapshots[sql_hash] = NormalizedPlanSnapshot(
+            instance_id=instance_id,
+            sql_hash=sql_hash,
+            plan_hash=plan_hash,
+            plan_xml_masked=plan_xml_masked,
+            last_execution_time=row["last_execution_time"],
+        )
+    return list(snapshots.values())
+
+
 def _build_query_samples(
     session_rows: list[dict], instance_id: UUID, collected_at: datetime
 ) -> list[NormalizedQuerySample]:
@@ -1939,6 +2013,31 @@ class SQLServerCollector:
             asyncio.to_thread(
                 _connect_and_scan_plan_compile_timeouts,
                 self._connection_params,
+                settings.collection_query_timeout_seconds,
+            ),
+            timeout=overall_timeout,
+        )
+
+    async def scan_plan_history(self) -> list[NormalizedPlanSnapshot]:
+        """Historico de plano de execucao — varre o cache de planos e devolve o snapshot atual
+        de toda query com plano em cache, instancia inteira numa unica chamada. A deduplicacao
+        por mudanca de plano fica no repositorio
+        (`QueryPlanSnapshotsRepository.insert_if_changed`)."""
+        if self._instance_id is None:
+            raise ValueError(
+                "SQLServerCollector.scan_plan_history requer instance_id de uma instancia ja "
+                "cadastrada."
+            )
+        settings = get_settings()
+        overall_timeout = (
+            self._connection_params.connect_timeout_seconds
+            + settings.collection_query_timeout_seconds
+        )
+        return await asyncio.wait_for(
+            asyncio.to_thread(
+                _connect_and_scan_plan_history,
+                self._connection_params,
+                self._instance_id,
                 settings.collection_query_timeout_seconds,
             ),
             timeout=overall_timeout,

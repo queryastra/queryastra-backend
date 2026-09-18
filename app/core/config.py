@@ -212,6 +212,21 @@ class Settings(BaseSettings):
         default=86400, alias="PLAN_COMPILE_TIMEOUT_CHECK_INTERVAL_SECONDS"
     )
 
+    # Historico de plano de execucao (item priorizado pelo usuario apos a Fase 2) - liga o
+    # worker de baixa frequencia que varre o cache de planos do SQL Server procurando MUDANCA de
+    # plano por query (PlanHistorySupervisor). Default false - mesma politica de seguranca dos
+    # demais workers. So SQL Server (Postgres nao tem cache de plano exposto do mesmo jeito).
+    plan_history_supervisor_enabled: bool = Field(
+        default=False, alias="PLAN_HISTORY_SUPERVISOR_ENABLED"
+    )
+    # Intervalo (segundos) entre varreduras do cache de planos por instancia ativa. Default 1 dia
+    # - mesma cadencia baixa do MissingIndexSupervisor/BackupStatusSupervisor/
+    # PlanCompileTimeoutSupervisor (plano nao muda com frequencia suficiente para justificar um
+    # ciclo mais curto).
+    plan_history_check_interval_seconds: int = Field(
+        default=86400, alias="PLAN_HISTORY_CHECK_INTERVAL_SECONDS"
+    )
+
 
 @lru_cache
 def get_settings() -> Settings:

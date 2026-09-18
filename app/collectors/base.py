@@ -27,6 +27,7 @@ from app.normalizers.models import (
     NormalizedMetricSample,
     NormalizedMissingIndexSuggestion,
     NormalizedPlanCompileTimeoutFinding,
+    NormalizedPlanSnapshot,
     NormalizedQuerySample,
     NormalizedTransactionEvent,
 )
@@ -193,5 +194,17 @@ class Collector(Protocol):
         (`app/workers/plan_compile_timeout_supervisor.py`). So SQL Server (cache de plano via
         `sys.dm_exec_query_stats`/`sys.dm_exec_query_plan`) — PostgreSQL nao tem cache de plano
         exposto do mesmo jeito, devolve lista vazia sempre.
+        """
+        ...
+
+    async def scan_plan_history(self) -> list[NormalizedPlanSnapshot]:
+        """Varre o cache de planos, instancia inteira, devolvendo o snapshot ATUAL de toda query
+        com plano em cache (historico de plano de execucao — item priorizado pelo usuario).
+
+        Roda num worker de baixa frequencia proprio
+        (`app/workers/plan_history_supervisor.py`); a deduplicacao por mudanca de plano fica no
+        repositorio, nao aqui (mesmo racional de `collect_deadlock_events`, que tambem devolve
+        tudo que esta no ring buffer a cada chamada). So SQL Server — PostgreSQL devolve lista
+        vazia sempre.
         """
         ...

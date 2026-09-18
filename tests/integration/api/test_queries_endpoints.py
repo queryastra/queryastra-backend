@@ -18,8 +18,9 @@ from app.api.v1.queries import get_sql_insight_client
 from app.main import app
 from app.masking.sql_masking import mask_sql_literals
 from app.models.instance import Instance
-from app.normalizers.models import NormalizedQuerySample
+from app.normalizers.models import NormalizedPlanSnapshot, NormalizedQuerySample
 from app.normalizers.wait_taxonomy import WaitCategory
+from app.repositories.query_plan_snapshots_repository import QueryPlanSnapshotsRepository
 from app.repositories.query_samples_repository import QuerySamplesRepository
 from app.services.sql_insight_client import SqlInsightAnalysis, SqlInsightRule
 
@@ -1028,3 +1029,57 @@ async def test_get_query_execution_plan_prefers_actual_over_cached_when_session_
     assert body["available"] is True
     assert body["plan_xml"] == "<ShowPlanXML actual='1'>...</ShowPlanXML>"
     assert body["source"] == "actual"
+
+
+# --- /detail/{instance_id}/{sql_hash}/plan-history (historico de plano de execucao) -------------
+
+
+async def test_get_query_plan_history_returns_empty_list_when_never_scanned(
+    client: AsyncClient, test_instance: Instance
+) -> None:
+    response = await client.get(
+        f"/api/v1/queries/detail/{test_instance.id}/hash-sem-historico/plan-history"
+    )
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+async def test_get_query_plan_history_returns_snapshots_most_recent_first(
+    client: AsyncClient, db_session: AsyncSession, test_instance: Instance
+) -> None:
+    repo = QueryPlanSnapshotsRepository(db_session)
+    await repo.insert_if_changed(
+        [
+            NormalizedPlanSnapshot(
+                instance_id=test_instance.id,
+                sql_hash="hash-com-historico",
+                plan_hash="plan-hash-old",
+                plan_xml_masked="<ShowPlanXML>old</ShowPlanXML>",
+                last_execution_time=datetime.now(UTC) - timedelta(days=1),
+            )
+        ]
+    )
+    await repo.insert_if_changed(
+        [
+            NormalizedPlanSnapshot(
+                instance_id=test_instance.id,
+                sql_hash="hash-com-historico",
+                plan_hash="plan-hash-new",
+                plan_xml_masked="<ShowPlanXML>new</ShowPlanXML>",
+                last_execution_time=datetime.now(UTC),
+            )
+        ]
+    )
+
+    response = await client.get(
+        f"/api/v1/queries/detail/{test_instance.id}/hash-com-historico/plan-history"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 2
+    assert body[0]["plan_hash"] == "plan-hash-new"
+    assert body[0]["plan_xml"] == "<ShowPlanXML>new</ShowPlanXML>"
+    assert body[0]["source"] == "cached"
+    assert body[1]["plan_hash"] == "plan-hash-old"

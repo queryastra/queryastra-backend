@@ -29,6 +29,7 @@ from app.workers.deadlock_supervisor import DeadlockSupervisor
 from app.workers.extended_health_metrics_supervisor import ExtendedHealthMetricsSupervisor
 from app.workers.missing_index_supervisor import MissingIndexSupervisor
 from app.workers.plan_compile_timeout_supervisor import PlanCompileTimeoutSupervisor
+from app.workers.plan_history_supervisor import PlanHistorySupervisor
 from app.workers.polling_supervisor import PollingSupervisor
 from app.workers.problem_events_retention_worker import ProblemEventsRetentionWorker
 
@@ -68,6 +69,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     extended_health_metrics_task: asyncio.Task[None] | None = None
     plan_compile_timeout_supervisor: PlanCompileTimeoutSupervisor | None = None
     plan_compile_timeout_task: asyncio.Task[None] | None = None
+    plan_history_supervisor: PlanHistorySupervisor | None = None
+    plan_history_task: asyncio.Task[None] | None = None
 
     if settings.polling_supervisor_enabled:
         supervisor = PollingSupervisor(
@@ -196,6 +199,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "(PLAN_COMPILE_TIMEOUT_SUPERVISOR_ENABLED=false)"
         )
 
+    if settings.plan_history_supervisor_enabled:
+        plan_history_supervisor = PlanHistorySupervisor(
+            async_session_factory, settings.plan_history_check_interval_seconds
+        )
+        plan_history_task = asyncio.create_task(plan_history_supervisor.run())
+        logger.info(
+            "PlanHistorySupervisor habilitado (check_interval=%ss)",
+            settings.plan_history_check_interval_seconds,
+        )
+    else:
+        logger.info(
+            "PlanHistorySupervisor desabilitado (PLAN_HISTORY_SUPERVISOR_ENABLED=false)"
+        )
+
     yield
 
     if supervisor is not None and supervisor_task is not None:
@@ -222,6 +239,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if plan_compile_timeout_supervisor is not None and plan_compile_timeout_task is not None:
         plan_compile_timeout_supervisor.stop()
         await plan_compile_timeout_task
+    if plan_history_supervisor is not None and plan_history_task is not None:
+        plan_history_supervisor.stop()
+        await plan_history_task
     executor.shutdown(wait=False, cancel_futures=True)
     logger.info("Lifespan finalizado")
 

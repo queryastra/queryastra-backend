@@ -282,3 +282,30 @@ class NormalizedPlanCompileTimeoutFinding(BaseModel):
     sql_hash: str
     reason: str
     statement_text_masked: str
+
+
+class NormalizedPlanSnapshot(BaseModel):
+    """Um plano distinto visto no cache durante a varredura periodica de historico de plano
+    (`app.workers.plan_history_supervisor.PlanHistorySupervisor`) — a pedido explicito do
+    usuario, pra responder "essa query, que sempre foi rapida, ficou lenta - o plano mudou?".
+
+    So SQL Server (mesma limitacao de `NormalizedPlanCompileTimeoutFinding` - Postgres nao tem
+    cache de plano exposto do mesmo jeito). Sempre plano CACHEADO/estimado, nunca "actual": um
+    scan periodico nao tem como garantir que a sessao original ainda esteja executando no
+    instante exato do scan (isso so e possivel na busca sob demanda da Etapa 11,
+    `sys.dm_exec_query_statistics_xml`) - `app.services.execution_plan_service` continua sendo o
+    unico lugar que produz `source="actual"`.
+
+    O COLETOR devolve o snapshot atual de TODAS as queries com plano em cache a cada varredura
+    (mesmo padrao de `collect_deadlock_events` devolvendo tudo que esta no ring buffer) - a
+    deduplicacao por MUDANCA de plano (so persiste quando `plan_hash` difere do ultimo conhecido
+    para o mesmo par instance_id/sql_hash) fica no repositorio
+    (`QueryPlanSnapshotsRepository.insert_if_changed`), nao aqui."""
+
+    model_config = ConfigDict(frozen=True)
+
+    instance_id: UUID
+    sql_hash: str
+    plan_hash: str
+    plan_xml_masked: str
+    last_execution_time: datetime | None = None

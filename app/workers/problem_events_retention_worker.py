@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.core.logging import get_logger
 from app.repositories.blocking_incidents_repository import BlockingIncidentsRepository
 from app.repositories.deadlock_events_repository import DeadlockEventsRepository
+from app.repositories.query_plan_snapshots_repository import QueryPlanSnapshotsRepository
 from app.repositories.transaction_events_repository import TransactionEventsRepository
 
 logger = get_logger(__name__)
@@ -30,11 +31,13 @@ logger = get_logger(__name__)
 _TransactionEventsRepositoryFactory = Callable[[AsyncSession], TransactionEventsRepository]
 _BlockingIncidentsRepositoryFactory = Callable[[AsyncSession], BlockingIncidentsRepository]
 _DeadlockEventsRepositoryFactory = Callable[[AsyncSession], DeadlockEventsRepository]
+_QueryPlanSnapshotsRepositoryFactory = Callable[[AsyncSession], QueryPlanSnapshotsRepository]
 
 
 class ProblemEventsRetentionWorker:
-    """Expurga, a cada `check_interval_seconds`, linhas fechadas/encerradas ha mais tempo que
-    `retention_days` nas 3 tabelas de log de incidente."""
+    """Expurga, a cada `check_interval_seconds`, linhas fechadas/encerradas (ou, no caso de
+    `query_plan_snapshots`, so antigas — nao ha aberto/encerrado) ha mais tempo que
+    `retention_days` nas 4 tabelas de log de incidente/historico."""
 
     def __init__(
         self,
@@ -51,6 +54,9 @@ class ProblemEventsRetentionWorker:
         deadlock_events_repository_factory: _DeadlockEventsRepositoryFactory = (
             DeadlockEventsRepository
         ),
+        query_plan_snapshots_repository_factory: _QueryPlanSnapshotsRepositoryFactory = (
+            QueryPlanSnapshotsRepository
+        ),
     ) -> None:
         self._session_factory = session_factory
         self._retention_days = retention_days
@@ -58,6 +64,7 @@ class ProblemEventsRetentionWorker:
         self._transaction_events_repository_factory = transaction_events_repository_factory
         self._blocking_incidents_repository_factory = blocking_incidents_repository_factory
         self._deadlock_events_repository_factory = deadlock_events_repository_factory
+        self._query_plan_snapshots_repository_factory = query_plan_snapshots_repository_factory
         self._stop_event = asyncio.Event()
 
     async def run(self) -> None:
@@ -95,11 +102,15 @@ class ProblemEventsRetentionWorker:
             deadlock_count = await self._deadlock_events_repository_factory(
                 session
             ).purge_older_than(cutoff)
+            plan_snapshot_count = await self._query_plan_snapshots_repository_factory(
+                session
+            ).purge_older_than(cutoff)
         logger.info(
             "Expurgo concluido cutoff=%s transaction_events=%s blocking_incidents=%s "
-            "deadlock_events=%s",
+            "deadlock_events=%s query_plan_snapshots=%s",
             cutoff.isoformat(),
             transaction_count,
             blocking_count,
             deadlock_count,
+            plan_snapshot_count,
         )

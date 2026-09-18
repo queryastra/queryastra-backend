@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import hashlib
+from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
@@ -262,3 +264,109 @@ async def test_scan_plan_compile_timeouts_returns_empty_when_no_reason_matches(
     findings = await collector.scan_plan_compile_timeouts()
 
     assert findings == []
+
+
+# --- scan_plan_history (historico de plano de execucao) -----------------------------------------
+
+_SIMPLE_PLAN_XML = """<?xml version="1.0"?>
+<ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan">
+  <BatchSequence><Batch><Statements>
+    <StmtSimple />
+  </Statements></Batch></BatchSequence>
+</ShowPlanXML>"""
+
+_DIFFERENT_PLAN_XML = """<?xml version="1.0"?>
+<ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan">
+  <BatchSequence><Batch><Statements>
+    <StmtSimple PhysicalOp="Index Scan" />
+  </Statements></Batch></BatchSequence>
+</ShowPlanXML>"""
+
+_LAST_EXEC_TIME = datetime(2026, 9, 18, 12, 0, 0, tzinfo=UTC)
+
+
+async def test_scan_plan_history_returns_snapshot_with_masked_plan_and_hash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_dict_connect(
+        monkeypatch,
+        [
+            {
+                "query_plan": _SIMPLE_PLAN_XML,
+                "statement_text": "SELECT * FROM t WHERE x=1",
+                "last_execution_time": _LAST_EXEC_TIME,
+            },
+        ],
+    )
+    instance_id = uuid4()
+    collector = SQLServerCollector(connection=_CONNECTION, instance_id=instance_id)
+
+    snapshots = await collector.scan_plan_history()
+
+    assert len(snapshots) == 1
+    snapshot = snapshots[0]
+    assert snapshot.instance_id == instance_id
+    assert snapshot.last_execution_time == _LAST_EXEC_TIME
+    assert snapshot.plan_xml_masked
+    assert (
+        snapshot.plan_hash
+        == hashlib.sha256(snapshot.plan_xml_masked.encode("utf-8")).hexdigest()
+    )
+
+
+async def test_scan_plan_history_dedupes_by_sql_hash_keeping_first_seen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_dict_connect(
+        monkeypatch,
+        [
+            {
+                "query_plan": _SIMPLE_PLAN_XML,
+                "statement_text": "SELECT * FROM t WHERE x=1",
+                "last_execution_time": None,
+            },
+            {
+                "query_plan": _DIFFERENT_PLAN_XML,
+                "statement_text": "SELECT * FROM t WHERE x=2",
+                "last_execution_time": None,
+            },
+        ],
+    )
+    collector = SQLServerCollector(connection=_CONNECTION, instance_id=uuid4())
+
+    snapshots = await collector.scan_plan_history()
+
+    # mascarado, os dois statements viram o mesmo sql_hash (literal ?1/?2 -> ?)
+    assert len(snapshots) == 1
+
+
+async def test_scan_plan_history_distinguishes_different_plans_by_plan_hash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_dict_connect(
+        monkeypatch,
+        [
+            {
+                "query_plan": _SIMPLE_PLAN_XML,
+                "statement_text": "SELECT * FROM a",
+                "last_execution_time": None,
+            },
+            {
+                "query_plan": _DIFFERENT_PLAN_XML,
+                "statement_text": "SELECT * FROM b",
+                "last_execution_time": None,
+            },
+        ],
+    )
+    collector = SQLServerCollector(connection=_CONNECTION, instance_id=uuid4())
+
+    snapshots = await collector.scan_plan_history()
+
+    assert len(snapshots) == 2
+    assert snapshots[0].plan_hash != snapshots[1].plan_hash
+
+
+async def test_scan_plan_history_raises_value_error_without_instance_id() -> None:
+    collector = SQLServerCollector(connection=_CONNECTION, instance_id=None)
+    with pytest.raises(ValueError):
+        await collector.scan_plan_history()
