@@ -7,6 +7,10 @@ policy de refresh, esta vazio e nunca atualizado, portanto nunca e usado aqui (a
 `sql_text_masked` (`Docs/rules/03-sql-privacy.md`) — o texto original cifrado so e acessivel pelo
 fluxo de "revelar" auditado da Fase 2 (RBAC), fora de escopo deste MVP.
 
+`GET /database-names/{instance_id}` — só a lista de nomes distintos, sem agregação nenhuma
+(bem mais barato que `/databases/{instance_id}`) — usado por seletores simples de banco fora do
+drill-down (ex.: override ad-hoc de tempo mínimo de bloqueio).
+
 Drill-down hierarquico (Instancia -> Banco -> Query): `GET /databases/{instance_id}` (nivel 1,
 agrega por `database_name`), `GET /top-sql/{instance_id}?database_name=X` (nivel 2, mesmo
 agregado por `sql_hash` de sempre, agora filtravel por banco) e `GET /detail/{instance_id}/
@@ -32,7 +36,7 @@ decomposta por wait nativo — mesmo padrao de "Bancos de dados", nao de "Waits"
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -391,6 +395,29 @@ async def top_sql_by_wait_type(
         )
         for row in rows
     ]
+
+
+@router.get("/database-names/{instance_id}", response_model=list[str])
+async def list_database_names(
+    instance_id: UUID,
+    repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
+    since: Annotated[datetime | None, Query(alias="from")] = None,
+) -> list[str]:
+    """Só os NOMES de banco distintos que essa instância teve recentemente — bem mais barato que
+    `GET /databases/{instance_id}` (que agrega wait time/decomposição por wait nativo, incluindo
+    a CTE de `effective_wait_ms`, cara sobre muito volume). Usado por seletores simples de banco
+    (ex.: override ad-hoc de tempo mínimo de bloqueio, "Configurações → Geral") que só precisam
+    da lista de nomes, não de estatística nenhuma.
+
+    Padrão: últimas 24h — bug de performance real relatado pelo usuário ao vivo: mesmo sem a
+    agregação cara, um `SELECT DISTINCT` sobre 30 dias de `query_samples` numa instância de muito
+    volume (~940 mil linhas em 30 dias numa instância real observada) ainda levava ~9 SEGUNDOS —
+    não há índice cobrindo `database_name`, então o scan lê a coluna de toda linha na janela.
+    Medido ao vivo: 24h ~170ms, 7 dias ~850ms, 30 dias ~9s — a curva não é linear, piora rápido.
+    24h também é mais coerente com o propósito da tela (override AD-HOC pra investigar algo
+    acontecendo AGORA, não um banco sem atividade há semanas)."""
+    resolved_since = since or (datetime.now(UTC) - timedelta(hours=24))
+    return await repository.list_distinct_database_names(instance_id, resolved_since)
 
 
 @router.get("/databases/{instance_id}", response_model=list[DatabaseSummaryResponse])

@@ -258,6 +258,29 @@ class QuerySamplesRepository(BaseRepository):
         )
         return list((await self._session.execute(stmt)).fetchall())
 
+    async def list_distinct_database_names(
+        self, instance_id: UUID, since: datetime
+    ) -> list[str]:
+        """Nomes de banco distintos que essa instância teve nos últimos `since` — bem mais barato
+        que `top_sql_by_database` (bug real relatado pelo usuário ao vivo: o select de banco de
+        dados da tela de Configurações usava `top_sql_by_database`, que roda a CTE de
+        `effective_wait_ms`/`effective_cpu_ms` — window function `LAG()` por sessão sobre TODO o
+        histórico — só pra listar nomes; numa instância com muito volume, isso deixava o select
+        "travado" por vários segundos, ou nem abrir de fato antes do usuário desistir). Um simples
+        `SELECT DISTINCT database_name` não precisa de nenhuma dessas contas."""
+        stmt = (
+            sa.select(query_samples_table.c.database_name)
+            .where(
+                query_samples_table.c.instance_id == instance_id,
+                query_samples_table.c.time >= since,
+                query_samples_table.c.database_name.is_not(None),
+            )
+            .distinct()
+            .order_by(query_samples_table.c.database_name)
+        )
+        result = await self._session.execute(stmt)
+        return [row[0] for row in result.fetchall()]
+
     async def top_sql(
         self,
         instance_id: UUID,

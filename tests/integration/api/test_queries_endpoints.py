@@ -211,6 +211,56 @@ async def test_list_databases_aggregates_by_database_name(
     ]
 
 
+async def test_list_database_names_returns_distinct_names_without_aggregation(
+    client: AsyncClient, db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """`GET /database-names/{id}` só devolve os nomes distintos — sem estatística nenhuma, bem
+    mais barato que `GET /databases/{id}` pra instâncias com muito volume histórico."""
+    repo = QuerySamplesRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-db-a",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_a",
+            ),
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-db-a-2",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_a",
+            ),
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-db-b",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_b",
+            ),
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-no-db",
+                sql_text_masked="SELECT ? FROM t",
+                database_name=None,
+            ),
+        ]
+    )
+
+    response = await client.get(f"/api/v1/queries/database-names/{test_instance.id}")
+
+    assert response.status_code == 200
+    assert response.json() == ["db_a", "db_b"]
+
+
 async def test_top_sql_filters_by_database_name_query_param(
     client: AsyncClient, db_session: AsyncSession, test_instance: Instance
 ) -> None:
