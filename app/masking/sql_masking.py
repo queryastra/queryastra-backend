@@ -34,8 +34,13 @@ _STRING_LITERAL_RE = re.compile(r"'((?:[^']|'')*)'")
 # Numero: inteiro ou decimal, sinal opcional, isolado por fronteira de palavra — evita casar
 # dentro de um identificador como `coluna_123` (o \b antes do sinal/digito cobre isso). `$` no
 # lookbehind evita casar o `1`/`2` de um parametro posicional `$1`/`$2` do protocolo estendido do
-# PostgreSQL (não é um literal, é uma REFERÊNCIA a parâmetro — não deveria virar `$?`).
-_NUMERIC_LITERAL_RE = re.compile(r"(?<![\w.$])[-+]?\d+(?:\.\d+)?\b")
+# PostgreSQL (não é um literal, é uma REFERÊNCIA a parâmetro — não deveria virar `$?`). `@` cobre
+# o mesmo caso no T-SQL: o cabeçalho de auto-parametrização do SQL Server nomeia os parâmetros
+# como `@0`/`@1`/`@2` (sem prefixo de letra) quando o motor parametriza automaticamente uma query
+# ad-hoc — sem essa exclusão, `@0`/`@1` virava `@?`/`@?` (bug real relatado pelo usuário ao vivo:
+# `(@0 int,@1 tinyint)UPDATE ...` saía como `(@? int,@? tinyint)UPDATE ...`, apagando a distinção
+# entre os parâmetros e parecendo um erro de mascaramento).
+_NUMERIC_LITERAL_RE = re.compile(r"(?<![\w.$@])[-+]?\d+(?:\.\d+)?\b")
 
 MASK_STRING = "?"
 MASK_NUMBER = "?"
@@ -122,13 +127,22 @@ _DATE_LITERAL_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})?)?$"
 )
 
+# Literal isolado de hora/duração (`HH:MM:SS[.fff]`, ex. `WAITFOR DELAY '00:00:10'`) — mesma
+# lógica da data acima, generalizada: um intervalo de tempo não é dado pessoal/sensível, mostrado
+# incondicionalmente independente de coluna. Bug real relatado pelo usuário ao vivo: o parâmetro
+# de `WAITFOR DELAY` (sem nenhuma coluna associada — não é `coluna = literal`) caía no padrão
+# seguro (mascarar) por não ter coluna identificável, quando devia ser mostrado como a data.
+_TIME_LITERAL_RE = re.compile(r"^\d{1,2}:\d{2}:\d{2}(\.\d+)?$")
+
 # Nome de coluna imediatamente antes de um operador de comparação, sem espaço entre o operador e
 # o literal que vem a seguir (ex.: `cpf = `, `c.nome LIKE `, `[dbo].[Clientes].[Email]<>`) — cobre
 # o caso `WHERE coluna op literal` e `SET coluna = literal`, de longe o mais comum e o mais seguro
-# de reconhecer sem um parser SQL real. Não cobre listas `IN (...)` nem posições de
-# `INSERT ... VALUES (...)` (nenhum nome de coluna aparece imediatamente antes do literal nesses
-# dois casos) — deliberadamente fora do escopo desta primeira versão; esses literais caem no
-# padrão seguro (mascarar) por não haver coluna identificável.
+# de reconhecer sem um parser SQL real. Não cobre listas `IN (...)` — deliberadamente fora do
+# escopo desta primeira versão (cai no padrão seguro: mascarar). Posições de
+# `INSERT INTO tabela (col1, col2, ...) VALUES (...)` são cobertas separadamente, abaixo
+# (`_find_insert_value_column_ranges`) — só quando a lista de colunas é EXPLÍCITA; sem ela (ex.:
+# `INSERT INTO tabela VALUES (...)`, sem lista) não há como saber a ordem sem o schema real da
+# tabela, então continua caindo no padrão seguro.
 _COLUMN_BEFORE_LITERAL_RE = re.compile(
     r'([A-Za-z_][\w.\[\]"]*)\s*(?:=|<>|!=|<=|>=|<|>|LIKE)\s*$',
     re.IGNORECASE,
@@ -145,18 +159,102 @@ def _find_preceding_column(text: str, literal_start: int) -> str | None:
     return match.group(1) if match else None
 
 
-def _mask_string_literal_for_display(match: re.Match[str]) -> str:
+# `INSERT INTO tabela (col1, col2, ...) VALUES (v1, v2), (v3, v4), ...` — pedido explícito do
+# usuário ("no comando INSERT INTO, você está mascarando tudo. Tem como mascarar somente os
+# campos sensíveis?"). Só reconhece a lista de colunas quando ela é EXPLÍCITA logo depois do nome
+# da tabela — é a única forma de saber a ordem das colunas a partir só do texto do SQL, sem
+# acesso ao schema real (que este módulo nunca tem).
+_INSERT_INTO_COLUMNS_RE = re.compile(
+    r"INSERT\s+INTO\s+[\w.\[\]\"]+\s*\(([^()]*)\)\s*VALUES",
+    re.IGNORECASE,
+)
+
+
+def _parse_column_list(raw: str) -> list[str]:
+    return [part.strip().strip('[]"') for part in raw.split(",") if part.strip()]
+
+
+def _find_insert_value_column_ranges(sql: str) -> list[tuple[int, int, str]]:
+    """Varre cada `INSERT INTO tabela (col1, col2, ...) VALUES (...), (...), ...` encontrado e
+    devolve um range de posições `(inicio, fim, nome_da_coluna)` por VALOR dentro de cada tupla —
+    usado como classificação PII PRIORITÁRIA sobre `_find_preceding_column` (que não bate com
+    nada dentro de `VALUES`, já que não há `coluna =` ali). Ignora vírgulas/parênteses dentro de
+    um literal de string (ex.: `'Rua A, 123'`) ao contar posições."""
+    ranges: list[tuple[int, int, str]] = []
+    for insert_match in _INSERT_INTO_COLUMNS_RE.finditer(sql):
+        columns = _parse_column_list(insert_match.group(1))
+        if not columns:
+            continue
+        pos = insert_match.end()
+        while pos < len(sql):
+            while pos < len(sql) and sql[pos] in " \t\r\n,":
+                pos += 1
+            if pos >= len(sql) or sql[pos] != "(":
+                break
+            pos += 1
+            depth = 1
+            col_index = 0
+            item_start = pos
+            while pos < len(sql) and depth > 0:
+                ch = sql[pos]
+                if ch == "'":
+                    pos += 1
+                    while pos < len(sql):
+                        if sql[pos : pos + 2] == "''":
+                            pos += 2
+                            continue
+                        if sql[pos] == "'":
+                            pos += 1
+                            break
+                        pos += 1
+                    continue
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                    if depth == 0:
+                        if col_index < len(columns):
+                            ranges.append((item_start, pos, columns[col_index]))
+                        pos += 1
+                        break
+                elif ch == "," and depth == 1:
+                    if col_index < len(columns):
+                        ranges.append((item_start, pos, columns[col_index]))
+                    col_index += 1
+                    item_start = pos + 1
+                pos += 1
+    return ranges
+
+
+def _column_for_insert_value(ranges: list[tuple[int, int, str]], pos: int) -> str | None:
+    for start, end, column in ranges:
+        if start <= pos < end:
+            return column
+    return None
+
+
+def _resolve_column_for_literal(
+    text: str, pos: int, insert_ranges: list[tuple[int, int, str]]
+) -> str | None:
+    return _column_for_insert_value(insert_ranges, pos) or _find_preceding_column(text, pos)
+
+
+def _mask_string_literal_for_display(
+    match: re.Match[str], insert_ranges: list[tuple[int, int, str]]
+) -> str:
     content = match.group(1)
-    if _DATE_LITERAL_RE.match(content):
+    if _DATE_LITERAL_RE.match(content) or _TIME_LITERAL_RE.match(content):
         return match.group(0)
-    column = _find_preceding_column(match.string, match.start())
+    column = _resolve_column_for_literal(match.string, match.start(), insert_ranges)
     if column is not None and not is_pii_column(column):
         return match.group(0)
     return _mask_string_literal(match)
 
 
-def _mask_numeric_literal_for_display(match: re.Match[str]) -> str:
-    column = _find_preceding_column(match.string, match.start())
+def _mask_numeric_literal_for_display(
+    match: re.Match[str], insert_ranges: list[tuple[int, int, str]]
+) -> str:
+    column = _resolve_column_for_literal(match.string, match.start(), insert_ranges)
     if column is not None and not is_pii_column(column):
         return match.group(0)
     return MASK_NUMBER
@@ -171,14 +269,18 @@ def mask_sql_literals_for_display(sql: str) -> str:
     função usada para `sql_hash` — ver nota na docstring dela), esta função decide, literal por
     literal, se ele deve ser mostrado ou mascarado:
 
-    1. Literal de string com conteúdo em formato de data/hora (`_DATE_LITERAL_RE`) → sempre
-       MOSTRADO, incondicionalmente (datas não são dado pessoal/sensível).
-    2. Qualquer outro literal (string ou número) imediatamente precedido por
-       `nome_de_coluna <operador>` (`_find_preceding_column`) → mostrado se a coluna NÃO bate
-       com `pii_classification.is_pii_column`, mascarado se bater.
-    3. Literal sem nenhuma coluna identificável (ex.: dentro de `IN (...)`, ou em posição de
-       `INSERT ... VALUES (...)`) → MASCARADO por padrão seguro — nunca mostra um valor cuja
-       coluna não foi possível determinar.
+    1. Literal de string com conteúdo em formato de data (`_DATE_LITERAL_RE`) ou de hora/duração
+       isolada (`_TIME_LITERAL_RE`, ex. `WAITFOR DELAY '00:00:10'`) → sempre MOSTRADO,
+       incondicionalmente (data/hora não é dado pessoal/sensível).
+    2. Qualquer outro literal (string ou número) associado a um nome de coluna — seja pelo padrão
+       `nome_de_coluna <operador> literal` (`_find_preceding_column`) ou pela posição dentro de um
+       `INSERT INTO tabela (col1, col2, ...) VALUES (...)` com lista de colunas EXPLÍCITA
+       (`_find_insert_value_column_ranges`) → mostrado se a coluna NÃO bate com
+       `pii_classification.is_pii_column`, mascarado se bater.
+    3. Literal sem nenhuma coluna identificável (ex.: dentro de `IN (...)`, ou em
+       `INSERT INTO tabela VALUES (...)` SEM lista de colunas — a ordem só existe no schema real
+       da tabela, que este módulo nunca tem acesso) → MASCARADO por padrão seguro — nunca mostra
+       um valor cuja coluna não foi possível determinar.
 
     Args:
         sql: texto de SQL capturado do coletor, ainda não mascarado.
@@ -194,6 +296,8 @@ def mask_sql_literals_for_display(sql: str) -> str:
         "... WHERE data_criacao = '2024-01-15'"
         >>> mask_sql_literals_for_display("SELECT * FROM t WHERE id IN (1, 2, 3)")
         "SELECT * FROM t WHERE id IN (?, ?, ?)"
+        >>> mask_sql_literals_for_display("INSERT INTO t (id, cpf) VALUES (1, '123')")
+        "INSERT INTO t (id, cpf) VALUES (1, '?')"
 
     Nota de implementação: ao contrário de `mask_sql_literals` (que pode aplicar as duas regras em
     sequência, string primeiro e depois número, porque toda string já virou `'?'` na primeira
@@ -203,6 +307,7 @@ def mask_sql_literals_for_display(sql: str) -> str:
     esse resultado voltaria a "encontrar" e mascarar esses dígitos como se fossem números soltos
     (bug real encontrado ao escrever os testes desta função).
     """
+    insert_ranges = _find_insert_value_column_ranges(sql)
     string_matches = list(_STRING_LITERAL_RE.finditer(sql))
     string_spans = [(m.start(), m.end()) for m in string_matches]
 
@@ -216,8 +321,14 @@ def mask_sql_literals_for_display(sql: str) -> str:
     ]
 
     replacements = sorted(
-        [(m.start(), m.end(), _mask_string_literal_for_display(m)) for m in string_matches]
-        + [(m.start(), m.end(), _mask_numeric_literal_for_display(m)) for m in numeric_matches],
+        [
+            (m.start(), m.end(), _mask_string_literal_for_display(m, insert_ranges))
+            for m in string_matches
+        ]
+        + [
+            (m.start(), m.end(), _mask_numeric_literal_for_display(m, insert_ranges))
+            for m in numeric_matches
+        ],
         key=lambda replacement: replacement[0],
     )
 

@@ -110,6 +110,16 @@ def test_does_not_mask_postgres_positional_parameter() -> None:
     assert mask_sql_literals(sql) == sql
 
 
+def test_does_not_mask_sqlserver_auto_param_placeholder() -> None:
+    """Regressao (bug real relatado pelo usuario ao vivo): o cabecalho de auto-parametrizacao do
+    SQL Server nomeia os parametros como `@0`/`@1` (sem prefixo de letra) quando o motor
+    parametriza automaticamente uma query ad-hoc — sao REFERENCIAS a parametro, nao literais,
+    igual a `$1`/`$2` do Postgres. Sem a exclusao do `@` no lookbehind, `@0`/`@1` virava `@?`/`@?`,
+    apagando a distincao entre os parametros."""
+    sql = "(@0 int,@1 tinyint)UPDATE [T] set [QUANTIDADE] = @0  WHERE [ID]=@1"
+    assert mask_sql_literals(sql) == sql
+
+
 def test_mask_showplan_xml_literals_masks_parameter_compiled_value() -> None:
     xml = (
         '<ColumnReference Column="@P1" ParameterCompiledValue="(42)" '
@@ -143,6 +153,14 @@ class TestMaskSqlLiteralsForDisplay:
 
     def test_date_with_time_and_offset_is_shown_unmasked(self) -> None:
         sql = "SELECT * FROM t WHERE dt = '2024-01-15T10:30:00.123+00:00'"
+        assert mask_sql_literals_for_display(sql) == sql
+
+    def test_waitfor_delay_time_literal_is_shown_unmasked(self) -> None:
+        """Bug real relatado pelo usuario ao vivo: `WAITFOR DELAY` nao tem nenhuma coluna
+        associada (nao e `coluna = literal`), entao caia no padrao seguro (mascarar) — um
+        intervalo de tempo isolado (`HH:MM:SS`) nao e dado pessoal/sensivel, mesma logica da
+        data, mostrado incondicionalmente."""
+        sql = "WAITFOR DELAY '00:00:10'"
         assert mask_sql_literals_for_display(sql) == sql
 
     def test_date_like_value_in_unrelated_column_is_still_shown(self) -> None:
@@ -183,9 +201,37 @@ class TestMaskSqlLiteralsForDisplay:
         sql = "SELECT * FROM t WHERE id IN (1, 2, 3)"
         assert mask_sql_literals_for_display(sql) == "SELECT * FROM t WHERE id IN (?, ?, ?)"
 
-    def test_insert_values_position_defaults_to_masked(self) -> None:
-        sql = "INSERT INTO t (a, b) VALUES ('x', 99)"
-        assert mask_sql_literals_for_display(sql) == "INSERT INTO t (a, b) VALUES ('?', ?)"
+    def test_insert_values_without_column_list_defaults_to_masked(self) -> None:
+        """Sem lista de colunas explicita, nao ha como saber a ordem sem o schema real da
+        tabela — permanece no padrao seguro (mascarar)."""
+        sql = "INSERT INTO t VALUES ('x', 99)"
+        assert mask_sql_literals_for_display(sql) == "INSERT INTO t VALUES ('?', ?)"
+
+    def test_insert_values_with_explicit_column_list_classifies_by_position(self) -> None:
+        sql = "INSERT INTO t (status, cpf) VALUES ('ATIVO', '123')"
+        assert (
+            mask_sql_literals_for_display(sql)
+            == "INSERT INTO t (status, cpf) VALUES ('ATIVO', '?')"
+        )
+
+    def test_insert_values_with_explicit_column_list_handles_multiple_rows(self) -> None:
+        sql = "INSERT INTO t (id, cpf) VALUES (1, '111'), (2, '222')"
+        assert (
+            mask_sql_literals_for_display(sql)
+            == "INSERT INTO t (id, cpf) VALUES (1, '?'), (2, '?')"
+        )
+
+    def test_insert_values_with_explicit_column_list_skips_commas_inside_string_literal(
+        self,
+    ) -> None:
+        """Uma virgula DENTRO de um literal de string (ex.: um endereco) nao pode ser contada
+        como separador de posicao na tupla — senao a coluna seguinte ("quantidade", nao-PII)
+        ficaria desalinhada e cairia no padrao seguro (mascarar) por engano."""
+        sql = "INSERT INTO t (apelido, quantidade) VALUES ('a, b', 42)"
+        assert (
+            mask_sql_literals_for_display(sql)
+            == "INSERT INTO t (apelido, quantidade) VALUES ('a, b', 42)"
+        )
 
     def test_like_percent_markers_still_preserved_for_pii_column(self) -> None:
         sql = "SELECT * FROM t WHERE email LIKE '%silva%'"
