@@ -357,6 +357,40 @@ async def test_collect_creates_blocking_event_for_positive_blocking_session_id(
     assert event.blocker_sql_hash is not None
 
 
+async def test_collect_falls_back_to_full_text_when_blocker_statement_offset_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regressao (bug real relatado pelo usuario ao vivo): `query_text` (fatiado por offset) da
+    sessao BLOQUEADORA pode sair vazio num ciclo especifico mesmo com `full_query_text`
+    preenchido (mesmo cenario ja tratado em `_build_query_samples` para a propria amostra da
+    sessao) — sem o mesmo fallback aqui, `blocker_sql_hash` ficava sempre `None`, e a tela de
+    Transacoes/detalhe de sessao nunca resolvia o "Comando" pro lado bloqueador nesses ciclos,
+    mesmo a sessao tendo uma amostra valida em `query_samples` no mesmo instante."""
+    session_rows = [
+        _request_row(
+            session_id=60,
+            query_text="",
+            full_query_text="WAITFOR DELAY '00:00:05'",
+            blocking_session_id=0,
+        ),
+        _request_row(
+            session_id=61, query_text="SELECT * FROM t", blocking_session_id=60, wait_time=250
+        ),
+    ]
+    _patch_connect(
+        monkeypatch,
+        version_row={"product_version": "16.0.1000.6"},
+        session_rows=session_rows,
+        counter_rows=_COUNTER_ROWS,
+    )
+
+    collector = SQLServerCollector(connection=_CONNECTION, instance_id=uuid4())
+    result = await collector.collect()
+
+    assert len(result.blocking_events) == 1
+    assert result.blocking_events[0].blocker_sql_hash is not None
+
+
 async def test_collect_enriches_idle_blocker_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     """Etapa 9 — um bloqueador OCIOSO (sem request ativa) nao aparece em
     `_SESSION_ACTIVITY_QUERY` (INNER JOIN com `sys.dm_exec_requests`), entao fica sem identidade

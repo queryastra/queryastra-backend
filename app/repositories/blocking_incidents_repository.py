@@ -68,28 +68,47 @@ class BlockingIncidentsRepository(BaseRepository):
                 for e in events
             ]
             stmt = pg_insert(BlockingIncident).values(rows)
+
+            def _sticky(column_name: str) -> sa.ColumnElement:
+                """COALESCE com o valor ja gravado — um campo de ENRIQUECIMENTO (identidade,
+                hash, recurso bloqueado etc.) so pode MELHORAR ao longo da vida do incidente,
+                nunca regredir pra `NULL`. Bug real relatado pelo usuario ao vivo: sem isso, um
+                UNICO ciclo em que o bloqueador nao tinha request ativa (`blocker_row is None` —
+                comum pra um script que fica a maior parte do tempo em `WAITFOR`/entre
+                transacoes) sobrescrevia `blocker_sql_hash` de volta pra `NULL`, mesmo apos um
+                ciclo anterior ja ter capturado o hash com sucesso — a tela de Transacoes/detalhe
+                de sessao perdia o "Comando" que ja tinha conseguido resolver antes.
+                `wait_time_ms`/`last_seen_at` ficam de fora (devem sempre refletir o ciclo mais
+                recente, nao o "melhor" valor ja visto)."""
+                excluded_col = getattr(stmt.excluded, column_name)
+                target_col = getattr(BlockingIncident, column_name)
+                return sa.func.coalesce(excluded_col, target_col)
+
+            sticky_columns = [
+                "blocker_sql_hash",
+                "blocked_sql_hash",
+                "blocker_db_user",
+                "blocker_program",
+                "blocker_machine",
+                "blocker_wait_event_native",
+                "blocked_db_user",
+                "blocked_program",
+                "blocked_machine",
+                "blocked_wait_event_native",
+                "blocked_wait_resource",
+                "blocked_object",
+                "blocker_transaction_id",
+                "blocked_transaction_id",
+                "blocker_database_name",
+                "blocked_database_name",
+                "blocker_transaction_begin_time",
+                "blocked_transaction_begin_time",
+            ]
             stmt = stmt.on_conflict_do_update(
                 constraint="uq_blocking_incidents_identity",
                 set_={
-                    "blocker_sql_hash": stmt.excluded.blocker_sql_hash,
-                    "blocked_sql_hash": stmt.excluded.blocked_sql_hash,
+                    **{name: _sticky(name) for name in sticky_columns},
                     "wait_time_ms": stmt.excluded.wait_time_ms,
-                    "blocker_db_user": stmt.excluded.blocker_db_user,
-                    "blocker_program": stmt.excluded.blocker_program,
-                    "blocker_machine": stmt.excluded.blocker_machine,
-                    "blocker_wait_event_native": stmt.excluded.blocker_wait_event_native,
-                    "blocked_db_user": stmt.excluded.blocked_db_user,
-                    "blocked_program": stmt.excluded.blocked_program,
-                    "blocked_machine": stmt.excluded.blocked_machine,
-                    "blocked_wait_event_native": stmt.excluded.blocked_wait_event_native,
-                    "blocked_wait_resource": stmt.excluded.blocked_wait_resource,
-                    "blocked_object": stmt.excluded.blocked_object,
-                    "blocker_transaction_id": stmt.excluded.blocker_transaction_id,
-                    "blocked_transaction_id": stmt.excluded.blocked_transaction_id,
-                    "blocker_database_name": stmt.excluded.blocker_database_name,
-                    "blocked_database_name": stmt.excluded.blocked_database_name,
-                    "blocker_transaction_begin_time": stmt.excluded.blocker_transaction_begin_time,
-                    "blocked_transaction_begin_time": stmt.excluded.blocked_transaction_begin_time,
                     "last_seen_at": stmt.excluded.last_seen_at,
                     # Reabre defensivamente (mesmo raciocinio de TransactionEventsRepository):
                     # se o par (session_id reciclado) reaparece depois de ja ter sido fechado.

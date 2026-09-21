@@ -80,6 +80,55 @@ async def test_upsert_batch_preserves_started_at_across_cycles(
     assert rows[0].wait_time_ms == 200
 
 
+async def test_upsert_batch_keeps_previously_captured_enrichment_when_a_later_cycle_lacks_it(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """Regressao (bug real relatado pelo usuario ao vivo): um campo de enriquecimento (hash,
+    identidade, recurso bloqueado...) capturado num ciclo nao pode ser apagado de volta pra
+    `None` so porque um ciclo POSTERIOR nao conseguiu capturar o mesmo dado (ex.: o bloqueador
+    ficou sem request ativa naquele instante especifico — comum, nao significa que o dado antigo
+    ficou invalido). `wait_time_ms`/`last_seen_at` continuam refletindo sempre o ciclo mais
+    recente (nao sao "sticky")."""
+    repo = BlockingIncidentsRepository(db_session)
+    first_observed = datetime.now(UTC) - timedelta(seconds=30)
+    await repo.upsert_batch(
+        test_instance.id,
+        [
+            NormalizedBlockingEvent(
+                time=first_observed,
+                instance_id=test_instance.id,
+                blocker_session_id="sticky-b",
+                blocked_session_id="sticky-w",
+                blocker_sql_hash="hash-blocker-sticky",
+                wait_time_ms=100,
+            )
+        ],
+        first_observed,
+    )
+
+    second_observed = datetime.now(UTC)
+    await repo.upsert_batch(
+        test_instance.id,
+        [
+            NormalizedBlockingEvent(
+                time=second_observed,
+                instance_id=test_instance.id,
+                blocker_session_id="sticky-b",
+                blocked_session_id="sticky-w",
+                blocker_sql_hash=None,
+                wait_time_ms=150,
+            )
+        ],
+        second_observed,
+    )
+
+    rows = await repo.list_open(test_instance.id, 10)
+    assert len(rows) == 1
+    assert rows[0].blocker_sql_hash == "hash-blocker-sticky"
+    assert rows[0].wait_time_ms == 150
+    assert abs((rows[0].last_seen_at - second_observed).total_seconds()) < 1
+
+
 async def test_upsert_batch_closes_incident_no_longer_observed(
     db_session: AsyncSession, test_instance: Instance
 ) -> None:

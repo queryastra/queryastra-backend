@@ -1540,8 +1540,17 @@ def _build_blocking_events(
         if blocking_session_id is None or blocking_session_id < _BLOCKING_SESSION_REAL_BLOCK_MIN:
             continue
         blocker_row = sessions_by_id.get(blocking_session_id)
+        # Mesmo fallback de `_build_query_samples`: `query_text` (fatiado por offset) pode sair
+        # vazio num ciclo especifico (ex.: statement_start_offset/end_offset zerados por um plano
+        # em cache atipico) mesmo com `full_query_text` preenchido — bug real relatado pelo
+        # usuario ao vivo (transacao/incidente gravados, mas `blocker_sql_hash=None`, mesmo com a
+        # MESMA sessao tendo uma amostra valida em `query_samples` no mesmo instante, porque ali o
+        # fallback ja existia e aqui nao). Sem isso, o "Comando" da tela de Transacoes/detalhe de
+        # sessao nunca resolve pro lado bloqueador nesses ciclos.
         blocker_sql_hash = (
-            _hash_query_text(blocker_row["query_text"]) if blocker_row is not None else None
+            _hash_query_text(blocker_row["query_text"] or blocker_row["full_query_text"])
+            if blocker_row is not None
+            else None
         )
         blocker_login, blocker_program, blocker_machine = _identity(blocking_session_id)
         blocked_login, blocked_program, blocked_machine = _identity(row["session_id"])
@@ -1553,7 +1562,7 @@ def _build_blocking_events(
                 blocker_session_id=str(blocking_session_id),
                 blocked_session_id=str(row["session_id"]),
                 blocker_sql_hash=blocker_sql_hash,
-                blocked_sql_hash=_hash_query_text(row["query_text"]),
+                blocked_sql_hash=_hash_query_text(row["query_text"] or row["full_query_text"]),
                 wait_time_ms=row["wait_time"] or 0,
                 blocker_db_user=blocker_login,
                 blocker_program=blocker_program,
