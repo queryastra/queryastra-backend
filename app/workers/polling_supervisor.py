@@ -32,6 +32,7 @@ from app.repositories.blocking_incidents_repository import BlockingIncidentsRepo
 from app.repositories.instances_repository import InstancesRepository
 from app.repositories.metric_samples_repository import MetricSamplesRepository
 from app.repositories.query_samples_repository import QuerySamplesRepository
+from app.repositories.system_settings_repository import SystemSettingsRepository
 from app.repositories.transaction_events_repository import TransactionEventsRepository
 from app.security.credential_reference import (
     CredentialReference,
@@ -49,6 +50,7 @@ _QuerySamplesRepositoryFactory = Callable[[AsyncSession], QuerySamplesRepository
 _BlockingEventsRepositoryFactory = Callable[[AsyncSession], BlockingEventsRepository]
 _TransactionEventsRepositoryFactory = Callable[[AsyncSession], TransactionEventsRepository]
 _BlockingIncidentsRepositoryFactory = Callable[[AsyncSession], BlockingIncidentsRepository]
+_SystemSettingsRepositoryFactory = Callable[[AsyncSession], SystemSettingsRepository]
 
 
 @dataclass(slots=True)
@@ -84,6 +86,9 @@ class PollingSupervisor:
         blocking_incidents_repository_factory: _BlockingIncidentsRepositoryFactory = (
             BlockingIncidentsRepository
         ),
+        system_settings_repository_factory: _SystemSettingsRepositoryFactory = (
+            SystemSettingsRepository
+        ),
     ) -> None:
         self._session_factory = session_factory
         self._discovery_interval_seconds = discovery_interval_seconds
@@ -95,6 +100,7 @@ class PollingSupervisor:
         self._blocking_events_repository_factory = blocking_events_repository_factory
         self._transaction_events_repository_factory = transaction_events_repository_factory
         self._blocking_incidents_repository_factory = blocking_incidents_repository_factory
+        self._system_settings_repository_factory = system_settings_repository_factory
         self._stop_event = asyncio.Event()
         self._instance_tasks: dict[UUID, _InstanceTaskHandle] = {}
 
@@ -261,6 +267,9 @@ class PollingSupervisor:
                         instances_repository,
                         self._transaction_events_repository_factory(session),
                         self._blocking_incidents_repository_factory(session),
+                        system_settings_repository=self._system_settings_repository_factory(
+                            session
+                        ),
                     )
                     await worker._run_cycle()  # noqa: SLF001 - reuso interno deliberado
                 finally:

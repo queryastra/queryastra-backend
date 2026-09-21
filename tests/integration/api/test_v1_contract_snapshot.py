@@ -64,6 +64,7 @@ EXPECTED_REST_PATHS = {
     "/api/v1/transactions/{instance_id}/{transaction_identifier}",
     "/api/v1/deadlocks/{instance_id}",
     "/api/v1/deadlocks/{instance_id}/{deadlock_id}",
+    "/api/v1/settings",
 }
 
 EXPECTED_WEBSOCKET_PATH = "/api/v1/ws/live"

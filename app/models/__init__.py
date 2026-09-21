@@ -1,8 +1,10 @@
 """Modelos SQLAlchemy — tabelas relacionais simples do MVP (Fase 1).
 
 Import agregador: garante que `Base.metadata` (usado por `migrations/env.py` no autogenerate)
-enxerga todos os modelos abaixo. Modelos de RBAC/usuarios/system_settings/masking_reveal_audit
-sao Fase 2 (`Docs/database-schema.md` §5) e ficam fora deste MVP de proposito.
+enxerga todos os modelos abaixo. Modelos de RBAC/usuarios/masking_reveal_audit sao Fase 2/4
+(`Docs/database-schema.md` §5) e ficam fora deste MVP de proposito. `SystemSettings` é a
+EXCEÇÃO — implementado como tabela singleton dedicada (não o `system_settings` genérico
+chave/valor documentado ali), primeira preferência global editável pelo usuário.
 """
 
 from app.models.alert import Alert, AlertNotification, AlertRule, AlertSilence
@@ -13,6 +15,7 @@ from app.models.instance import Instance, InstanceMaintenanceWindow
 from app.models.missing_index_suggestion import MissingIndexSuggestion
 from app.models.query_plan_snapshot import QueryPlanSnapshot
 from app.models.server import InstanceServer, Server
+from app.models.system_settings import SystemSettings
 from app.models.transaction_event import TransactionEvent
 
 __all__ = [
@@ -30,4 +33,5 @@ __all__ = [
     "BlockingIncident",
     "DeadlockEvent",
     "QueryPlanSnapshot",
+    "SystemSettings",
 ]

@@ -11,7 +11,11 @@ Contrato (Docs/specs/01-collection-contract.md, Docs/rules/02-safe-collection.md
     - erro de coleta (rede, timeout, qualquer `Exception`) e capturado por ciclo — nunca
       derruba o loop da instancia inteira; ainda assim grava telemetria de duracao/erro;
     - o loop nunca roda mais rapido que `polling_interval_seconds` nem acumula ciclos
-      atrasados (skip, nao enfileira).
+      atrasados (skip, nao enfileira);
+    - quando `system_settings_repository` e injetado, bloqueios com `wait_time_ms` abaixo de
+      `system_settings.blocking_min_duration_ms` (tela "Configuracoes -> Geral") sao filtrados
+      ANTES de persistir em `blocking_events`/`blocking_incidents` — lido a cada ciclo (nao
+      cacheado), pra uma mudanca na tela valer no proximo ciclo sem restart.
 
 Convencao de `day_of_week` (`InstanceMaintenanceWindow`, `app/models/instance.py`): 0 = domingo,
 conforme o comentario explicito no modelo (`# 0 = domingo`) e a CHECK `BETWEEN 0 AND 6` — NAO e
@@ -44,6 +48,7 @@ from app.repositories.blocking_incidents_repository import BlockingIncidentsRepo
 from app.repositories.instances_repository import InstancesRepository
 from app.repositories.metric_samples_repository import MetricSamplesRepository
 from app.repositories.query_samples_repository import QuerySamplesRepository
+from app.repositories.system_settings_repository import SystemSettingsRepository
 from app.repositories.transaction_events_repository import TransactionEventsRepository
 
 logger = get_logger(__name__)
@@ -86,6 +91,8 @@ class PollingWorker:
         instances_repository: InstancesRepository,
         transaction_events_repository: TransactionEventsRepository | None = None,
         blocking_incidents_repository: BlockingIncidentsRepository | None = None,
+        *,
+        system_settings_repository: SystemSettingsRepository | None = None,
     ) -> None:
         self._instance_id = instance_id
         self._collector = collector
@@ -99,6 +106,10 @@ class PollingWorker:
         # (so ficam ativos quando o chamador injeta o repositorio de verdade).
         self._transaction_events_repository = transaction_events_repository
         self._blocking_incidents_repository = blocking_incidents_repository
+        # Opcional, keyword-only (default None = sem filtro, todo bloqueio e persistido, mesmo
+        # comportamento de antes desta feature) — lido A CADA CICLO (nao cacheado), pra uma
+        # mudanca na tela "Configuracoes -> Geral" valer a partir do proximo ciclo sem restart.
+        self._system_settings_repository = system_settings_repository
         self._stop_event = asyncio.Event()
 
     async def run(self) -> None:
@@ -138,10 +149,21 @@ class PollingWorker:
             result = await self._collector.collect()
             await self._metric_samples_repository.insert_batch(result.metric_samples)
             await self._query_samples_repository.insert_batch(result.query_samples)
-            await self._blocking_events_repository.insert_batch(result.blocking_events)
+
+            blocking_events = result.blocking_events
+            if self._system_settings_repository is not None:
+                min_duration_ms = (
+                    await self._system_settings_repository.get()
+                ).blocking_min_duration_ms
+                if min_duration_ms > 0:
+                    blocking_events = [
+                        event for event in blocking_events if event.wait_time_ms >= min_duration_ms
+                    ]
+
+            await self._blocking_events_repository.insert_batch(blocking_events)
             if self._blocking_incidents_repository is not None:
                 await self._blocking_incidents_repository.upsert_batch(
-                    self._instance_id, result.blocking_events, now
+                    self._instance_id, blocking_events, now
                 )
             if self._transaction_events_repository is not None:
                 await self._transaction_events_repository.upsert_batch(

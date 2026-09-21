@@ -7,6 +7,7 @@ Usa fakes de `Collector` e dos 4 repositorios (gravam chamadas em listas, sem ba
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import UTC, datetime, time
 from uuid import uuid4
 
@@ -66,6 +67,21 @@ class _FakeBlockingEventsRepository:
 
     async def insert_batch(self, events: list[NormalizedBlockingEvent]) -> None:
         self.batches.append(events)
+
+
+@dataclass
+class _FakeSystemSettingsRow:
+    blocking_min_duration_ms: int
+
+
+class _FakeSystemSettingsRepository:
+    def __init__(self, blocking_min_duration_ms: int) -> None:
+        self._row = _FakeSystemSettingsRow(blocking_min_duration_ms)
+        self.get_calls = 0
+
+    async def get(self) -> _FakeSystemSettingsRow:
+        self.get_calls += 1
+        return self._row
 
 
 class _FakeInstancesRepository:
@@ -341,3 +357,77 @@ async def test_run_stops_promptly_after_stop_is_called() -> None:
     await asyncio.wait_for(run_task, timeout=2)
 
     assert collector.calls == 1
+
+
+async def test_run_cycle_filters_blocking_events_below_min_duration_setting() -> None:
+    """`_build_result` produz um bloqueio com `wait_time_ms=10` — um limite de 50ms deve
+    descartar esse evento antes de persistir (item priorizado pelo usuario: "Tempo minimo para
+    captura de Bloqueios (Locks)")."""
+    instance_id = uuid4()
+    result = _build_result(instance_id)
+    collector = _FakeCollector(result=result)
+    metric_repo = _FakeMetricSamplesRepository()
+    query_repo = _FakeQuerySamplesRepository()
+    blocking_repo = _FakeBlockingEventsRepository()
+    instances_repo = _FakeInstancesRepository(instance=None)
+    settings_repo = _FakeSystemSettingsRepository(blocking_min_duration_ms=50)
+
+    worker = PollingWorker(
+        instance_id,
+        collector,
+        10,
+        metric_repo,
+        query_repo,
+        blocking_repo,
+        instances_repo,
+        system_settings_repository=settings_repo,
+    )
+    await worker._run_cycle()
+
+    assert blocking_repo.batches == [[]]
+    assert settings_repo.get_calls == 1
+
+
+async def test_run_cycle_keeps_blocking_events_at_or_above_min_duration_setting() -> None:
+    instance_id = uuid4()
+    result = _build_result(instance_id)  # wait_time_ms=10
+    collector = _FakeCollector(result=result)
+    metric_repo = _FakeMetricSamplesRepository()
+    query_repo = _FakeQuerySamplesRepository()
+    blocking_repo = _FakeBlockingEventsRepository()
+    instances_repo = _FakeInstancesRepository(instance=None)
+    settings_repo = _FakeSystemSettingsRepository(blocking_min_duration_ms=10)
+
+    worker = PollingWorker(
+        instance_id,
+        collector,
+        10,
+        metric_repo,
+        query_repo,
+        blocking_repo,
+        instances_repo,
+        system_settings_repository=settings_repo,
+    )
+    await worker._run_cycle()
+
+    assert blocking_repo.batches == [result.blocking_events]
+
+
+async def test_run_cycle_skips_settings_lookup_when_repository_not_injected() -> None:
+    """Sem `system_settings_repository` (default None) — comportamento IDENTICO a antes desta
+    feature, nenhum bloqueio e filtrado (todos os testes acima desta linha no arquivo ja cobrem
+    isso, mas este e explicito sobre o motivo)."""
+    instance_id = uuid4()
+    result = _build_result(instance_id)
+    collector = _FakeCollector(result=result)
+    metric_repo = _FakeMetricSamplesRepository()
+    query_repo = _FakeQuerySamplesRepository()
+    blocking_repo = _FakeBlockingEventsRepository()
+    instances_repo = _FakeInstancesRepository(instance=None)
+
+    worker = PollingWorker(
+        instance_id, collector, 10, metric_repo, query_repo, blocking_repo, instances_repo
+    )
+    await worker._run_cycle()
+
+    assert blocking_repo.batches == [result.blocking_events]
