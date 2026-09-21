@@ -20,6 +20,11 @@ from app.normalizers.models import NormalizedQuerySample
 from app.repositories._tables import query_samples_table, sql_exclusions_table
 from app.repositories.base import BaseRepository
 
+# Granularidade de bucket de tempo aceita por `wait_time_by_bucket_and_*` — "day"/"hour" (ja
+# existiam) mais as 4 granularidades sub-hora da "Fatia de Tempo" (`ten_minutes`/`minute`/
+# `ten_seconds`/`second`), ver `QuerySamplesRepository._bucket_sql`.
+TimeBucket = Literal["day", "hour", "ten_minutes", "minute", "ten_seconds", "second"]
+
 
 class QuerySamplesRepository(BaseRepository):
     """Persistencia de `NormalizedQuerySample` na hypertable `query_samples`.
@@ -172,6 +177,35 @@ class QuerySamplesRepository(BaseRepository):
     entrada "WAITFOR: 0ms". `wait_event_native IS NULL` precisa ser tratado explicitamente:
     `NULL <> ALL(array)` avalia pra `NULL` (nao `TRUE`), o que um `WHERE` trataria como exclusao —
     sem essa clausula extra, toda amostra sem wait ativo desapareceria da lista."""
+
+    # "Fatia de Tempo" (drill-down temporal fino dentro de uma unica hora, pedido explicito do
+    # usuario com o SolarWinds DPA "Timeslice" como referencia): granularidades sub-hora, em
+    # segundos de largura do bucket. O Postgres nao tem unidade nativa de `date_trunc` pra
+    # 10min/1min/10s/1s (so segundo/minuto/hora/dia/...), entao usamos aritmetica de epoch
+    # (`floor(epoch/N)*N`) pra essas — mesmo padrao ja usado em `query_stats_by_bucket` pro caso
+    # "ten_minutes". "day"/"hour" continuam usando `date_trunc` nativo (sem mudanca).
+    _SUB_HOUR_BUCKET_SECONDS: dict[str, int] = {
+        "ten_minutes": 600,
+        "minute": 60,
+        "ten_seconds": 10,
+        "second": 1,
+    }
+
+    @classmethod
+    def _bucket_sql(cls, bucket: str) -> tuple[str, str]:
+        """Devolve `(bucket_start_sql, group_by_sql)` pro `bucket` pedido. `bucket` e sempre um
+        `Literal` fechado validado pelo tipo do chamador (nunca texto arbitrario vindo do
+        cliente), entao interpolar a expressao SQL resolvida (nao o valor em si) e seguro aqui."""
+        width = cls._SUB_HOUR_BUCKET_SECONDS.get(bucket)
+        if width is not None:
+            return (
+                f"to_timestamp(floor(extract(epoch FROM time) / {width}) * {width})",
+                f"floor(extract(epoch FROM time) / {width})",
+            )
+        return (
+            "(date_trunc(:bucket, time AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')",
+            "date_trunc(:bucket, time AT TIME ZONE 'UTC')",
+        )
 
     _NOT_CPU_ONLY_FILTER = "NOT (wait_event_native IS NULL AND coalesce(wait_time_ms, 0) = 0)"
     """Fragmento de `WHERE` usado no lado "espera nomeada" do UNION ALL dos metodos que agora
@@ -799,13 +833,14 @@ class QuerySamplesRepository(BaseRepository):
         since: datetime,
         until: datetime,
         limit: int,
-        bucket: Literal["day", "hour"] = "day",
+        bucket: TimeBucket = "day",
     ) -> list[sa.Row]:
         """Agrega `query_samples` por (`bucket` de tempo, `database_name`) — visao historica
         "Tudo" do nivel 1 do drill-down quando `bucket="day"` (um dia calendario por barra,
         equivalente ao grafico multi-dia do "Top SQL" de ferramentas de referencia como o
-        SolarWinds DPA), ou o detalhamento por hora DENTRO de um dia especifico quando
-        `bucket="hour"` (mesmo `since`/`until` do filtro de um dia unico). `bucket` sempre em UTC
+        SolarWinds DPA), o detalhamento por hora DENTRO de um dia especifico quando
+        `bucket="hour"`, ou uma granularidade sub-hora da "Fatia de Tempo"
+        (`ten_minutes`/`minute`/`ten_seconds`/`second`, ver `_bucket_sql`). `bucket` sempre em UTC
         (`time AT TIME ZONE 'UTC'`), independente do timezone de sessao do Postgres. O `AT TIME
         ZONE 'UTC'` externo (envolvendo o `date_trunc` inteiro) converte o timestamp NAIVE de
         volta pra `timestamptz` — sem isso, asyncpg devolve um datetime Python naive e o FastAPI
@@ -819,16 +854,17 @@ class QuerySamplesRepository(BaseRepository):
         amostra, ver docstring da classe) — uma espera continua que atravessa a fronteira de um
         bucket tem seu delta inteiro atribuido ao bucket da amostra mais recente (aproximacao
         aceita, mesma limitacao de borda ja documentada na classe)."""
+        bucket_start_sql, group_by_sql = self._bucket_sql(bucket)
         stmt = sa.text(
             f"""
             WITH effective AS ({self._EFFECTIVE_WAIT_SELECT})
             SELECT
-                (date_trunc(:bucket, time AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') AS bucket_start,
+                {bucket_start_sql} AS bucket_start,
                 COALESCE(database_name, 'desconhecido') AS database_name,
                 coalesce(sum(effective_wait_ms), 0) AS total_wait_time_ms
             FROM effective
             GROUP BY
-                date_trunc(:bucket, time AT TIME ZONE 'UTC'),
+                {group_by_sql},
                 COALESCE(database_name, 'desconhecido')
             ORDER BY bucket_start, total_wait_time_ms DESC
             LIMIT :limit
@@ -853,22 +889,24 @@ class QuerySamplesRepository(BaseRepository):
         since: datetime,
         until: datetime,
         limit: int,
-        bucket: Literal["day", "hour"] = "day",
+        bucket: TimeBucket = "day",
     ) -> list[sa.Row]:
         """Agrega `query_samples` por (`bucket` de tempo, `db_user`) — visao historica "Tudo"
-        da dimensao "Usuarios" (`bucket="day"`) ou detalhamento por hora dentro de um dia
-        (`bucket="hour"`). Mesmas ressalvas de `wait_time_by_bucket_and_database` (`bucket_start`
-        convertido de volta pra `timestamptz` via `AT TIME ZONE 'UTC'` externo)."""
+        da dimensao "Usuarios" (`bucket="day"`), detalhamento por hora dentro de um dia
+        (`bucket="hour"`), ou uma granularidade sub-hora da "Fatia de Tempo" (ver `_bucket_sql`).
+        Mesmas ressalvas de `wait_time_by_bucket_and_database` (`bucket_start` convertido de
+        volta pra `timestamptz` via `AT TIME ZONE 'UTC'` externo)."""
+        bucket_start_sql, group_by_sql = self._bucket_sql(bucket)
         stmt = sa.text(
             f"""
             WITH effective AS ({self._EFFECTIVE_WAIT_SELECT})
             SELECT
-                (date_trunc(:bucket, time AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') AS bucket_start,
+                {bucket_start_sql} AS bucket_start,
                 COALESCE(db_user, 'desconhecido') AS db_user,
                 coalesce(sum(effective_wait_ms), 0) AS total_wait_time_ms
             FROM effective
             GROUP BY
-                date_trunc(:bucket, time AT TIME ZONE 'UTC'),
+                {group_by_sql},
                 COALESCE(db_user, 'desconhecido')
             ORDER BY bucket_start, total_wait_time_ms DESC
             LIMIT :limit
@@ -895,26 +933,28 @@ class QuerySamplesRepository(BaseRepository):
         limit: int,
         database_name: str | None = None,
         db_user: str | None = None,
-        bucket: Literal["day", "hour"] = "day",
+        bucket: TimeBucket = "day",
     ) -> list[sa.Row]:
         """Agrega `query_samples` por (`bucket` de tempo, `sql_hash`) — visao historica "Tudo" do
-        nivel 2 do drill-down (`bucket="day"`) ou detalhamento por hora dentro de um dia
-        (`bucket="hour"`). Mesmas ressalvas de `wait_time_by_bucket_and_database` (`bucket_start`
-        convertido de volta pra `timestamptz` via `AT TIME ZONE 'UTC'` externo, pra sair com `Z`
-        no JSON); aceita os mesmos filtros opcionais `database_name`/`db_user` de
+        nivel 2 do drill-down (`bucket="day"`), detalhamento por hora dentro de um dia
+        (`bucket="hour"`), ou uma granularidade sub-hora da "Fatia de Tempo" (ver `_bucket_sql`).
+        Mesmas ressalvas de `wait_time_by_bucket_and_database` (`bucket_start` convertido de
+        volta pra `timestamptz` via `AT TIME ZONE 'UTC'` externo, pra sair com `Z` no JSON);
+        aceita os mesmos filtros opcionais `database_name`/`db_user` de
         `top_sql()`/`wait_breakdown_by_sql_hash()`. `total_wait_time_ms` soma `effective_wait_ms`
         (delta real por amostra) — filtrados apos a CTE `effective`, ver docstring da classe."""
+        bucket_start_sql, group_by_sql = self._bucket_sql(bucket)
         stmt = sa.text(
             f"""
             WITH effective AS ({self._EFFECTIVE_WAIT_SELECT})
             SELECT
-                (date_trunc(:bucket, time AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') AS bucket_start,
+                {bucket_start_sql} AS bucket_start,
                 sql_hash,
                 coalesce(sum(effective_wait_ms), 0) AS total_wait_time_ms
             FROM effective
             WHERE (CAST(:database_name AS text) IS NULL OR database_name = :database_name)
               AND (CAST(:db_user AS text) IS NULL OR db_user = :db_user)
-            GROUP BY date_trunc(:bucket, time AT TIME ZONE 'UTC'), sql_hash
+            GROUP BY {group_by_sql}, sql_hash
             ORDER BY bucket_start, total_wait_time_ms DESC
             LIMIT :limit
         """
@@ -940,26 +980,27 @@ class QuerySamplesRepository(BaseRepository):
         since: datetime,
         until: datetime,
         limit: int,
-        bucket: Literal["day", "hour"] = "day",
+        bucket: TimeBucket = "day",
     ) -> list[sa.Row]:
         """Agrega `query_samples` por (`bucket` de tempo, `wait_event_native`) — visao historica
-        "Tudo" da dimensao "Waits" (`bucket="day"`) ou detalhamento por hora dentro de um dia
-        (`bucket="hour"`). Mesmas ressalvas de `wait_time_by_bucket_and_database` (`bucket_start`
-        convertido de volta pra `timestamptz` via `AT TIME ZONE 'UTC'` externo).
-        `total_wait_time_ms` soma `effective_wait_ms` (delta real por amostra) — ver docstring da
-        classe. Waits benignos/de background excluidos do `GROUP BY` inteiramente (ver
-        `_NOT_BENIGN_WAIT_FILTER`)."""
+        "Tudo" da dimensao "Waits" (`bucket="day"`), detalhamento por hora dentro de um dia
+        (`bucket="hour"`), ou uma granularidade sub-hora da "Fatia de Tempo" (ver `_bucket_sql`).
+        Mesmas ressalvas de `wait_time_by_bucket_and_database` (`bucket_start` convertido de
+        volta pra `timestamptz` via `AT TIME ZONE 'UTC'` externo). `total_wait_time_ms` soma
+        `effective_wait_ms` (delta real por amostra) — ver docstring da classe. Waits benignos/de
+        background excluidos do `GROUP BY` inteiramente (ver `_NOT_BENIGN_WAIT_FILTER`)."""
+        bucket_start_sql, group_by_sql = self._bucket_sql(bucket)
         stmt = sa.text(
             f"""
             WITH effective AS ({self._EFFECTIVE_WAIT_SELECT})
             SELECT
-                (date_trunc(:bucket, time AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') AS bucket_start,
+                {bucket_start_sql} AS bucket_start,
                 COALESCE(wait_event_native, 'desconhecido') AS wait_event_native,
                 coalesce(sum(effective_wait_ms), 0) AS total_wait_time_ms
             FROM effective
             WHERE {self._NOT_BENIGN_WAIT_FILTER}
             GROUP BY
-                date_trunc(:bucket, time AT TIME ZONE 'UTC'),
+                {group_by_sql},
                 COALESCE(wait_event_native, 'desconhecido')
             ORDER BY bucket_start, total_wait_time_ms DESC
             LIMIT :limit

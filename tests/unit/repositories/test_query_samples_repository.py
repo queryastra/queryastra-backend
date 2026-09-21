@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
+import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -897,6 +898,69 @@ async def test_wait_time_by_bucket_and_database_groups_by_utc_hour(
     by_key = {(row.bucket_start, row.database_name): row.total_wait_time_ms for row in rows}
     assert by_key[(hour10, "db_a")] == 120
     assert by_key[(hour11, "db_b")] == 50
+
+
+@pytest.mark.parametrize(
+    ("bucket", "second_offset_minutes", "same_bucket"),
+    [
+        ("ten_minutes", 5, True),
+        ("ten_minutes", 15, False),
+        ("minute", 0.5, True),
+        ("minute", 1, False),
+    ],
+)
+async def test_wait_time_by_bucket_and_database_supports_sub_hour_granularity(
+    db_session: AsyncSession,
+    test_instance: Instance,
+    bucket: str,
+    second_offset_minutes: float,
+    same_bucket: bool,
+) -> None:
+    """"Fatia de Tempo" (drill-down temporal fino, pedido explicito do usuario): granularidades
+    sub-hora usam aritmetica de epoch (sem `date_trunc` nativo pra 10min/1min) — confirma que 2
+    amostras dentro da MESMA janela de bucket caem juntas, e que amostras em janelas diferentes
+    nao se misturam."""
+    repo = QuerySamplesRepository(db_session)
+    base = datetime(2026, 9, 1, 10, 0, 0, tzinfo=UTC)
+    second = base + timedelta(minutes=second_offset_minutes)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=base,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-a",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_a",
+                wait_time_ms=100,
+            ),
+            NormalizedQuerySample(
+                time=second,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-a",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_a",
+                wait_time_ms=20,
+            ),
+        ]
+    )
+
+    rows = await repo.wait_time_by_bucket_and_database(
+        test_instance.id,
+        since=base - timedelta(minutes=1),
+        until=base + timedelta(minutes=20),
+        limit=10,
+        bucket=bucket,  # type: ignore[arg-type]
+    )
+
+    assert all(row.bucket_start.tzinfo is not None for row in rows)
+    distinct_buckets = {row.bucket_start for row in rows}
+    if same_bucket:
+        assert len(distinct_buckets) == 1
+        assert sum(row.total_wait_time_ms for row in rows) == 120
+    else:
+        assert len(distinct_buckets) == 2
 
 
 async def test_top_sql_filters_by_database_name(

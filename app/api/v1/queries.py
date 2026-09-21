@@ -32,6 +32,14 @@ espera nativo — folha da propria dimensao, sem decomposicao adicional): `GET
 Dimensao "Usuarios" (irma das demais, mesmo padrao Tudo/dia/hora, agregada por `db_user` e
 decomposta por wait nativo — mesmo padrao de "Bancos de dados", nao de "Waits"): `GET
 /users/{instance_id}`, `GET /users-by-day/{instance_id}`, `GET /users-by-hour/{instance_id}`.
+
+"Fatia de Tempo" (drill-down temporal fino DENTRO de uma janela ja estreita, equivalente ao
+"Timeslice" do SolarWinds DPA): `GET /timeslice/{instance_id}?dimension=X&bucket=Y` — um unico
+endpoint parametrizado (`dimension`: database/sql/wait_type/db_user; `bucket`: ten_minutes/
+minute/ten_seconds/second), generalizando os `wait_time_by_bucket_and_*` ja existentes em vez de
+multiplicar rotas. O nivel folha (lista de queries num segundo especifico) reusa `GET /top-sql/
+{instance_id}?from=X&to=X+1s` — mesmo endpoint do nivel 2 do drill-down normal, so com uma janela
+de 1 segundo.
 """
 
 from __future__ import annotations
@@ -742,6 +750,52 @@ async def list_db_users_by_hour(
         BucketEntryResponse(
             bucket_start=row.bucket_start,
             label=row.db_user,
+            total_wait_time_ms=row.total_wait_time_ms,
+        )
+        for row in rows
+    ]
+
+
+_TIMESLICE_DIMENSIONS = {
+    "database": ("wait_time_by_bucket_and_database", "database_name"),
+    "sql": ("wait_time_by_bucket_and_sql_hash", "sql_hash"),
+    "wait_type": ("wait_time_by_bucket_and_wait_type", "wait_event_native"),
+    "db_user": ("wait_time_by_bucket_and_db_user", "db_user"),
+}
+
+
+@router.get("/timeslice/{instance_id}", response_model=list[BucketEntryResponse])
+async def list_timeslice(
+    instance_id: UUID,
+    repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
+    since: Annotated[datetime, Query(alias="from")],
+    until: Annotated[datetime, Query(alias="to")],
+    dimension: Annotated[Literal["database", "sql", "wait_type", "db_user"], Query()] = (
+        "database"
+    ),
+    bucket: Annotated[
+        Literal["ten_minutes", "minute", "ten_seconds", "second"], Query()
+    ] = "ten_minutes",
+) -> list[BucketEntryResponse]:
+    """"Fatia de Tempo" — drill-down temporal fino DENTRO de uma janela já estreita (uma hora, um
+    intervalo de 10min, etc.), pedido explícito do usuário com o "Timeslice" do SolarWinds DPA
+    como referência. Generaliza os 4 `wait_time_by_bucket_and_*` já existentes (que hoje só
+    aceitavam `bucket="day"/"hour"`) pras 4 granularidades sub-hora — um único endpoint com
+    `dimension`/`bucket` como parâmetro, em vez de 16 rotas (`4 dimensões × 4 granularidades`).
+
+    `from`/`to` são OBRIGATÓRIOS aqui (diferente das demais rotas deste arquivo, que caem pro
+    lookback padrão) — a "Fatia de Tempo" sempre ancora num período já escolhido pelo usuário
+    (a hora/bucket clicado no nível anterior do drill-down), nunca "os últimos N segundos"."""
+    repository_method_name, label_column = _TIMESLICE_DIMENSIONS[dimension]
+    repository_method = getattr(repository, repository_method_name)
+    settings = get_settings()
+    rows = await repository_method(
+        instance_id, since, until, settings.api_read_max_rows, bucket=bucket
+    )
+    return [
+        BucketEntryResponse(
+            bucket_start=row.bucket_start,
+            label=getattr(row, label_column),
             total_wait_time_ms=row.total_wait_time_ms,
         )
         for row in rows

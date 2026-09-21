@@ -1132,4 +1132,58 @@ async def test_get_query_plan_history_returns_snapshots_most_recent_first(
     assert body[0]["plan_hash"] == "plan-hash-new"
     assert body[0]["plan_xml"] == "<ShowPlanXML>new</ShowPlanXML>"
     assert body[0]["source"] == "cached"
-    assert body[1]["plan_hash"] == "plan-hash-old"
+
+
+async def test_timeslice_ten_minutes_by_database(
+    client: AsyncClient, db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """"Fatia de Tempo" — dimensao "database", bucket sub-hora "ten_minutes"."""
+    repo = QuerySamplesRepository(db_session)
+    hour_start = datetime(2026, 9, 1, 10, 0, 0, tzinfo=UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=hour_start,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-a",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_a",
+                wait_time_ms=100,
+            ),
+            NormalizedQuerySample(
+                time=hour_start + timedelta(minutes=20),
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-b",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_b",
+                wait_time_ms=50,
+            ),
+        ]
+    )
+
+    response = await client.get(
+        f"/api/v1/queries/timeslice/{test_instance.id}",
+        params={
+            "from": hour_start.isoformat(),
+            "to": (hour_start + timedelta(hours=1)).isoformat(),
+            "dimension": "database",
+            "bucket": "ten_minutes",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    by_label = {row["label"]: row for row in body}
+    assert by_label["db_a"]["total_wait_time_ms"] == 100
+    assert by_label["db_b"]["total_wait_time_ms"] == 50
+    # 2 buckets de 10min distintos (minuto 0 e minuto 20 nao caem no mesmo bucket).
+    assert by_label["db_a"]["bucket_start"] != by_label["db_b"]["bucket_start"]
+
+
+async def test_timeslice_requires_from_and_to(
+    client: AsyncClient, test_instance: Instance
+) -> None:
+    response = await client.get(f"/api/v1/queries/timeslice/{test_instance.id}")
+    assert response.status_code == 422

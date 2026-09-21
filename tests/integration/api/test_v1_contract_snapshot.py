@@ -51,6 +51,7 @@ EXPECTED_REST_PATHS = {
     "/api/v1/queries/users/{instance_id}",
     "/api/v1/queries/users-by-day/{instance_id}",
     "/api/v1/queries/users-by-hour/{instance_id}",
+    "/api/v1/queries/timeslice/{instance_id}",
     "/api/v1/waits-blocking/blocking/{instance_id}",
     "/api/v1/waits-blocking/blocking/{instance_id}/incidents",
     "/api/v1/waits-blocking/blocking/{instance_id}/session/{session_id}",
