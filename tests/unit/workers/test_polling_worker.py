@@ -431,3 +431,78 @@ async def test_run_cycle_skips_settings_lookup_when_repository_not_injected() ->
     await worker._run_cycle()
 
     assert blocking_repo.batches == [result.blocking_events]
+
+
+def _make_instance_with_override(instance_id, min_lock_time_ms: int | None) -> Instance:  # noqa: ANN001
+    instance = Instance(
+        id=instance_id,
+        name="instancia-com-override",
+        db_type="postgresql",
+        host="127.0.0.1",
+        port=5432,
+        criticality="standard",
+        polling_interval_seconds=10,
+        auth_method="integrated",
+        min_lock_time_ms=min_lock_time_ms,
+    )
+    instance.maintenance_windows = []
+    return instance
+
+
+async def test_run_cycle_prefers_instance_override_over_global_setting() -> None:
+    """Override ad-hoc (`instance.min_lock_time_ms=5`) vence o valor global (500 no fake) —
+    resultado: o bloqueio com `wait_time_ms=10` (de `_build_result`) passa (10 >= 5)."""
+    instance_id = uuid4()
+    result = _build_result(instance_id)
+    collector = _FakeCollector(result=result)
+    metric_repo = _FakeMetricSamplesRepository()
+    query_repo = _FakeQuerySamplesRepository()
+    blocking_repo = _FakeBlockingEventsRepository()
+    instance = _make_instance_with_override(instance_id, min_lock_time_ms=5)
+    instances_repo = _FakeInstancesRepository(instance=instance)
+    settings_repo = _FakeSystemSettingsRepository(blocking_min_duration_ms=500)
+
+    worker = PollingWorker(
+        instance_id,
+        collector,
+        10,
+        metric_repo,
+        query_repo,
+        blocking_repo,
+        instances_repo,
+        system_settings_repository=settings_repo,
+    )
+    await worker._run_cycle()
+
+    assert blocking_repo.batches == [result.blocking_events]
+    # O global nunca foi consultado - o override por instancia ja resolveu o limite.
+    assert settings_repo.get_calls == 0
+
+
+async def test_run_cycle_falls_back_to_global_setting_when_override_is_null() -> None:
+    """`instance.min_lock_time_ms=None` (sem override) cai pro valor global (50) - o bloqueio
+    com `wait_time_ms=10` e descartado (10 < 50)."""
+    instance_id = uuid4()
+    result = _build_result(instance_id)
+    collector = _FakeCollector(result=result)
+    metric_repo = _FakeMetricSamplesRepository()
+    query_repo = _FakeQuerySamplesRepository()
+    blocking_repo = _FakeBlockingEventsRepository()
+    instance = _make_instance_with_override(instance_id, min_lock_time_ms=None)
+    instances_repo = _FakeInstancesRepository(instance=instance)
+    settings_repo = _FakeSystemSettingsRepository(blocking_min_duration_ms=50)
+
+    worker = PollingWorker(
+        instance_id,
+        collector,
+        10,
+        metric_repo,
+        query_repo,
+        blocking_repo,
+        instances_repo,
+        system_settings_repository=settings_repo,
+    )
+    await worker._run_cycle()
+
+    assert blocking_repo.batches == [[]]
+    assert settings_repo.get_calls == 1

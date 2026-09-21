@@ -81,6 +81,7 @@ class InstanceResponse(BaseModel):
     engine_support_tier: str | None
     criticality: str
     polling_interval_seconds: int
+    min_lock_time_ms: int | None
     auth_method: str
     active: bool
     created_at: datetime
@@ -124,6 +125,9 @@ class InstanceSummaryResponse(BaseModel):
     # Aditivo — tela de Configurações (`/settings`) lista todas as instâncias com o intervalo
     # atual, sem round-trip por instância pro detalhe completo.
     polling_interval_seconds: int
+    # Aditivo — sub-tela "Tempo mínimo de bloqueio" (override ad-hoc por instância). `None` =
+    # sem override, usa o valor global (`system_settings.blocking_min_duration_ms`).
+    min_lock_time_ms: int | None
     health_status: str
     collection_coverage: str
     active: bool
@@ -308,6 +312,7 @@ async def list_instances(
                 engine_version_major=instance.engine_version_major,
                 criticality=instance.criticality,
                 polling_interval_seconds=instance.polling_interval_seconds,
+                min_lock_time_ms=instance.min_lock_time_ms,
                 health_status=derived.health_status,
                 collection_coverage=derived.collection_coverage,
                 active=instance.active,
@@ -402,6 +407,49 @@ async def update_instance_settings(
         polling_interval_seconds=payload.polling_interval_seconds,
         criticality=payload.criticality,
     )
+    if instance is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Instancia nao encontrada."
+        )
+    derived = await status_service.compute(instance_id)
+    return InstanceDetailResponse(
+        **InstanceResponse.model_validate(instance).model_dump(),
+        health_status=derived.health_status,
+        collection_coverage=derived.collection_coverage,
+        capability_errors=[],
+        last_collected_at=derived.last_collected_at,
+    )
+
+
+class InstanceMinLockTimeUpdateRequest(BaseModel):
+    """Corpo de `PATCH /instances/{id}/min-lock-time` — override AD-HOC do "Tempo mínimo para
+    captura de Bloqueios" só para esta instância (a pedido explícito do usuário: investigar um
+    caso específico com um cliente sem afetar as demais instâncias monitoradas).
+
+    Endpoint dedicado (não mais um parâmetro de `InstanceSettingsUpdateRequest`) porque aqui
+    `min_lock_time_ms=null` tem significado real e distinto de "campo não enviado": limpa o
+    override, voltando a usar o valor global. O campo é OBRIGATÓRIO (sem default) justamente
+    para forçar o cliente a mandar `null` explicitamente quando quiser limpar, em vez de
+    simplesmente omitir a chave (que teria o mesmo efeito ambíguo de "não toque neste campo" do
+    outro endpoint)."""
+
+    min_lock_time_ms: int | None = Field(ge=0)
+
+
+@router.patch("/{instance_id}/min-lock-time", response_model=InstanceDetailResponse)
+async def update_instance_min_lock_time(
+    instance_id: UUID,
+    payload: InstanceMinLockTimeUpdateRequest,
+    repository: Annotated[InstancesRepository, Depends(get_instances_repository)],
+    status_service: Annotated[
+        InstanceDerivedStatusService, Depends(get_instance_derived_status_service)
+    ],
+) -> InstanceDetailResponse:
+    """`min_lock_time_ms=null` limpa o override (volta a usar o valor global de
+    `system_settings.blocking_min_duration_ms`); um número define o override ad-hoc. Lido a cada
+    ciclo por `PollingWorker` (não cacheado) — vale a partir do próximo ciclo de poll, sem
+    restart do backend."""
+    instance = await repository.set_min_lock_time_ms(instance_id, payload.min_lock_time_ms)
     if instance is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Instancia nao encontrada."

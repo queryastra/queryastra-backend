@@ -12,10 +12,13 @@ Contrato (Docs/specs/01-collection-contract.md, Docs/rules/02-safe-collection.md
       derruba o loop da instancia inteira; ainda assim grava telemetria de duracao/erro;
     - o loop nunca roda mais rapido que `polling_interval_seconds` nem acumula ciclos
       atrasados (skip, nao enfileira);
-    - quando `system_settings_repository` e injetado, bloqueios com `wait_time_ms` abaixo de
-      `system_settings.blocking_min_duration_ms` (tela "Configuracoes -> Geral") sao filtrados
-      ANTES de persistir em `blocking_events`/`blocking_incidents` — lido a cada ciclo (nao
-      cacheado), pra uma mudanca na tela valer no proximo ciclo sem restart.
+    - quando `system_settings_repository` e injetado, bloqueios com `wait_time_ms` abaixo do
+      limite minimo sao filtrados ANTES de persistir em `blocking_events`/`blocking_incidents` —
+      lido a cada ciclo (nao cacheado), pra uma mudanca valer no proximo ciclo sem restart. O
+      limite efetivo prioriza o override ad-hoc por instancia (`instance.min_lock_time_ms`, nao
+      NULL) sobre o valor global (`system_settings.blocking_min_duration_ms`, tela
+      "Configuracoes -> Geral") — permite afinar temporariamente uma investigacao numa unica
+      instancia sem afetar as demais.
 
 Convencao de `day_of_week` (`InstanceMaintenanceWindow`, `app/models/instance.py`): 0 = domingo,
 conforme o comentario explicito no modelo (`# 0 = domingo`) e a CHECK `BETWEEN 0 AND 6` — NAO e
@@ -151,14 +154,21 @@ class PollingWorker:
             await self._query_samples_repository.insert_batch(result.query_samples)
 
             blocking_events = result.blocking_events
-            if self._system_settings_repository is not None:
+            # Override ad-hoc por instancia (`instance.min_lock_time_ms`, a pedido explicito do
+            # usuario — investigar um caso especifico sem afetar as demais instancias) tem
+            # prioridade sobre o valor global (`system_settings.blocking_min_duration_ms`); só
+            # cai pro global quando o override esta NULL (padrao).
+            min_duration_ms: int | None = (
+                instance.min_lock_time_ms if instance is not None else None
+            )
+            if min_duration_ms is None and self._system_settings_repository is not None:
                 min_duration_ms = (
                     await self._system_settings_repository.get()
                 ).blocking_min_duration_ms
-                if min_duration_ms > 0:
-                    blocking_events = [
-                        event for event in blocking_events if event.wait_time_ms >= min_duration_ms
-                    ]
+            if min_duration_ms is not None and min_duration_ms > 0:
+                blocking_events = [
+                    event for event in blocking_events if event.wait_time_ms >= min_duration_ms
+                ]
 
             await self._blocking_events_repository.insert_batch(blocking_events)
             if self._blocking_incidents_repository is not None:

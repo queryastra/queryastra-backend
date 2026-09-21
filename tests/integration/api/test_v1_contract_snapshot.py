@@ -22,6 +22,7 @@ EXPECTED_REST_PATHS = {
     "/api/v1/instances/{instance_id}",
     "/api/v1/instances/{instance_id}/active",
     "/api/v1/instances/{instance_id}/settings",
+    "/api/v1/instances/{instance_id}/min-lock-time",
     "/api/v1/instances/test-connection",
     "/api/v1/instances/{instance_id}/health-check",
     "/api/v1/hosts/{hostname}/metrics",

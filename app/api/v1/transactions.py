@@ -30,6 +30,7 @@ from app.core.config import get_settings
 from app.models.blocking_incident import BlockingIncident
 from app.models.transaction_event import TransactionEvent
 from app.repositories.blocking_incidents_repository import BlockingIncidentsRepository
+from app.repositories.query_samples_repository import QuerySamplesRepository
 from app.repositories.transaction_events_repository import TransactionEventsRepository
 
 router = APIRouter()
@@ -54,6 +55,7 @@ class TransactionEventResponse(BaseModel):
     related_blocking_session_id: str | None
     related_blocking_role: str | None
     related_blocking_ended_at: datetime | None
+    sql_text_masked: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -68,6 +70,12 @@ def get_blocking_incidents_repository(
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> BlockingIncidentsRepository:
     return BlockingIncidentsRepository(session)
+
+
+def get_query_samples_repository(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> QuerySamplesRepository:
+    return QuerySamplesRepository(session)
 
 
 def _is_orphan_candidate(
@@ -97,19 +105,29 @@ def _to_response(
     row: TransactionEvent,
     threshold_minutes: int,
     incidents: list[BlockingIncident],
+    text_by_hash: dict[str, str],
 ) -> TransactionEventResponse:
+    """`sql_text_masked` resolvido por HASH (`text_by_hash`, ver `QuerySamplesRepository.
+    latest_text_by_sql_hash`), não guardado direto em `BlockingIncident` — mesmo padrão já usado
+    por `GET /waits-blocking/blocking/{id}/incidents` (item 22): resolver pela sessão sozinha
+    quebraria pra um incidente antigo cujo `session_id` o motor já reciclou pra outra query."""
     related_session_id: str | None = None
     related_role: str | None = None
     related_ended_at: datetime | None = None
+    sql_text_masked: str | None = None
     if row.session_id is not None:
         incident = _most_recent_incident_for_session(row.session_id, incidents)
         if incident is not None:
             if incident.blocker_session_id == row.session_id:
                 related_session_id = incident.blocked_session_id
                 related_role = "bloqueadora"
+                if incident.blocker_sql_hash is not None:
+                    sql_text_masked = text_by_hash.get(incident.blocker_sql_hash)
             else:
                 related_session_id = incident.blocker_session_id
                 related_role = "bloqueada"
+                if incident.blocked_sql_hash is not None:
+                    sql_text_masked = text_by_hash.get(incident.blocked_sql_hash)
             related_ended_at = incident.ended_at
 
     return TransactionEventResponse(
@@ -131,7 +149,22 @@ def _to_response(
         related_blocking_session_id=related_session_id,
         related_blocking_role=related_role,
         related_blocking_ended_at=related_ended_at,
+        sql_text_masked=sql_text_masked,
     )
+
+
+async def _resolve_text_by_hash(
+    query_repository: QuerySamplesRepository,
+    instance_id: UUID,
+    incidents: list[BlockingIncident],
+) -> dict[str, str]:
+    hashes = {
+        h
+        for incident in incidents
+        for h in (incident.blocker_sql_hash, incident.blocked_sql_hash)
+        if h is not None
+    }
+    return await query_repository.latest_text_by_sql_hash(instance_id, list(hashes))
 
 
 @router.get("/{instance_id}", response_model=list[TransactionEventResponse])
@@ -141,6 +174,7 @@ async def list_transactions(
     blocking_repository: Annotated[
         BlockingIncidentsRepository, Depends(get_blocking_incidents_repository)
     ],
+    query_repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
     open_only: Annotated[bool, Query()] = True,
     database_name: Annotated[str | None, Query()] = None,
     since: Annotated[datetime | None, Query(alias="from")] = None,
@@ -163,8 +197,10 @@ async def list_transactions(
     incidents = await blocking_repository.find_involving_sessions(
         instance_id, session_ids, settings.api_read_max_rows
     )
+    text_by_hash = await _resolve_text_by_hash(query_repository, instance_id, incidents)
     return [
-        _to_response(row, settings.transaction_orphan_threshold_minutes, incidents) for row in rows
+        _to_response(row, settings.transaction_orphan_threshold_minutes, incidents, text_by_hash)
+        for row in rows
     ]
 
 
@@ -176,6 +212,7 @@ async def get_transaction(
     blocking_repository: Annotated[
         BlockingIncidentsRepository, Depends(get_blocking_incidents_repository)
     ],
+    query_repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
 ) -> TransactionEventResponse:
     """Detalhe de uma transação específica — continua resolvendo mesmo depois de encerrada
     (`closed_at` preenchido), até a janela de retenção expirar; 404 só quando nunca existiu ou já
@@ -197,4 +234,5 @@ async def get_transaction(
         if row.session_id is not None
         else []
     )
-    return _to_response(row, settings.transaction_orphan_threshold_minutes, incidents)
+    text_by_hash = await _resolve_text_by_hash(query_repository, instance_id, incidents)
+    return _to_response(row, settings.transaction_orphan_threshold_minutes, incidents, text_by_hash)

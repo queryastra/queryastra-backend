@@ -271,3 +271,54 @@ async def test_update_instance_settings_rejects_empty_payload(
         json={},
     )
     assert response.status_code == 422
+
+
+async def test_update_instance_min_lock_time_sets_override(
+    client: AsyncClient, test_instance: Instance
+) -> None:
+    """Override ad-hoc pra investigar um caso específico só nesta instância."""
+    assert test_instance.min_lock_time_ms is None
+
+    response = await client.patch(
+        f"/api/v1/instances/{test_instance.id}/min-lock-time",
+        json={"min_lock_time_ms": 500},
+    )
+    assert response.status_code == 200
+    assert response.json()["min_lock_time_ms"] == 500
+
+
+async def test_update_instance_min_lock_time_null_clears_override(
+    client: AsyncClient, test_instance: Instance
+) -> None:
+    """`null` explícito limpa o override — volta a usar o valor global."""
+    await client.patch(
+        f"/api/v1/instances/{test_instance.id}/min-lock-time",
+        json={"min_lock_time_ms": 500},
+    )
+
+    response = await client.patch(
+        f"/api/v1/instances/{test_instance.id}/min-lock-time",
+        json={"min_lock_time_ms": None},
+    )
+    assert response.status_code == 200
+    assert response.json()["min_lock_time_ms"] is None
+
+
+async def test_update_instance_min_lock_time_rejects_negative_value(
+    client: AsyncClient, test_instance: Instance
+) -> None:
+    response = await client.patch(
+        f"/api/v1/instances/{test_instance.id}/min-lock-time",
+        json={"min_lock_time_ms": -1},
+    )
+    assert response.status_code == 422
+
+
+async def test_update_instance_min_lock_time_404_for_unknown_instance(
+    client: AsyncClient,
+) -> None:
+    response = await client.patch(
+        "/api/v1/instances/00000000-0000-0000-0000-000000000000/min-lock-time",
+        json={"min_lock_time_ms": 500},
+    )
+    assert response.status_code == 404

@@ -74,8 +74,14 @@ class Instance(Base):
 
     auth_method: Mapped[str] = mapped_column(String, nullable=False)
     # Referencia opaca ao segredo (cofre ou criptografia com chave fora do banco) — NUNCA a
-    # senha em si. NULL quando auth_method = 'integrated'. Ver app/security/credential_reference.py.
     encrypted_credential_ref: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    # Override ad-hoc do "Tempo mínimo para captura de Bloqueios (Locks)" só para esta instância
+    # — a pedido explícito do usuário, pra poder afinar temporariamente uma investigação (ex.:
+    # analisar um caso específico com um cliente) sem afetar as demais instâncias monitoradas. Se
+    # NULL (padrão), usa o valor global de `system_settings.blocking_min_duration_ms`
+    # (`app.models.system_settings`) — `PollingWorker._run_cycle` resolve isso a cada ciclo.
+    min_lock_time_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
     created_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)

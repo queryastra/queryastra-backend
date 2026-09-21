@@ -92,6 +92,20 @@ class InstancesRepository(BaseRepository):
         await self._session.refresh(instance)
         return instance
 
+    async def set_min_lock_time_ms(self, instance_id: UUID, value: int | None) -> Instance | None:
+        """Override ad-hoc do "Tempo mínimo para captura de Bloqueios" só para esta instância —
+        método dedicado (não mais um parâmetro opcional de `update_settings`) porque `None` AQUI
+        tem um significado real e distinto de "não mexer": limpa o override, voltando a usar o
+        valor global (`system_settings.blocking_min_duration_ms`). `update_settings` não pode
+        expressar isso — lá `None` sempre significa "não veio no payload"."""
+        instance = await self.get_by_id(instance_id)
+        if instance is None:
+            return None
+        instance.min_lock_time_ms = value
+        await self._session.commit()
+        await self._session.refresh(instance)
+        return instance
+
     async def create(self, instance: Instance) -> Instance:
         self._session.add(instance)
         await self._session.commit()
