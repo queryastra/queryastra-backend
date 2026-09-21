@@ -47,27 +47,31 @@ async def test_list_blocking_events_builds_tree_with_enrichment(
         ]
     )
 
+    def make_event(wait_time_ms: int) -> NormalizedBlockingEvent:
+        return NormalizedBlockingEvent(
+            time=now,
+            instance_id=test_instance.id,
+            blocker_session_id="blocker-1",
+            blocked_session_id="blocked-1",
+            blocker_sql_hash="hash-blocker",
+            blocked_sql_hash="hash-blocked",
+            wait_time_ms=wait_time_ms,
+            blocked_db_user="blocked_user",
+            blocked_program="psql",
+            blocked_machine="10.0.0.5",
+            blocked_wait_event_native="relation",
+            blocked_wait_resource="relation/AccessShareLock",
+            blocked_object="t",
+        )
+
     blocking_repo = BlockingIncidentsRepository(db_session)
+    # 2 ciclos com um gap de 1234ms entre eles: `waited_ms`/`caused_ms` exibidos vem do intervalo
+    # OBSERVADO (`last_seen_at - started_at`), nao do `wait_time_ms` bruto de nenhum dos dois
+    # ciclos (que pode ser qualquer valor — o DMV reinicia essa contagem a qualquer momento) —
+    # ver `_observed_wait_ms`.
+    await blocking_repo.upsert_batch(test_instance.id, [make_event(50)], now)
     await blocking_repo.upsert_batch(
-        test_instance.id,
-        [
-            NormalizedBlockingEvent(
-                time=now,
-                instance_id=test_instance.id,
-                blocker_session_id="blocker-1",
-                blocked_session_id="blocked-1",
-                blocker_sql_hash="hash-blocker",
-                blocked_sql_hash="hash-blocked",
-                wait_time_ms=1234,
-                blocked_db_user="blocked_user",
-                blocked_program="psql",
-                blocked_machine="10.0.0.5",
-                blocked_wait_event_native="relation",
-                blocked_wait_resource="relation/AccessShareLock",
-                blocked_object="t",
-            )
-        ],
-        now,
+        test_instance.id, [make_event(80)], now + timedelta(milliseconds=1234)
     )
 
     response = await client.get(f"/api/v1/waits-blocking/blocking/{test_instance.id}")
@@ -100,28 +104,33 @@ async def test_list_blocking_events_builds_multi_level_tree(
     """Cadeia A -> B -> C de 3 niveis: B aparece bloqueado por A E bloqueando C no mesmo
     conjunto aberto — a arvore encadeia as 2 arestas diretas. `caused_ms` de A soma o proprio
     bloqueio de B (500) mais tudo que B, por sua vez, causou (o `waited_ms` de C, 200) — reflete
-    o impacto TOTAL da cadeia, nao so o filho direto."""
+    o impacto TOTAL da cadeia, nao so o filho direto. `waited_ms` de cada aresta vem do intervalo
+    OBSERVADO entre ciclos (`_observed_wait_ms`), entao A->B e B->C comecam em momentos
+    diferentes pra teminarem com durações distintas (500ms/200ms)."""
     now = datetime.now(UTC)
+    a_blocks_b = NormalizedBlockingEvent(
+        time=now,
+        instance_id=test_instance.id,
+        blocker_session_id="A",
+        blocked_session_id="B",
+        wait_time_ms=1,
+    )
+    b_blocks_c = NormalizedBlockingEvent(
+        time=now,
+        instance_id=test_instance.id,
+        blocker_session_id="B",
+        blocked_session_id="C",
+        wait_time_ms=1,
+    )
     blocking_repo = BlockingIncidentsRepository(db_session)
+    # A->B comeca no ciclo 1 (t0); B->C só aparece no ciclo 2 (t0+300ms); ciclo 3 (t0+500ms)
+    # observa os dois de novo — A->B acumula 500ms de intervalo observado, B->C só 200ms.
+    await blocking_repo.upsert_batch(test_instance.id, [a_blocks_b], now)
     await blocking_repo.upsert_batch(
-        test_instance.id,
-        [
-            NormalizedBlockingEvent(
-                time=now,
-                instance_id=test_instance.id,
-                blocker_session_id="A",
-                blocked_session_id="B",
-                wait_time_ms=500,
-            ),
-            NormalizedBlockingEvent(
-                time=now,
-                instance_id=test_instance.id,
-                blocker_session_id="B",
-                blocked_session_id="C",
-                wait_time_ms=200,
-            ),
-        ],
-        now,
+        test_instance.id, [a_blocks_b, b_blocks_c], now + timedelta(milliseconds=300)
+    )
+    await blocking_repo.upsert_batch(
+        test_instance.id, [a_blocks_b, b_blocks_c], now + timedelta(milliseconds=500)
     )
 
     response = await client.get(f"/api/v1/waits-blocking/blocking/{test_instance.id}")
@@ -191,6 +200,8 @@ async def test_list_blocking_incidents_includes_machine_and_command(
                 wait_time_ms=999,
                 blocker_machine="WKS-01",
                 blocked_machine="WKS-02",
+                blocked_wait_resource="relation/AccessShareLock",
+                blocked_object="t",
             )
         ],
         now,
@@ -202,6 +213,8 @@ async def test_list_blocking_incidents_includes_machine_and_command(
     [incident] = response.json()
     assert incident["blocker_machine"] == "WKS-01"
     assert incident["blocked_machine"] == "WKS-02"
+    assert incident["blocked_wait_resource"] == "relation/AccessShareLock"
+    assert incident["blocked_object"] == "t"
     assert incident["blocker_sql_text_masked"] == "UPDATE t SET x = ?"
     assert incident["blocked_sql_text_masked"] == "SELECT ? FROM t"
 
@@ -280,25 +293,27 @@ async def test_get_session_blocking_detail_returns_identity_command_and_edges(
         ]
     )
 
+    def make_event(wait_time_ms: int) -> NormalizedBlockingEvent:
+        return NormalizedBlockingEvent(
+            time=now,
+            instance_id=test_instance.id,
+            blocker_session_id="blocker-1",
+            blocked_session_id="blocked-1",
+            wait_time_ms=wait_time_ms,
+            blocked_db_user="blocked_user",
+            blocked_program="psql",
+            blocked_machine="10.0.0.5",
+            blocked_wait_event_native="relation",
+            blocked_wait_resource="relation/AccessShareLock",
+            blocked_object="t",
+        )
+
     blocking_repo = BlockingIncidentsRepository(db_session)
+    # 2 ciclos, gap de 999ms — `wait_time_ms` exibido vem do intervalo observado, nao do valor
+    # bruto de nenhum dos dois ciclos (ver `_observed_wait_ms`).
+    await blocking_repo.upsert_batch(test_instance.id, [make_event(10)], now)
     await blocking_repo.upsert_batch(
-        test_instance.id,
-        [
-            NormalizedBlockingEvent(
-                time=now,
-                instance_id=test_instance.id,
-                blocker_session_id="blocker-1",
-                blocked_session_id="blocked-1",
-                wait_time_ms=999,
-                blocked_db_user="blocked_user",
-                blocked_program="psql",
-                blocked_machine="10.0.0.5",
-                blocked_wait_event_native="relation",
-                blocked_wait_resource="relation/AccessShareLock",
-                blocked_object="t",
-            )
-        ],
-        now,
+        test_instance.id, [make_event(20)], now + timedelta(milliseconds=999)
     )
 
     response = await client.get(

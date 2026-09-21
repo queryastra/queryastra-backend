@@ -150,6 +150,10 @@ class BlockingIncidentResponse(BaseModel):
     blocker_transaction_begin_time: datetime | None
     blocked_transaction_begin_time: datetime | None
     blocked_wait_event_native: str | None
+    # Faltavam aqui (ja existiam na arvore via `BlockingTreeNodeResponse`) — regressao real
+    # relatada pelo usuario: o historico plano nunca mostrava recurso/objeto bloqueado.
+    blocked_wait_resource: str | None
+    blocked_object: str | None
     wait_time_ms: int
     started_at: datetime
     last_seen_at: datetime
@@ -193,6 +197,20 @@ _SessionInfo = dict[str, object]
 """Campos denormalizados (`db_user`/`program`/`machine`/`wait_event_native`/`wait_resource`/
 `blocked_object`/`transaction_begin_time`) de uma sessao, coletados a partir das arestas em que
 ela aparece — ver `_collect_session_info`."""
+
+
+def _observed_wait_ms(incident: BlockingIncident) -> int:
+    """`wait_time_ms` cru de `blocking_incidents` e so o valor da ULTIMA amostra do ciclo mais
+    recente (`sys.dm_exec_requests.wait_time`/equivalente Postgres) — reinicia sempre que a
+    espera SUBJACENTE reinicia (a sessao larga e tenta de novo o mesmo lock, lock escalation,
+    etc.), mesmo que o PAR (bloqueador, bloqueado) continue bloqueado por todo esse tempo. Isso
+    faz o campo divergir MUITO de `Fim - Inicio` em incidentes longos (bug real relatado pelo
+    usuario ao vivo: confirmado num incidente real de ~2 minutos entre `started_at` e `ended_at`
+    com `wait_time_ms=82`). O tempo REALMENTE exibido pro usuario ("Tempo de espera") precisa
+    vir do intervalo observado do proprio incidente — `ended_at` (ou `last_seen_at`, se ainda em
+    andamento) menos `started_at` — que por construcao sempre bate com as colunas Inicio/Fim."""
+    end = incident.ended_at or incident.last_seen_at
+    return int((end - incident.started_at).total_seconds() * 1000)
 
 
 def _collect_session_info(events: list[BlockingIncident]) -> dict[str, _SessionInfo]:
@@ -256,7 +274,7 @@ def _build_blocking_tree(
         query_info = enrichment.get(session_id)
         info = session_info.get(session_id, {})
         children = [
-            node_for(c.blocked_session_id, c.blocked_sql_hash, c.wait_time_ms, c.started_at)
+            node_for(c.blocked_session_id, c.blocked_sql_hash, _observed_wait_ms(c), c.started_at)
             for c in children_by_blocker.get(session_id, [])
         ]
         # "Caused" (impacto total dessa sessao na cadeia): soma, recursivamente, o tempo que
@@ -366,6 +384,7 @@ async def list_blocking_incidents(
     return [
         BlockingIncidentResponse.model_validate(row).model_copy(
             update={
+                "wait_time_ms": _observed_wait_ms(row),
                 "blocker_sql_text_masked": text_by_hash.get(row.blocker_sql_hash)
                 if row.blocker_sql_hash
                 else None,
@@ -431,7 +450,7 @@ async def get_session_blocking_detail(
                 db_user=e.blocked_db_user,
                 program=e.blocked_program,
                 machine=e.blocked_machine,
-                wait_time_ms=e.wait_time_ms,
+                wait_time_ms=_observed_wait_ms(e),
                 transaction_begin_time=e.blocked_transaction_begin_time,
                 started_at=e.started_at,
                 ended_at=e.ended_at,
@@ -445,7 +464,7 @@ async def get_session_blocking_detail(
                 db_user=e.blocker_db_user,
                 program=e.blocker_program,
                 machine=e.blocker_machine,
-                wait_time_ms=e.wait_time_ms,
+                wait_time_ms=_observed_wait_ms(e),
                 transaction_begin_time=e.blocker_transaction_begin_time,
                 started_at=e.started_at,
                 ended_at=e.ended_at,
