@@ -6,8 +6,10 @@ persistencia.
 
 from __future__ import annotations
 
+from typing import cast
 from uuid import UUID
 
+import sqlalchemy as sa
 from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
 
@@ -105,6 +107,19 @@ class InstancesRepository(BaseRepository):
         await self._session.commit()
         await self._session.refresh(instance)
         return instance
+
+    async def clear_all_min_lock_time_overrides(self) -> int:
+        """Reset em massa — usado quando o usuário desmarca "Limites ad hoc" na UI (Configurações
+        → Geral): apaga o override de TODAS as instâncias de uma vez (não só a selecionada no
+        momento), voltando cada uma a usar o valor global. Devolve quantas linhas foram
+        afetadas, só para telemetria/log — a UI não depende do valor exato."""
+        result = await self._session.execute(
+            update(Instance)
+            .where(Instance.min_lock_time_ms.is_not(None))
+            .values(min_lock_time_ms=None)
+        )
+        await self._session.commit()
+        return cast(sa.CursorResult, result).rowcount or 0
 
     async def create(self, instance: Instance) -> Instance:
         self._session.add(instance)

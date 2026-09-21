@@ -322,3 +322,85 @@ async def test_update_instance_min_lock_time_404_for_unknown_instance(
         json={"min_lock_time_ms": 500},
     )
     assert response.status_code == 404
+
+
+async def test_set_database_lock_time_override_creates_and_updates(
+    client: AsyncClient, test_instance: Instance
+) -> None:
+    """`PUT` cria na primeira chamada e atualiza (upsert) numa segunda chamada pro mesmo banco."""
+    create_response = await client.put(
+        f"/api/v1/instances/{test_instance.id}/database-lock-time-overrides",
+        json={"database_name": "AB_COBRANCA", "min_lock_time_ms": 500},
+    )
+    assert create_response.status_code == 200
+    assert create_response.json() == {"database_name": "AB_COBRANCA", "min_lock_time_ms": 500}
+
+    update_response = await client.put(
+        f"/api/v1/instances/{test_instance.id}/database-lock-time-overrides",
+        json={"database_name": "AB_COBRANCA", "min_lock_time_ms": 750},
+    )
+    assert update_response.status_code == 200
+    assert update_response.json()["min_lock_time_ms"] == 750
+
+    list_response = await client.get(
+        f"/api/v1/instances/{test_instance.id}/database-lock-time-overrides"
+    )
+    assert list_response.status_code == 200
+    assert list_response.json() == [{"database_name": "AB_COBRANCA", "min_lock_time_ms": 750}]
+
+
+async def test_clear_database_lock_time_override(
+    client: AsyncClient, test_instance: Instance
+) -> None:
+    await client.put(
+        f"/api/v1/instances/{test_instance.id}/database-lock-time-overrides",
+        json={"database_name": "AB_COBRANCA", "min_lock_time_ms": 500},
+    )
+
+    delete_response = await client.delete(
+        f"/api/v1/instances/{test_instance.id}/database-lock-time-overrides/AB_COBRANCA"
+    )
+    assert delete_response.status_code == 204
+
+    list_response = await client.get(
+        f"/api/v1/instances/{test_instance.id}/database-lock-time-overrides"
+    )
+    assert list_response.json() == []
+
+
+async def test_clear_database_lock_time_override_404_when_no_override_exists(
+    client: AsyncClient, test_instance: Instance
+) -> None:
+    response = await client.delete(
+        f"/api/v1/instances/{test_instance.id}/database-lock-time-overrides/NUNCA_CONFIGURADO"
+    )
+    assert response.status_code == 404
+
+
+async def test_reset_all_lock_time_overrides_clears_instance_and_database_overrides(
+    client: AsyncClient, test_instance: Instance
+) -> None:
+    """Desmarcar "Limites ad hoc" na UI aciona este reset em massa — precisa apagar tanto o
+    override por instância quanto qualquer override por banco, de TODAS as instâncias."""
+    await client.patch(
+        f"/api/v1/instances/{test_instance.id}/min-lock-time",
+        json={"min_lock_time_ms": 500},
+    )
+    await client.put(
+        f"/api/v1/instances/{test_instance.id}/database-lock-time-overrides",
+        json={"database_name": "AB_COBRANCA", "min_lock_time_ms": 300},
+    )
+
+    reset_response = await client.delete("/api/v1/instances/lock-time-overrides/reset")
+    assert reset_response.status_code == 200
+    body = reset_response.json()
+    assert body["instances_cleared"] >= 1
+    assert body["database_overrides_cleared"] >= 1
+
+    instance_response = await client.get(f"/api/v1/instances/{test_instance.id}")
+    assert instance_response.json()["min_lock_time_ms"] is None
+
+    overrides_response = await client.get(
+        f"/api/v1/instances/{test_instance.id}/database-lock-time-overrides"
+    )
+    assert overrides_response.json() == []

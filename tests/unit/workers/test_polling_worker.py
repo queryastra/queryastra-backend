@@ -7,7 +7,7 @@ Usa fakes de `Collector` e dos 4 repositorios (gravam chamadas em listas, sem ba
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, time
 from uuid import uuid4
 
@@ -433,6 +433,22 @@ async def test_run_cycle_skips_settings_lookup_when_repository_not_injected() ->
     assert blocking_repo.batches == [result.blocking_events]
 
 
+class _FakeDatabaseOverride:
+    def __init__(self, database_name: str, min_lock_time_ms: int) -> None:
+        self.database_name = database_name
+        self.min_lock_time_ms = min_lock_time_ms
+
+
+class _FakeInstanceDatabaseLockOverridesRepository:
+    def __init__(self, overrides: list[_FakeDatabaseOverride]) -> None:
+        self._overrides = overrides
+        self.list_calls = 0
+
+    async def list_for_instance(self, instance_id):  # noqa: ANN001, ANN201 - fake
+        self.list_calls += 1
+        return self._overrides
+
+
 def _make_instance_with_override(instance_id, min_lock_time_ms: int | None) -> Instance:  # noqa: ANN001
     instance = Instance(
         id=instance_id,
@@ -506,3 +522,77 @@ async def test_run_cycle_falls_back_to_global_setting_when_override_is_null() ->
 
     assert blocking_repo.batches == [[]]
     assert settings_repo.get_calls == 1
+
+
+async def test_run_cycle_prefers_database_override_over_instance_override() -> None:
+    """Override ad-hoc por BANCO (`AB_COBRANCA`, limite 5) vence tanto o override de instância
+    (500) quanto o valor global — o evento bloqueado nesse banco (`wait_time_ms=10`) passa."""
+    instance_id = uuid4()
+    result = _build_result(instance_id)
+    result = replace(
+        result,
+        blocking_events=[
+            result.blocking_events[0].model_copy(update={"blocked_database_name": "AB_COBRANCA"})
+        ],
+    )
+    collector = _FakeCollector(result=result)
+    metric_repo = _FakeMetricSamplesRepository()
+    query_repo = _FakeQuerySamplesRepository()
+    blocking_repo = _FakeBlockingEventsRepository()
+    instance = _make_instance_with_override(instance_id, min_lock_time_ms=500)
+    instances_repo = _FakeInstancesRepository(instance=instance)
+    database_overrides_repo = _FakeInstanceDatabaseLockOverridesRepository(
+        [_FakeDatabaseOverride("AB_COBRANCA", 5)]
+    )
+
+    worker = PollingWorker(
+        instance_id,
+        collector,
+        10,
+        metric_repo,
+        query_repo,
+        blocking_repo,
+        instances_repo,
+        instance_database_lock_overrides_repository=database_overrides_repo,
+    )
+    await worker._run_cycle()
+
+    assert blocking_repo.batches == [result.blocking_events]
+    assert database_overrides_repo.list_calls == 1
+
+
+async def test_run_cycle_database_override_does_not_affect_other_databases() -> None:
+    """O override ad-hoc por banco (`AB_COBRANCA`, limite 5) só vale pra eventos DAQUELE banco —
+    um evento de outro banco (`OUTRO_BANCO`) continua caindo pro override de instância (500),
+    que descarta o evento (`wait_time_ms=10` < 500)."""
+    instance_id = uuid4()
+    result = _build_result(instance_id)
+    result = replace(
+        result,
+        blocking_events=[
+            result.blocking_events[0].model_copy(update={"blocked_database_name": "OUTRO_BANCO"})
+        ],
+    )
+    collector = _FakeCollector(result=result)
+    metric_repo = _FakeMetricSamplesRepository()
+    query_repo = _FakeQuerySamplesRepository()
+    blocking_repo = _FakeBlockingEventsRepository()
+    instance = _make_instance_with_override(instance_id, min_lock_time_ms=500)
+    instances_repo = _FakeInstancesRepository(instance=instance)
+    database_overrides_repo = _FakeInstanceDatabaseLockOverridesRepository(
+        [_FakeDatabaseOverride("AB_COBRANCA", 5)]
+    )
+
+    worker = PollingWorker(
+        instance_id,
+        collector,
+        10,
+        metric_repo,
+        query_repo,
+        blocking_repo,
+        instances_repo,
+        instance_database_lock_overrides_repository=database_overrides_repo,
+    )
+    await worker._run_cycle()
+
+    assert blocking_repo.batches == [[]]

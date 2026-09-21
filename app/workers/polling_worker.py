@@ -15,10 +15,12 @@ Contrato (Docs/specs/01-collection-contract.md, Docs/rules/02-safe-collection.md
     - quando `system_settings_repository` e injetado, bloqueios com `wait_time_ms` abaixo do
       limite minimo sao filtrados ANTES de persistir em `blocking_events`/`blocking_incidents` —
       lido a cada ciclo (nao cacheado), pra uma mudanca valer no proximo ciclo sem restart. O
-      limite efetivo prioriza o override ad-hoc por instancia (`instance.min_lock_time_ms`, nao
-      NULL) sobre o valor global (`system_settings.blocking_min_duration_ms`, tela
-      "Configuracoes -> Geral") — permite afinar temporariamente uma investigacao numa unica
-      instancia sem afetar as demais.
+      limite efetivo prioriza, do mais especifico pro mais generico: (1) override ad-hoc por
+      BANCO DE DADOS (`instance_database_lock_overrides_repository`, so se o `blocked_database_
+      name` do evento bater com um banco configurado); (2) override ad-hoc por INSTANCIA
+      (`instance.min_lock_time_ms`); (3) valor global (`system_settings.blocking_min_duration_ms`,
+      tela "Configuracoes -> Geral") — permite afinar temporariamente uma investigacao num
+      unico banco, ou numa instancia inteira, sem afetar o resto.
 
 Convencao de `day_of_week` (`InstanceMaintenanceWindow`, `app/models/instance.py`): 0 = domingo,
 conforme o comentario explicito no modelo (`# 0 = domingo`) e a CHECK `BETWEEN 0 AND 6` — NAO e
@@ -45,9 +47,12 @@ from app.core.events import event_bus
 from app.core.logging import get_logger
 from app.models.instance import Instance
 from app.normalizers.metric_names import COLLECTOR_CYCLE_DURATION_MS, COLLECTOR_CYCLE_ERROR_COUNT
-from app.normalizers.models import NormalizedMetricSample
+from app.normalizers.models import NormalizedBlockingEvent, NormalizedMetricSample
 from app.repositories.blocking_events_repository import BlockingEventsRepository
 from app.repositories.blocking_incidents_repository import BlockingIncidentsRepository
+from app.repositories.instance_database_lock_overrides_repository import (
+    InstanceDatabaseLockOverridesRepository,
+)
 from app.repositories.instances_repository import InstancesRepository
 from app.repositories.metric_samples_repository import MetricSamplesRepository
 from app.repositories.query_samples_repository import QuerySamplesRepository
@@ -96,6 +101,9 @@ class PollingWorker:
         blocking_incidents_repository: BlockingIncidentsRepository | None = None,
         *,
         system_settings_repository: SystemSettingsRepository | None = None,
+        instance_database_lock_overrides_repository: (
+            InstanceDatabaseLockOverridesRepository | None
+        ) = None,
     ) -> None:
         self._instance_id = instance_id
         self._collector = collector
@@ -113,6 +121,12 @@ class PollingWorker:
         # comportamento de antes desta feature) — lido A CADA CICLO (nao cacheado), pra uma
         # mudanca na tela "Configuracoes -> Geral" valer a partir do proximo ciclo sem restart.
         self._system_settings_repository = system_settings_repository
+        # Opcional, keyword-only (default None) — override ad-hoc por BANCO DE DADOS dentro
+        # desta instancia (mais granular que `instance.min_lock_time_ms`), tambem lido A CADA
+        # CICLO, mesma filosofia de nunca cachear este tipo de configuracao.
+        self._instance_database_lock_overrides_repository = (
+            instance_database_lock_overrides_repository
+        )
         self._stop_event = asyncio.Event()
 
     async def run(self) -> None:
@@ -158,17 +172,44 @@ class PollingWorker:
             # usuario — investigar um caso especifico sem afetar as demais instancias) tem
             # prioridade sobre o valor global (`system_settings.blocking_min_duration_ms`); só
             # cai pro global quando o override esta NULL (padrao).
-            min_duration_ms: int | None = (
+            instance_min_duration_ms: int | None = (
                 instance.min_lock_time_ms if instance is not None else None
             )
-            if min_duration_ms is None and self._system_settings_repository is not None:
-                min_duration_ms = (
+            if (
+                instance_min_duration_ms is None
+                and self._system_settings_repository is not None
+            ):
+                instance_min_duration_ms = (
                     await self._system_settings_repository.get()
                 ).blocking_min_duration_ms
-            if min_duration_ms is not None and min_duration_ms > 0:
-                blocking_events = [
-                    event for event in blocking_events if event.wait_time_ms >= min_duration_ms
-                ]
+
+            # Override ad-hoc por BANCO DE DADOS (mais granular que o da instancia inteira) —
+            # tem prioridade MAIOR AINDA, mas só se aplica ao evento cujo `blocked_database_name`
+            # bate com o banco configurado; eventos de outros bancos (ou sem banco resolvido)
+            # caem pro limite da instancia/global normalmente.
+            database_overrides_ms: dict[str, int] = {}
+            if self._instance_database_lock_overrides_repository is not None:
+                database_overrides_ms = {
+                    override.database_name: override.min_lock_time_ms
+                    for override in (
+                        await self._instance_database_lock_overrides_repository.list_for_instance(
+                            self._instance_id
+                        )
+                    )
+                }
+
+            def _passes_threshold(event: NormalizedBlockingEvent) -> bool:
+                threshold = instance_min_duration_ms
+                if (
+                    event.blocked_database_name is not None
+                    and event.blocked_database_name in database_overrides_ms
+                ):
+                    threshold = database_overrides_ms[event.blocked_database_name]
+                if threshold is None or threshold <= 0:
+                    return True
+                return event.wait_time_ms >= threshold
+
+            blocking_events = [event for event in blocking_events if _passes_threshold(event)]
 
             await self._blocking_events_repository.insert_batch(blocking_events)
             if self._blocking_incidents_repository is not None:

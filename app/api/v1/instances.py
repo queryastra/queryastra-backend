@@ -16,7 +16,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_db_session
 from app.collectors.base import CapabilityResult
 from app.collectors.capabilities import has_missing_mandatory_capability
+from app.models.instance_database_lock_override import InstanceDatabaseLockOverride
 from app.repositories.alerts_repository import AlertsRepository
+from app.repositories.instance_database_lock_overrides_repository import (
+    InstanceDatabaseLockOverridesRepository,
+)
 from app.repositories.instances_repository import InstancesRepository
 from app.repositories.metric_samples_repository import MetricSamplesRepository
 from app.security.credential_reference import CredentialResolver
@@ -227,6 +231,12 @@ def get_instance_derived_status_service(
     repository: Annotated[MetricSamplesRepository, Depends(get_metric_samples_repository)],
 ) -> InstanceDerivedStatusService:
     return InstanceDerivedStatusService(repository)
+
+
+def get_instance_database_lock_overrides_repository(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> InstanceDatabaseLockOverridesRepository:
+    return InstanceDatabaseLockOverridesRepository(session)
 
 
 # --- Endpoints -----------------------------------------------------------------------------
@@ -461,6 +471,113 @@ async def update_instance_min_lock_time(
         collection_coverage=derived.collection_coverage,
         capability_errors=[],
         last_collected_at=derived.last_collected_at,
+    )
+
+
+class InstanceDatabaseLockOverrideResponse(BaseModel):
+    """Um override ad-hoc de "Tempo mínimo para captura de Bloqueios" por BANCO DE DADOS dentro
+    de uma instância — mais granular que `min_lock_time_ms` (que é por instância inteira)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    database_name: str
+    min_lock_time_ms: int
+
+
+class InstanceDatabaseLockOverrideUpsertRequest(BaseModel):
+    """Corpo de `PUT /instances/{id}/database-lock-time-overrides` — cria ou atualiza o override
+    de um banco específico. Diferente do override por instância, aqui não existe "limpar
+    mandando null": limpar é `DELETE /instances/{id}/database-lock-time-overrides/{database_name}`
+    (a linha simplesmente não existe mais, em vez de existir com um valor nulo)."""
+
+    database_name: str = Field(min_length=1)
+    min_lock_time_ms: int = Field(ge=0)
+
+
+class LockTimeOverridesResetResponse(BaseModel):
+    """Resposta do reset em massa (`DELETE /instances/lock-time-overrides/reset`) — só pra
+    telemetria/confirmação visual na UI, nenhum consumidor depende do valor exato."""
+
+    instances_cleared: int
+    database_overrides_cleared: int
+
+
+@router.get(
+    "/{instance_id}/database-lock-time-overrides",
+    response_model=list[InstanceDatabaseLockOverrideResponse],
+)
+async def list_instance_database_lock_overrides(
+    instance_id: UUID,
+    repository: Annotated[
+        InstanceDatabaseLockOverridesRepository,
+        Depends(get_instance_database_lock_overrides_repository),
+    ],
+) -> list[InstanceDatabaseLockOverrideResponse]:
+    overrides = await repository.list_for_instance(instance_id)
+    return [InstanceDatabaseLockOverrideResponse.model_validate(o) for o in overrides]
+
+
+@router.put(
+    "/{instance_id}/database-lock-time-overrides",
+    response_model=InstanceDatabaseLockOverrideResponse,
+)
+async def set_instance_database_lock_override(
+    instance_id: UUID,
+    payload: InstanceDatabaseLockOverrideUpsertRequest,
+    repository: Annotated[
+        InstanceDatabaseLockOverridesRepository,
+        Depends(get_instance_database_lock_overrides_repository),
+    ],
+) -> InstanceDatabaseLockOverrideResponse:
+    """Cria ou atualiza o override ad-hoc de um banco específico — lido a cada ciclo por
+    `PollingWorker` (não cacheado), vale a partir do próximo ciclo de poll dessa instância, sem
+    restart do backend. Não valida que `instance_id` existe/que `database_name` já apareceu em
+    algum dado coletado — a FK cuida da integridade referencial (404 implícito via violação de
+    FK se a instância não existir; a UI só oferece bancos já vistos, então isso não deveria
+    acontecer no fluxo normal)."""
+    override: InstanceDatabaseLockOverride = await repository.set(
+        instance_id, payload.database_name, payload.min_lock_time_ms
+    )
+    return InstanceDatabaseLockOverrideResponse.model_validate(override)
+
+
+@router.delete(
+    "/{instance_id}/database-lock-time-overrides/{database_name}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def clear_instance_database_lock_override(
+    instance_id: UUID,
+    database_name: str,
+    repository: Annotated[
+        InstanceDatabaseLockOverridesRepository,
+        Depends(get_instance_database_lock_overrides_repository),
+    ],
+) -> None:
+    cleared = await repository.clear(instance_id, database_name)
+    if not cleared:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Nenhum override encontrado para esse banco nessa instância.",
+        )
+
+
+@router.delete("/lock-time-overrides/reset", response_model=LockTimeOverridesResetResponse)
+async def reset_all_lock_time_overrides(
+    instances_repository: Annotated[InstancesRepository, Depends(get_instances_repository)],
+    database_overrides_repository: Annotated[
+        InstanceDatabaseLockOverridesRepository,
+        Depends(get_instance_database_lock_overrides_repository),
+    ],
+) -> LockTimeOverridesResetResponse:
+    """Reset em massa — usado quando o usuário desmarca "Limites ad hoc" na UI (Configurações →
+    Geral): apaga TODO override ad-hoc (por instância E por banco de dados) de TODAS as
+    instâncias, não só a que estava selecionada no momento. A partir daí, toda instância volta a
+    usar o valor global (`system_settings.blocking_min_duration_ms`)."""
+    instances_cleared = await instances_repository.clear_all_min_lock_time_overrides()
+    database_overrides_cleared = await database_overrides_repository.clear_all()
+    return LockTimeOverridesResetResponse(
+        instances_cleared=instances_cleared,
+        database_overrides_cleared=database_overrides_cleared,
     )
 
 
