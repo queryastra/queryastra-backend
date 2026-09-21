@@ -174,8 +174,14 @@ async def test_collect_uses_bgwriter_below_pg17(monkeypatch: pytest.MonkeyPatch)
     assert result.engine_version_major == 16
 
 
-async def test_collect_masks_sql_literal_before_hashing(monkeypatch: pytest.MonkeyPatch) -> None:
-    session_rows = [_session_row(pid=101, query="SELECT * FROM t WHERE x = 'segredo'")]
+async def test_collect_masks_pii_column_literal_before_hashing_and_display(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`sql_hash` continua vindo do mascaramento BLANKET (`mask_sql_literals`, sobre o texto
+    ORIGINAL) — nunca do texto de exibicao, que agora e mascaramento seletivo (so PII, coluna
+    `cpf` neste caso) e pode divergir do valor usado pro hash."""
+    query = "SELECT * FROM t WHERE cpf = 'segredo'"
+    session_rows = [_session_row(pid=101, query=query)]
     fake_conn = _FakeConnection(version_num=170000, session_rows=session_rows, blocking_rows=[])
     _patch_connect(monkeypatch, fake_conn)
 
@@ -185,11 +191,13 @@ async def test_collect_masks_sql_literal_before_hashing(monkeypatch: pytest.Monk
     assert len(result.query_samples) == 1
     sample = result.query_samples[0]
     assert "segredo" not in sample.sql_text_masked
-    assert sample.sql_text_masked == "SELECT * FROM t WHERE x = '?'"
+    assert sample.sql_text_masked == "SELECT * FROM t WHERE cpf = '?'"
 
     import hashlib
 
-    assert sample.sql_hash == hashlib.sha256(sample.sql_text_masked.encode("utf-8")).hexdigest()
+    from app.masking.sql_masking import mask_sql_literals
+
+    assert sample.sql_hash == hashlib.sha256(mask_sql_literals(query).encode("utf-8")).hexdigest()
 
 
 async def test_collect_expands_multiple_blockers_into_multiple_events(

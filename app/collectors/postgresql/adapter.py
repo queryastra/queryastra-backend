@@ -12,7 +12,10 @@ Usa `asyncpg` (Docs/database-schema.md, ARCHITECTURE_SPEC.md §4) como driver as
 (`settings.collection_query_timeout_seconds`) e limite de linhas truncado em Python apos o
 fetch (`settings.collection_max_rows`) — nunca DDL/DML:
     - `pg_stat_activity` (WHERE state != 'idle') — sessao/query ativa (collector-queries.md §1),
-      normalizada em `NormalizedQuerySample` (mascarada via `mask_sql_literals` antes do hash).
+      normalizada em `NormalizedQuerySample`. `sql_hash` usa `mask_sql_literals` (mascaramento
+      total, identidade estavel pro agrupamento de Top SQL); `sql_text_masked`/
+      `sql_text_full_masked` (texto exibido) usam `mask_sql_literals_for_display` (mascaramento
+      seletivo — so PII, ver `app/masking/pii_classification.py` e `app/masking/sql_masking.py`).
     - `pg_blocking_pids(pid)` — deteccao de bloqueio (collector-queries.md §2); devolve o fecho
       TRANSITIVO de bloqueadores, reduzido pro(s) bloqueador(es) DIRETO(s) por
       `_reduce_to_direct_edges` antes de virar `NormalizedBlockingEvent` — a arvore completa
@@ -58,7 +61,7 @@ from app.collectors.connection import ConnectionParams
 from app.collectors.transaction_flagging import compute_flag_reason
 from app.core.config import get_settings
 from app.core.logging import get_logger
-from app.masking.sql_masking import mask_sql_literals
+from app.masking.sql_masking import mask_sql_literals, mask_sql_literals_for_display
 from app.normalizers.metric_names import (
     PG_ACTIVE_SESSION_COUNT,
     PG_BLKS_HIT,
@@ -489,8 +492,12 @@ class PostgreSQLCollector:
             query_text = row["query"]
             if not query_text:
                 continue
-            masked = mask_sql_literals(query_text)
-            sql_hash = hashlib.sha256(masked.encode("utf-8")).hexdigest()
+            # `sql_hash` precisa continuar vindo do mascaramento BLANKET (`mask_sql_literals`) —
+            # identidade estavel usada pra agrupar execucoes da mesma query (Top SQL/wait time).
+            # O texto exibido (`sql_text_masked`/`sql_text_full_masked`) usa o mascaramento
+            # seletivo (so PII), calculado a partir do MESMO `query_text` original.
+            sql_hash = hashlib.sha256(mask_sql_literals(query_text).encode("utf-8")).hexdigest()
+            masked_display = mask_sql_literals_for_display(query_text)
             query_start = row["query_start"]
             duration_ms = (
                 # `max(0, ...)`: rede residual entre o servidor executar o snapshot de
@@ -510,10 +517,10 @@ class PostgreSQLCollector:
                     instance_id=instance_id,
                     engine="postgresql",
                     sql_hash=sql_hash,
-                    sql_text_masked=masked,
+                    sql_text_masked=masked_display,
                     # `pg_stat_activity.query` ja e so o statement atual (sem a distincao
                     # batch/procedure do SQL Server) — os dois campos coincidem aqui.
-                    sql_text_full_masked=masked,
+                    sql_text_full_masked=masked_display,
                     wait_type=map_wait_event("postgresql", row["wait_event_type"]),
                     wait_event_native=row["wait_event"],
                     # Postgres nao expoe duracao de espera do backend diretamente.

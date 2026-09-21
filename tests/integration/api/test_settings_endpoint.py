@@ -23,9 +23,7 @@ async def test_patch_settings_updates_and_persists_the_value(
 ) -> None:
     repo = SystemSettingsRepository(db_session)
     try:
-        response = await client.patch(
-            "/api/v1/settings", json={"blocking_min_duration_ms": 3000}
-        )
+        response = await client.patch("/api/v1/settings", json={"blocking_min_duration_ms": 3000})
 
         assert response.status_code == 200
         assert response.json()["blocking_min_duration_ms"] == 3000

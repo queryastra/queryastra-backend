@@ -74,7 +74,11 @@ from app.collectors.connection import ConnectionParams
 from app.collectors.transaction_flagging import compute_flag_reason
 from app.core.config import get_settings
 from app.core.logging import get_logger
-from app.masking.sql_masking import mask_showplan_xml_literals, mask_sql_literals
+from app.masking.sql_masking import (
+    mask_showplan_xml_literals,
+    mask_sql_literals,
+    mask_sql_literals_for_display,
+)
 from app.normalizers.metric_names import (
     SQLSERVER_ACTIVE_SESSION_COUNT,
     SQLSERVER_INSTANCE_CPU_PERCENT,
@@ -1183,7 +1187,10 @@ def _parse_deadlock_process(process: ElementTree.Element, is_victim: bool) -> di
         "program_name": process.get("clientapp"),
         "isolation_level": process.get("isolationlevel"),
         "is_victim": is_victim,
-        "sql_text_masked": mask_sql_literals(sql_text) if sql_text else None,
+        # Texto de comando exibido na tela de Deadlocks — mascaramento SELETIVO (só PII), nao o
+        # blanket usado pra `sql_hash` (aqui nao ha hash nenhum computado, entao nao ha
+        # ambiguidade de qual funcao usar).
+        "sql_text_masked": mask_sql_literals_for_display(sql_text) if sql_text else None,
         "procedures": procedures,
     }
 
@@ -1363,12 +1370,16 @@ def _connect_and_scan_plan_compile_timeouts(
         reason = _plan_xml_compile_timeout_reason(str(plan_xml))
         if reason is None:
             continue
-        masked = mask_sql_literals(statement_text)
-        sql_hash = hashlib.sha256(masked.encode("utf-8")).hexdigest()
+        # `sql_hash` precisa vir do mascaramento BLANKET (identidade estavel, igual ao resto do
+        # projeto) — o texto exibido (`statement_text_masked`) usa o mascaramento seletivo (so
+        # PII), calculado separadamente a partir do MESMO `statement_text` original.
+        sql_hash = hashlib.sha256(mask_sql_literals(statement_text).encode("utf-8")).hexdigest()
         findings.setdefault(
             sql_hash,
             NormalizedPlanCompileTimeoutFinding(
-                sql_hash=sql_hash, reason=reason, statement_text_masked=masked
+                sql_hash=sql_hash,
+                reason=reason,
+                statement_text_masked=mask_sql_literals_for_display(statement_text),
             ),
         )
     return list(findings.values())
@@ -1431,18 +1442,25 @@ def _build_query_samples(
         query_text = row["query_text"] or row["full_query_text"]
         if not query_text:
             continue
-        masked = mask_sql_literals(query_text)
-        sql_hash = hashlib.sha256(masked.encode("utf-8")).hexdigest()
+        # `sql_hash` precisa continuar vindo do mascaramento BLANKET (`mask_sql_literals`) —
+        # identidade estavel usada pra agrupar execucoes da mesma query (Top SQL/wait time), que
+        # fragmentaria se dependesse do mascaramento seletivo abaixo. Os campos exibidos
+        # (`sql_text_masked`/`sql_text_full_masked`) usam o mascaramento seletivo (so PII),
+        # calculado a partir dos MESMOS textos originais, separadamente do hash.
+        sql_hash = hashlib.sha256(mask_sql_literals(query_text).encode("utf-8")).hexdigest()
         full_query_text = row["full_query_text"]
-        masked_full = mask_sql_literals(full_query_text) if full_query_text else masked
+        masked_display = mask_sql_literals_for_display(query_text)
+        masked_full_display = (
+            mask_sql_literals_for_display(full_query_text) if full_query_text else masked_display
+        )
         samples.append(
             NormalizedQuerySample(
                 time=collected_at,
                 instance_id=instance_id,
                 engine="sqlserver",
                 sql_hash=sql_hash,
-                sql_text_masked=masked,
-                sql_text_full_masked=masked_full,
+                sql_text_masked=masked_display,
+                sql_text_full_masked=masked_full_display,
                 wait_type=map_wait_event("sqlserver", row["wait_type"]),
                 wait_event_native=row["wait_type"],
                 wait_time_ms=row["wait_time"],

@@ -27,9 +27,7 @@ def upgrade() -> None:
     op.create_table(
         "system_settings",
         sa.Column("id", sa.SmallInteger(), nullable=False),
-        sa.Column(
-            "blocking_min_duration_ms", sa.Integer(), nullable=False, server_default="0"
-        ),
+        sa.Column("blocking_min_duration_ms", sa.Integer(), nullable=False, server_default="0"),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),
@@ -39,9 +37,7 @@ def upgrade() -> None:
         sa.CheckConstraint("id = 1", name="ck_system_settings_singleton"),
         sa.PrimaryKeyConstraint("id", name="pk_system_settings"),
     )
-    op.execute(
-        "INSERT INTO system_settings (id, blocking_min_duration_ms) VALUES (1, 0)"
-    )
+    op.execute("INSERT INTO system_settings (id, blocking_min_duration_ms) VALUES (1, 0)")
 
 
 def downgrade() -> None:

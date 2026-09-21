@@ -16,6 +16,7 @@ import pytest
 
 from app.collectors.connection import ConnectionParams
 from app.collectors.sqlserver.adapter import SQLServerCollector, _parse_major_version
+from app.masking.sql_masking import mask_sql_literals
 from app.normalizers.metric_names import SQLSERVER_PAGE_LIFE_EXPECTANCY
 
 _CONNECTION = ConnectionParams(host="localhost", port=1433, auth_method="encrypted_fallback")
@@ -535,7 +536,10 @@ async def test_collect_uses_statement_text_for_hash_not_full_procedure_text(
     query real fatia via `statement_start_offset`/`statement_end_offset`), nao do texto cru de
     `sys.dm_exec_sql_text` — que, para uma sessao dentro de uma stored procedure, e a
     `CREATE PROCEDURE ...` inteira (bug real encontrado em producao). `sql_text_full_masked`
-    continua guardando o contexto completo (a procedure inteira), so pra tela de detalhe."""
+    continua guardando o contexto completo (a procedure inteira), so pra tela de detalhe.
+    `@maxtrans` nao e uma coluna PII, entao o mascaramento seletivo de exibicao mostra `1` como
+    esta — o hash continua vindo do mascaramento total (`mask_sql_literals`), nao do texto
+    exibido."""
     full_procedure_text = (
         "CREATE PROCEDURE dbo.sp_example AS BEGIN EXEC dbo.sp_cdc_scan @maxtrans = 1 END"
     )
@@ -558,13 +562,18 @@ async def test_collect_uses_statement_text_for_hash_not_full_procedure_text(
 
     assert len(result.query_samples) == 1
     sample = result.query_samples[0]
-    assert sample.sql_text_masked == "EXEC dbo.sp_cdc_scan @maxtrans = ?"
+    assert sample.sql_text_masked == "EXEC dbo.sp_cdc_scan @maxtrans = 1"
     assert "CREATE PROCEDURE" not in sample.sql_text_masked
     assert (
         sample.sql_text_full_masked
-        == "CREATE PROCEDURE dbo.sp_example AS BEGIN EXEC dbo.sp_cdc_scan @maxtrans = ? END"
+        == "CREATE PROCEDURE dbo.sp_example AS BEGIN EXEC dbo.sp_cdc_scan @maxtrans = 1 END"
     )
-    assert sample.sql_hash == hashlib.sha256(sample.sql_text_masked.encode("utf-8")).hexdigest()
+    assert (
+        sample.sql_hash
+        == hashlib.sha256(
+            mask_sql_literals("EXEC dbo.sp_cdc_scan @maxtrans = 1").encode("utf-8")
+        ).hexdigest()
+    )
 
 
 async def test_collect_raises_value_error_without_instance_id() -> None:

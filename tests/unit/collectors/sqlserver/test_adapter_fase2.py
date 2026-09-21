@@ -222,7 +222,10 @@ async def test_scan_plan_compile_timeouts_finds_statement_with_timeout_reason(
     _patch_dict_connect(
         monkeypatch,
         [
-            {"query_plan": _PLAN_XML_WITH_TIMEOUT, "statement_text": "SELECT * FROM t WHERE x=1"},
+            {
+                "query_plan": _PLAN_XML_WITH_TIMEOUT,
+                "statement_text": "SELECT * FROM t WHERE cpf=1",
+            },
             {"query_plan": _PLAN_XML_WITHOUT_TIMEOUT, "statement_text": "SELECT 1"},
         ],
     )
@@ -232,7 +235,8 @@ async def test_scan_plan_compile_timeouts_finds_statement_with_timeout_reason(
 
     assert len(findings) == 1
     assert findings[0].reason == "TimeOutReached"
-    assert "x=?" in findings[0].statement_text_masked or "?" in findings[0].statement_text_masked
+    # `cpf` e coluna PII — mascaramento seletivo de exibicao mascara o literal associado a ela.
+    assert findings[0].statement_text_masked == "SELECT * FROM t WHERE cpf=?"
 
 
 async def test_scan_plan_compile_timeouts_dedupes_by_sql_hash(
@@ -309,8 +313,7 @@ async def test_scan_plan_history_returns_snapshot_with_masked_plan_and_hash(
     assert snapshot.last_execution_time == _LAST_EXEC_TIME
     assert snapshot.plan_xml_masked
     assert (
-        snapshot.plan_hash
-        == hashlib.sha256(snapshot.plan_xml_masked.encode("utf-8")).hexdigest()
+        snapshot.plan_hash == hashlib.sha256(snapshot.plan_xml_masked.encode("utf-8")).hexdigest()
     )
 
 

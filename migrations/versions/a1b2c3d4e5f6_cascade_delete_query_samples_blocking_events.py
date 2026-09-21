@@ -34,17 +34,13 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.execute(
-        "ALTER TABLE query_samples DROP CONSTRAINT query_samples_instance_id_fkey"
-    )
+    op.execute("ALTER TABLE query_samples DROP CONSTRAINT query_samples_instance_id_fkey")
     op.execute(
         "ALTER TABLE query_samples "
         "ADD CONSTRAINT query_samples_instance_id_fkey "
         "FOREIGN KEY (instance_id) REFERENCES instances(id) ON DELETE CASCADE"
     )
-    op.execute(
-        "ALTER TABLE blocking_events DROP CONSTRAINT blocking_events_instance_id_fkey"
-    )
+    op.execute("ALTER TABLE blocking_events DROP CONSTRAINT blocking_events_instance_id_fkey")
     op.execute(
         "ALTER TABLE blocking_events "
         "ADD CONSTRAINT blocking_events_instance_id_fkey "
@@ -53,17 +49,13 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.execute(
-        "ALTER TABLE blocking_events DROP CONSTRAINT blocking_events_instance_id_fkey"
-    )
+    op.execute("ALTER TABLE blocking_events DROP CONSTRAINT blocking_events_instance_id_fkey")
     op.execute(
         "ALTER TABLE blocking_events "
         "ADD CONSTRAINT blocking_events_instance_id_fkey "
         "FOREIGN KEY (instance_id) REFERENCES instances(id)"
     )
-    op.execute(
-        "ALTER TABLE query_samples DROP CONSTRAINT query_samples_instance_id_fkey"
-    )
+    op.execute("ALTER TABLE query_samples DROP CONSTRAINT query_samples_instance_id_fkey")
     op.execute(
         "ALTER TABLE query_samples "
         "ADD CONSTRAINT query_samples_instance_id_fkey "

@@ -209,9 +209,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             settings.plan_history_check_interval_seconds,
         )
     else:
-        logger.info(
-            "PlanHistorySupervisor desabilitado (PLAN_HISTORY_SUPERVISOR_ENABLED=false)"
-        )
+        logger.info("PlanHistorySupervisor desabilitado (PLAN_HISTORY_SUPERVISOR_ENABLED=false)")
 
     yield
 
