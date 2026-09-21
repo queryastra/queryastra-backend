@@ -933,6 +933,7 @@ class QuerySamplesRepository(BaseRepository):
         limit: int,
         database_name: str | None = None,
         db_user: str | None = None,
+        wait_event_native: str | None = None,
         bucket: TimeBucket = "day",
     ) -> list[sa.Row]:
         """Agrega `query_samples` por (`bucket` de tempo, `sql_hash`) — visao historica "Tudo" do
@@ -941,8 +942,10 @@ class QuerySamplesRepository(BaseRepository):
         Mesmas ressalvas de `wait_time_by_bucket_and_database` (`bucket_start` convertido de
         volta pra `timestamptz` via `AT TIME ZONE 'UTC'` externo, pra sair com `Z` no JSON);
         aceita os mesmos filtros opcionais `database_name`/`db_user` de
-        `top_sql()`/`wait_breakdown_by_sql_hash()`. `total_wait_time_ms` soma `effective_wait_ms`
-        (delta real por amostra) — filtrados apos a CTE `effective`, ver docstring da classe."""
+        `top_sql()`/`wait_breakdown_by_sql_hash()`, mais `wait_event_native` (usado pela "Fatia
+        de Tempo" a partir da folha da dimensao "Waits" — `top_sql_by_wait_type()`).
+        `total_wait_time_ms` soma `effective_wait_ms` (delta real por amostra) — filtrados apos a
+        CTE `effective`, ver docstring da classe."""
         bucket_start_sql, group_by_sql = self._bucket_sql(bucket)
         stmt = sa.text(
             f"""
@@ -954,6 +957,9 @@ class QuerySamplesRepository(BaseRepository):
             FROM effective
             WHERE (CAST(:database_name AS text) IS NULL OR database_name = :database_name)
               AND (CAST(:db_user AS text) IS NULL OR db_user = :db_user)
+              AND (
+                CAST(:wait_event_native AS text) IS NULL OR wait_event_native = :wait_event_native
+              )
             GROUP BY {group_by_sql}, sql_hash
             ORDER BY bucket_start, total_wait_time_ms DESC
             LIMIT :limit
@@ -968,6 +974,7 @@ class QuerySamplesRepository(BaseRepository):
                 "limit": limit,
                 "database_name": database_name,
                 "db_user": db_user,
+                "wait_event_native": wait_event_native,
                 "bucket": bucket,
                 "benign_wait_types": list(self._BENIGN_WAIT_EVENT_NATIVE),
             },
@@ -1120,3 +1127,22 @@ class QuerySamplesRepository(BaseRepository):
             stmt, {"instance_id": instance_id, "sql_hashes": list(sql_hashes)}
         )
         return {row.sql_hash: row.sql_text_masked for row in result.fetchall()}
+
+    async def list_distinct_machines_by_instance(self, since: datetime) -> list[sa.Row]:
+        """Máquinas clientes distintas observadas se conectando a cada instância desde `since` —
+        base do "Mapa de Dependências" (`TopologyService`): `machine` já é gravado por ambos os
+        coletores (PostgreSQL: `client_addr`; SQL Server: `host_name`) em toda amostra de sessão
+        ativa, então uma dependência real entre 2 instâncias monitoradas (ex.: linked server,
+        `dblink`, um job rodando no mesmo host de outra instância) já aparece aqui sem nenhuma
+        coleta nova — o `TopologyService` é quem resolve se uma `machine` corresponde a outra
+        instância cadastrada, a um `Server` monitorado, ou fica como "externo" (não inventa
+        identidade). `sample_count` é só um peso pra espessura da aresta no mapa, não uma métrica
+        de wait time."""
+        stmt = sa.text("""
+            SELECT instance_id, machine, count(*) AS sample_count
+            FROM query_samples
+            WHERE time >= :since AND machine IS NOT NULL AND machine <> ''
+            GROUP BY instance_id, machine
+        """)
+        result = await self._session.execute(stmt, {"since": since})
+        return list(result.fetchall())

@@ -776,6 +776,9 @@ async def list_timeslice(
     bucket: Annotated[
         Literal["ten_minutes", "minute", "ten_seconds", "second"], Query()
     ] = "ten_minutes",
+    database_name: Annotated[str | None, Query()] = None,
+    db_user: Annotated[str | None, Query()] = None,
+    wait_event_native: Annotated[str | None, Query()] = None,
 ) -> list[BucketEntryResponse]:
     """"Fatia de Tempo" — drill-down temporal fino DENTRO de uma janela já estreita (uma hora, um
     intervalo de 10min, etc.), pedido explícito do usuário com o "Timeslice" do SolarWinds DPA
@@ -783,14 +786,29 @@ async def list_timeslice(
     aceitavam `bucket="day"/"hour"`) pras 4 granularidades sub-hora — um único endpoint com
     `dimension`/`bucket` como parâmetro, em vez de 16 rotas (`4 dimensões × 4 granularidades`).
 
+    `database_name`/`db_user`/`wait_event_native` são aditivos, só usados quando
+    `dimension="sql"` — permitem a "Fatia de Tempo" também nos níveis 2 do drill-down (dentro de
+    um banco, de um usuário, ou a partir da folha da dimensão "Waits"), não só na dimensão "SQL"
+    da instância inteira. Ignorados silenciosamente pras demais dimensões (não faria sentido
+    filtrar "por banco" agrupado por banco, por exemplo).
+
     `from`/`to` são OBRIGATÓRIOS aqui (diferente das demais rotas deste arquivo, que caem pro
     lookback padrão) — a "Fatia de Tempo" sempre ancora num período já escolhido pelo usuário
     (a hora/bucket clicado no nível anterior do drill-down), nunca "os últimos N segundos"."""
     repository_method_name, label_column = _TIMESLICE_DIMENSIONS[dimension]
     repository_method = getattr(repository, repository_method_name)
     settings = get_settings()
+    extra_kwargs = (
+        {
+            "database_name": database_name,
+            "db_user": db_user,
+            "wait_event_native": wait_event_native,
+        }
+        if dimension == "sql"
+        else {}
+    )
     rows = await repository_method(
-        instance_id, since, until, settings.api_read_max_rows, bucket=bucket
+        instance_id, since, until, settings.api_read_max_rows, bucket=bucket, **extra_kwargs
     )
     return [
         BucketEntryResponse(

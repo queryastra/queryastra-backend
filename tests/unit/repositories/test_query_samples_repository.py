@@ -839,6 +839,108 @@ async def test_wait_time_by_bucket_and_sql_hash_groups_by_utc_day(
     assert {(row.sql_hash, row.total_wait_time_ms) for row in filtered} == {("hash-b", 20)}
 
 
+async def test_wait_time_by_bucket_and_sql_hash_filters_by_wait_event_native(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """`wait_time_by_bucket_and_sql_hash(wait_event_native=...)` — usado pela "Fatia de Tempo" a
+    partir da folha da dimensao "Waits" (`/queries/waits/{waitEventNative}`), mesmo padrao dos
+    filtros opcionais `database_name`/`db_user` ja existentes."""
+    repo = QuerySamplesRepository(db_session)
+    moment = datetime(2026, 9, 1, 10, 0, tzinfo=UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=moment,
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-a",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_a",
+                wait_event_native="LCK_M_S",
+                wait_time_ms=100,
+            ),
+            NormalizedQuerySample(
+                time=moment,
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-b",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_a",
+                wait_event_native="WRITELOG",
+                wait_time_ms=20,
+            ),
+        ]
+    )
+
+    filtered = await repo.wait_time_by_bucket_and_sql_hash(
+        test_instance.id,
+        since=moment - timedelta(hours=1),
+        until=moment + timedelta(hours=1),
+        limit=10,
+        wait_event_native="LCK_M_S",
+    )
+    assert {(row.sql_hash, row.total_wait_time_ms) for row in filtered} == {("hash-a", 100)}
+
+
+async def test_list_distinct_machines_by_instance_groups_by_machine(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """`list_distinct_machines_by_instance` — base do Mapa de Dependências (`TopologyService`):
+    agrupa por (instância, máquina cliente), contando amostras; ignora `machine` nulo/vazio e
+    amostras fora da janela `since`."""
+    repo = QuerySamplesRepository(db_session)
+    now = datetime(2026, 9, 1, 10, 0, tzinfo=UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-a",
+                sql_text_masked="SELECT ? FROM t",
+                machine="140.0.254.20",
+            ),
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-b",
+                sql_text_masked="SELECT ? FROM t",
+                machine="140.0.254.20",
+            ),
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-c",
+                sql_text_masked="SELECT ? FROM t",
+                machine=None,
+            ),
+            NormalizedQuerySample(
+                time=now - timedelta(days=2),
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-d",
+                sql_text_masked="SELECT ? FROM t",
+                machine="old-client",
+            ),
+        ]
+    )
+
+    rows = await repo.list_distinct_machines_by_instance(since=now - timedelta(hours=1))
+
+    # Sem filtro por instância (agrega globalmente, de propósito — base do Mapa de Dependências,
+    # que precisa correlacionar entre instâncias) — o dev DB compartilhado tem outras instâncias
+    # reais coletando ao vivo, então filtra só as linhas desta `test_instance` pra não acoplar o
+    # teste a dado de produção concorrente.
+    own_rows = {
+        (row.instance_id, row.machine, row.sample_count)
+        for row in rows
+        if row.instance_id == test_instance.id
+    }
+    assert own_rows == {(test_instance.id, "140.0.254.20", 2)}
+
+
 async def test_wait_time_by_bucket_and_database_groups_by_utc_hour(
     db_session: AsyncSession, test_instance: Instance
 ) -> None:

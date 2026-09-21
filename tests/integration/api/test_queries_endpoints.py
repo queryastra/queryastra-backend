@@ -1187,3 +1187,50 @@ async def test_timeslice_requires_from_and_to(
 ) -> None:
     response = await client.get(f"/api/v1/queries/timeslice/{test_instance.id}")
     assert response.status_code == 422
+
+
+async def test_timeslice_sql_dimension_accepts_database_name_filter(
+    client: AsyncClient, db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """dimension="sql" com `database_name` opcional — usado pela "Fatia de Tempo" dentro do
+    nivel 2 do drill-down (`/instances/{id}/queries/{databaseName}`), nao so na dimensao "SQL"
+    da instancia inteira."""
+    repo = QuerySamplesRepository(db_session)
+    hour_start = datetime(2026, 9, 1, 10, 0, 0, tzinfo=UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=hour_start,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-a",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_a",
+                wait_time_ms=100,
+            ),
+            NormalizedQuerySample(
+                time=hour_start,
+                instance_id=test_instance.id,
+                engine="postgresql",
+                sql_hash="hash-b",
+                sql_text_masked="SELECT ? FROM t",
+                database_name="db_b",
+                wait_time_ms=50,
+            ),
+        ]
+    )
+
+    response = await client.get(
+        f"/api/v1/queries/timeslice/{test_instance.id}",
+        params={
+            "from": hour_start.isoformat(),
+            "to": (hour_start + timedelta(hours=1)).isoformat(),
+            "dimension": "sql",
+            "bucket": "ten_minutes",
+            "database_name": "db_a",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert {row["label"]: row["total_wait_time_ms"] for row in body} == {"hash-a": 100}

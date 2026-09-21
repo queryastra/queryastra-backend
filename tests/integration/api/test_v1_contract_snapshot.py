@@ -71,6 +71,7 @@ EXPECTED_REST_PATHS = {
     "/api/v1/deadlocks/{instance_id}",
     "/api/v1/deadlocks/{instance_id}/{deadlock_id}",
     "/api/v1/settings",
+    "/api/v1/topology",
 }
 
 EXPECTED_WEBSOCKET_PATH = "/api/v1/ws/live"
