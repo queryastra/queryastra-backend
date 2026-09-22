@@ -1,8 +1,11 @@
 """Adaptador SQL Server. Fonte de verdade: `Docs/collector-queries.md`.
 
-Usa `pymssql` (sincrono) — cada chamada roda em thread separada (`asyncio.to_thread`) sob
-`asyncio.wait_for` para respeitar o timeout de conexao configurado
-(Docs/rules/02-safe-collection.md).
+Usa `pymssql` (sincrono) — cada chamada roda em thread separada, sob `asyncio.wait_for` para
+respeitar o timeout de conexao configurado (Docs/rules/02-safe-collection.md). A partir do
+thread pool DEDICADO por instancia (`app.core.instance_executors.run_in_instance_executor`, nao
+o executor padrao compartilhado do event loop) — mitigacao pra uma chamada travada (pymssql nao
+tem timeout confiavel de socket/SO, ver docstring daquele modulo) nunca esgotar a capacidade de
+OUTRAS instancias.
 
 `check_capabilities()` conecta e checa, via `fn_my_permissions(NULL, 'SERVER')` +
 `IS_SRVROLEMEMBER`/`IS_ROLEMEMBER`, a permissao mandatoria (`VIEW SERVER STATE` ou, no SQL
@@ -73,6 +76,7 @@ from app.collectors.capabilities import (
 from app.collectors.connection import ConnectionParams
 from app.collectors.transaction_flagging import compute_flag_reason
 from app.core.config import get_settings
+from app.core.instance_executors import run_in_instance_executor
 from app.core.logging import get_logger
 from app.masking.sql_masking import (
     mask_showplan_xml_literals,
@@ -638,7 +642,8 @@ _PLAN_COMPILE_TIMEOUT_REASONS = frozenset({"TimeOutReached", "MemoryLimitExceede
 def _connect_and_check(connection: ConnectionParams) -> list[CapabilityResult]:
     """Helper sincrono: conecta via `pymssql` e roda as checagens de permissao.
 
-    Roda em thread separada (`asyncio.to_thread`) — `pymssql` nao e assincrono.
+    Roda em thread separada (pool dedicado por instancia, ver `app.core.instance_executors`) —
+    `pymssql` nao e assincrono.
     """
     timeout_seconds = int(connection.connect_timeout_seconds)
     try:
@@ -730,7 +735,7 @@ def _connect_and_collect(
 ]:
     """Helper sincrono: conecta via `pymssql`, roda as queries de coleta e normaliza.
 
-    Roda em thread separada (`asyncio.to_thread`, mesmo padrao de `_connect_and_check`) —
+    Roda em thread separada (pool dedicado por instancia, mesmo padrao de `_connect_and_check`) —
     `pymssql` nao e assincrono. `timeout` (login) usa `connection.connect_timeout_seconds`,
     `login_timeout`... na verdade o parametro `timeout` do `pymssql.connect` controla o timeout
     de EXECUCAO de query (`query_timeout_seconds`); `login_timeout` controla o timeout do
@@ -2118,7 +2123,9 @@ class SQLServerCollector:
         """
         try:
             return await asyncio.wait_for(
-                asyncio.to_thread(_connect_and_check, self._connection_params),
+                run_in_instance_executor(
+                    self._instance_id, _connect_and_check, self._connection_params
+                ),
                 timeout=self._connection_params.connect_timeout_seconds,
             )
         except TimeoutError as exc:
@@ -2165,7 +2172,8 @@ class SQLServerCollector:
             product_version,
             version_major,
         ) = await asyncio.wait_for(
-            asyncio.to_thread(
+            run_in_instance_executor(
+                self._instance_id,
                 _connect_and_collect,
                 self._connection_params,
                 self._instance_id,
@@ -2206,7 +2214,8 @@ class SQLServerCollector:
             + settings.collection_query_timeout_seconds
         )
         return await asyncio.wait_for(
-            asyncio.to_thread(
+            run_in_instance_executor(
+                self._instance_id,
                 _connect_and_collect_missing_indexes,
                 self._connection_params,
                 self._instance_id,
@@ -2230,7 +2239,8 @@ class SQLServerCollector:
             + settings.collection_query_timeout_seconds
         )
         return await asyncio.wait_for(
-            asyncio.to_thread(
+            run_in_instance_executor(
+                self._instance_id,
                 _connect_and_collect_backup_status,
                 self._connection_params,
                 self._instance_id,
@@ -2254,7 +2264,8 @@ class SQLServerCollector:
             + settings.collection_query_timeout_seconds
         )
         return await asyncio.wait_for(
-            asyncio.to_thread(
+            run_in_instance_executor(
+                self._instance_id,
                 _connect_and_collect_freespace,
                 self._connection_params,
                 self._instance_id,
@@ -2277,7 +2288,8 @@ class SQLServerCollector:
             + settings.collection_query_timeout_seconds
         )
         return await asyncio.wait_for(
-            asyncio.to_thread(
+            run_in_instance_executor(
+                self._instance_id,
                 _connect_and_collect_replication_lag,
                 self._connection_params,
                 self._instance_id,
@@ -2293,7 +2305,8 @@ class SQLServerCollector:
         conexao segue vindo de `self._connection_params`, mesmo padrao dos demais metodos)."""
         overall_timeout = self._connection_params.connect_timeout_seconds + timeout_seconds
         return await asyncio.wait_for(
-            asyncio.to_thread(
+            run_in_instance_executor(
+                self._instance_id,
                 _connect_and_run_scalar_query,
                 self._connection_params,
                 sql,
@@ -2313,7 +2326,8 @@ class SQLServerCollector:
             + settings.collection_query_timeout_seconds
         )
         return await asyncio.wait_for(
-            asyncio.to_thread(
+            run_in_instance_executor(
+                self._instance_id,
                 _connect_and_scan_plan_compile_timeouts,
                 self._connection_params,
                 settings.collection_query_timeout_seconds,
@@ -2337,7 +2351,8 @@ class SQLServerCollector:
             + settings.collection_query_timeout_seconds
         )
         return await asyncio.wait_for(
-            asyncio.to_thread(
+            run_in_instance_executor(
+                self._instance_id,
                 _connect_and_scan_plan_history,
                 self._connection_params,
                 self._instance_id,
@@ -2366,7 +2381,8 @@ class SQLServerCollector:
             + settings.deadlock_query_timeout_seconds
         )
         return await asyncio.wait_for(
-            asyncio.to_thread(
+            run_in_instance_executor(
+                self._instance_id,
                 _connect_and_collect_deadlocks,
                 self._connection_params,
                 self._instance_id,
@@ -2387,7 +2403,8 @@ class SQLServerCollector:
         )
         try:
             return await asyncio.wait_for(
-                asyncio.to_thread(
+                run_in_instance_executor(
+                    self._instance_id,
                     _connect_and_ensure_transaction_error_session,
                     self._connection_params,
                     settings.transaction_error_query_timeout_seconds,
@@ -2418,7 +2435,8 @@ class SQLServerCollector:
             + settings.transaction_error_query_timeout_seconds
         )
         return await asyncio.wait_for(
-            asyncio.to_thread(
+            run_in_instance_executor(
+                self._instance_id,
                 _connect_and_collect_transaction_errors,
                 self._connection_params,
                 self._instance_id,
@@ -2440,7 +2458,8 @@ class SQLServerCollector:
             + settings.collection_query_timeout_seconds
         )
         return await asyncio.wait_for(
-            asyncio.to_thread(
+            run_in_instance_executor(
+                self._instance_id,
                 _connect_and_fetch_execution_plan,
                 self._connection_params,
                 sql_hash,
@@ -2462,7 +2481,8 @@ class SQLServerCollector:
             + settings.collection_query_timeout_seconds
         )
         return await asyncio.wait_for(
-            asyncio.to_thread(
+            run_in_instance_executor(
+                self._instance_id,
                 _connect_and_fetch_actual_execution_plan,
                 self._connection_params,
                 sql_hash,

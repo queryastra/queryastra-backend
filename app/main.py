@@ -20,6 +20,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.router import api_v1_router
+from app.core import instance_executors
 from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
 from app.db.session import async_session_factory
@@ -261,6 +262,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         plan_history_supervisor.stop()
         await plan_history_task
     executor.shutdown(wait=False, cancel_futures=True)
+    instance_executors.shutdown_all()
     logger.info("Lifespan finalizado")
 
 

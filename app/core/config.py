@@ -67,6 +67,16 @@ class Settings(BaseSettings):
     # problema de fundo (poll agressivo demais continua caro), so da mais folga.
     backend_executor_max_workers: int = Field(default=64, alias="BACKEND_EXECUTOR_MAX_WORKERS")
 
+    # Tamanho do thread pool DEDICADO por instancia SQL Server (`app/core/instance_executors.py`)
+    # — mitigacao para uma chamada `pymssql` genuinamente travada (sem timeout confiavel no nivel
+    # do socket/SO, ver docstring do modulo) nunca esgotar a capacidade de OUTRAS instancias.
+    # Pequeno de proposito: cada instancia normalmente so tem 1 chamada em voo por vez
+    # (PollingWorker sequencial) + os supervisores de baixa frequencia que tambem tocam essa
+    # mesma instancia esporadicamente — poucas vagas bastam pro caso saudavel, e uma instancia
+    # travada consumir todas as SUAS proprias vagas e o comportamento aceito (ela para de
+    # coletar sozinha, sem afetar mais ninguem).
+    instance_executor_max_workers: int = Field(default=6, alias="INSTANCE_EXECUTOR_MAX_WORKERS")
+
     # Liga o supervisor de coleta continua (PollingSupervisor) no lifespan do backend. Default
     # false - nunca ligar coleta real fora de um ambiente explicitamente configurado para isso.
     polling_supervisor_enabled: bool = Field(default=False, alias="POLLING_SUPERVISOR_ENABLED")
