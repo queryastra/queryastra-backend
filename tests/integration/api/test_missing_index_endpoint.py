@@ -11,6 +11,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.instance import Instance
 from app.normalizers.models import NormalizedMissingIndexSuggestion
+from app.repositories.missing_index_collection_runs_repository import (
+    MissingIndexCollectionRunsRepository,
+)
 from app.repositories.missing_index_suggestions_repository import (
     MissingIndexSuggestionsRepository,
 )
@@ -73,3 +76,34 @@ async def test_list_missing_index_suggestions_for_unknown_instance_returns_empty
 
     assert response.status_code == 200
     assert response.json() == []
+
+
+async def test_get_collection_info_returns_null_when_never_collected(
+    client: AsyncClient, test_instance: Instance
+) -> None:
+    """Item 4 (pedido explicito do usuario): nunca coletado precisa ser distinguivel de "coletou
+    e nao achou nada" — os 2 campos vem nulos so nesse caso."""
+    response = await client.get(
+        f"/api/v1/missing-index-suggestions/{test_instance.id}/collection-info"
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"last_collected_at": None, "stats_since": None}
+
+
+async def test_get_collection_info_returns_recorded_run(
+    client: AsyncClient, db_session: AsyncSession, test_instance: Instance
+) -> None:
+    repo = MissingIndexCollectionRunsRepository(db_session)
+    collected_at = datetime(2026, 9, 22, 12, 0, 0, tzinfo=UTC)
+    stats_since = datetime(2026, 8, 1, 0, 0, 0, tzinfo=UTC)
+    await repo.upsert(test_instance.id, collected_at, stats_since)
+
+    response = await client.get(
+        f"/api/v1/missing-index-suggestions/{test_instance.id}/collection-info"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["last_collected_at"] == collected_at.isoformat().replace("+00:00", "Z")
+    assert body["stats_since"] == stats_since.isoformat().replace("+00:00", "Z")

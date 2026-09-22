@@ -7,7 +7,7 @@ Mesmo padrao de fakes de `tests/unit/workers/test_polling_supervisor.py` — sem
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from app.models.instance import Instance
@@ -88,10 +88,28 @@ def _reset_fake_repository() -> None:
     _FakeMissingIndexSuggestionsRepository.upserts = []
 
 
+class _FakeMissingIndexCollectionRunsRepository:
+    """Compartilha `upserts` globalmente entre instancias (classe, nao instancia) — mesma
+    convencao de `_FakeMissingIndexSuggestionsRepository`."""
+
+    upserts: list = []
+
+    def __init__(self, session: object) -> None:
+        del session
+
+    async def upsert(self, instance_id, collected_at, stats_since):  # noqa: ANN001
+        type(self).upserts.append((instance_id, collected_at, stats_since))
+
+
+def _reset_fake_collection_runs_repository() -> None:
+    _FakeMissingIndexCollectionRunsRepository.upserts = []
+
+
 class _FakeCollector:
     """Coleta com sucesso por padrao; `calls_by_instance`/`close_calls` registram chamadas."""
 
     _suggestions_by_instance: dict = {}
+    _engine_start_time_by_instance: dict = {}
     calls_by_instance: dict = {}
     close_calls: list = []
 
@@ -104,12 +122,16 @@ class _FakeCollector:
         )
         return type(self)._suggestions_by_instance.get(self._instance_id, [])
 
+    async def get_engine_start_time(self) -> datetime | None:
+        return type(self)._engine_start_time_by_instance.get(self._instance_id)
+
     async def close(self) -> None:
         type(self).close_calls.append(self._instance_id)
 
 
 def _reset_fake_collector() -> None:
     _FakeCollector._suggestions_by_instance = {}
+    _FakeCollector._engine_start_time_by_instance = {}
     _FakeCollector.calls_by_instance = {}
     _FakeCollector.close_calls = []
 
@@ -138,6 +160,9 @@ def _make_supervisor(
         check_interval_seconds,
         instances_repository_factory=_instances_repository_factory(registry),
         missing_index_suggestions_repository_factory=_FakeMissingIndexSuggestionsRepository,
+        missing_index_collection_runs_repository_factory=(
+            _FakeMissingIndexCollectionRunsRepository
+        ),
         collector_factory=collector_factory or _FakeCollector,
         **kwargs,
     )
@@ -146,6 +171,7 @@ def _make_supervisor(
 async def test_run_all_instances_collects_for_every_active_instance() -> None:
     _reset_fake_collector()
     _reset_fake_repository()
+    _reset_fake_collection_runs_repository()
     instance_a = _make_instance()
     instance_b = _make_instance()
     registry = {instance_a.id: instance_a, instance_b.id: instance_b}
@@ -162,6 +188,7 @@ async def test_run_all_instances_collects_for_every_active_instance() -> None:
 async def test_run_all_instances_skips_inactive_instance() -> None:
     _reset_fake_collector()
     _reset_fake_repository()
+    _reset_fake_collection_runs_repository()
     active_instance = _make_instance(active=True)
     inactive_instance = _make_instance(active=False)
     registry = {active_instance.id: active_instance, inactive_instance.id: inactive_instance}
@@ -176,6 +203,7 @@ async def test_run_all_instances_skips_inactive_instance() -> None:
 async def test_run_one_instance_upserts_suggestions_when_present() -> None:
     _reset_fake_collector()
     _reset_fake_repository()
+    _reset_fake_collection_runs_repository()
     instance = _make_instance()
     registry = {instance.id: instance}
     suggestion = NormalizedMissingIndexSuggestion(
@@ -200,6 +228,7 @@ async def test_run_one_instance_upserts_suggestions_when_present() -> None:
 async def test_run_one_instance_skips_upsert_when_no_suggestions() -> None:
     _reset_fake_collector()
     _reset_fake_repository()
+    _reset_fake_collection_runs_repository()
     instance = _make_instance()
     registry = {instance.id: instance}
     supervisor = _make_supervisor(registry)
@@ -210,9 +239,52 @@ async def test_run_one_instance_skips_upsert_when_no_suggestions() -> None:
     assert instance.id in _FakeCollector.close_calls
 
 
+async def test_run_one_instance_records_collection_run_even_without_suggestions() -> None:
+    """Item 4 (pedido explicito do usuario): sem isso, nao ha como distinguir "nunca coletou" de
+    "coletou e nao achou nenhuma sugestao" - o registro de execucao precisa ser gravado mesmo
+    quando `suggestions` vem vazio."""
+    _reset_fake_collector()
+    _reset_fake_repository()
+    _reset_fake_collection_runs_repository()
+    instance = _make_instance()
+    registry = {instance.id: instance}
+    supervisor = _make_supervisor(registry)
+
+    await supervisor._run_one_instance(instance.id)
+
+    assert len(_FakeMissingIndexCollectionRunsRepository.upserts) == 1
+    recorded_instance_id, collected_at, stats_since = (
+        _FakeMissingIndexCollectionRunsRepository.upserts[0]
+    )
+    assert recorded_instance_id == instance.id
+    assert isinstance(collected_at, datetime)
+    assert collected_at.tzinfo is not None
+    assert stats_since is None  # _FakeCollector nao configurado com engine_start_time
+
+
+async def test_run_one_instance_records_engine_start_time_from_collector() -> None:
+    """`stats_since` (desde quando o motor acumula as estatisticas de uso, reinicio do
+    servico/cluster) e' uma pergunta DIFERENTE de `collected_at` (quando o worker rodou) - ver
+    docstring de `MissingIndexCollectionRun`."""
+    _reset_fake_collector()
+    _reset_fake_repository()
+    _reset_fake_collection_runs_repository()
+    instance = _make_instance()
+    registry = {instance.id: instance}
+    engine_start_time = datetime(2025, 1, 1, tzinfo=UTC)
+    _FakeCollector._engine_start_time_by_instance = {instance.id: engine_start_time}
+    supervisor = _make_supervisor(registry)
+
+    await supervisor._run_one_instance(instance.id)
+
+    _, _, stats_since = _FakeMissingIndexCollectionRunsRepository.upserts[0]
+    assert stats_since == engine_start_time
+
+
 async def test_run_one_instance_does_not_raise_when_instance_no_longer_exists() -> None:
     _reset_fake_collector()
     _reset_fake_repository()
+    _reset_fake_collection_runs_repository()
     registry: dict = {}
     supervisor = _make_supervisor(registry)
 
@@ -222,6 +294,7 @@ async def test_run_one_instance_does_not_raise_when_instance_no_longer_exists() 
 async def test_run_one_instance_skips_when_encrypted_fallback_without_ref() -> None:
     _reset_fake_collector()
     _reset_fake_repository()
+    _reset_fake_collection_runs_repository()
     instance = _make_instance(auth_method="encrypted_fallback", encrypted_credential_ref=None)
     registry = {instance.id: instance}
     supervisor = _make_supervisor(registry)
@@ -234,6 +307,7 @@ async def test_run_one_instance_skips_when_encrypted_fallback_without_ref() -> N
 async def test_run_one_instance_skips_when_credential_resolution_fails() -> None:
     _reset_fake_collector()
     _reset_fake_repository()
+    _reset_fake_collection_runs_repository()
     instance = _make_instance(
         auth_method="encrypted_fallback", encrypted_credential_ref="ref-opaco"
     )
@@ -253,6 +327,7 @@ async def test_run_one_instance_skips_when_credential_resolution_fails() -> None
 async def test_run_one_instance_resolves_credential_when_encrypted_fallback() -> None:
     _reset_fake_collector()
     _reset_fake_repository()
+    _reset_fake_collection_runs_repository()
     instance = _make_instance(
         auth_method="encrypted_fallback", encrypted_credential_ref="ref-opaco"
     )
@@ -273,6 +348,7 @@ async def test_run_one_instance_resolves_credential_when_encrypted_fallback() ->
 async def test_collector_construction_error_for_one_instance_does_not_affect_another() -> None:
     _reset_fake_collector()
     _reset_fake_repository()
+    _reset_fake_collection_runs_repository()
     instance_a = _make_instance()
     instance_b = _make_instance()
     registry = {instance_a.id: instance_a, instance_b.id: instance_b}
@@ -290,6 +366,7 @@ async def test_collector_construction_error_for_one_instance_does_not_affect_ano
 async def test_run_and_stop_completes_cleanly() -> None:
     _reset_fake_collector()
     _reset_fake_repository()
+    _reset_fake_collection_runs_repository()
     instance = _make_instance()
     registry = {instance.id: instance}
     supervisor = _make_supervisor(registry, check_interval_seconds=3600)

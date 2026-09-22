@@ -866,6 +866,21 @@ class PostgreSQLCollector:
                 )
         return suggestions
 
+    async def get_engine_start_time(self) -> datetime | None:
+        """`pg_postmaster_start_time()` - ver docstring do Protocol. Cluster-wide, sempre no
+        banco de manutencao (`collect()`), sem precisar iterar por banco."""
+        settings = get_settings()
+        conn = await asyncio.wait_for(
+            self._connect(), timeout=self._connection_params.connect_timeout_seconds
+        )
+        try:
+            return await asyncio.wait_for(
+                conn.fetchval("SELECT pg_postmaster_start_time()"),
+                timeout=settings.collection_query_timeout_seconds,
+            )
+        finally:
+            await conn.close()
+
     async def collect_backup_status(self) -> list[NormalizedBackupStatus]:
         """`pg_stat_archiver` (Docs/collector-queries.md §6) — cluster-wide, 1 unica linha,
         `database_name=None`. `last_backup_at = last_archived_time`: PROXY de saude de WAL

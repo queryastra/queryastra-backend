@@ -17,11 +17,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db_session
 from app.core.config import get_settings
+from app.repositories.missing_index_collection_runs_repository import (
+    MissingIndexCollectionRunsRepository,
+)
 from app.repositories.missing_index_suggestions_repository import (
     MissingIndexSuggestionsRepository,
 )
 
 router = APIRouter()
+
+
+class MissingIndexCollectionInfoResponse(BaseModel):
+    """Item 4 (pedido explicito do usuario): quando foi a ultima coleta e desde quando os dados
+    de uso acumulados sao validos — ver docstring de `MissingIndexCollectionRun`. `None`/`None`
+    quando a instancia ainda nunca foi checada (nao confundir com "checou e nao achou nada", que
+    tem `last_collected_at` preenchido e a lista de sugestoes vazia)."""
+
+    last_collected_at: datetime | None
+    stats_since: datetime | None
 
 
 class MissingIndexSuggestionResponse(BaseModel):
@@ -45,6 +58,30 @@ def get_missing_index_suggestions_repository(
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> MissingIndexSuggestionsRepository:
     return MissingIndexSuggestionsRepository(session)
+
+
+def get_missing_index_collection_runs_repository(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> MissingIndexCollectionRunsRepository:
+    return MissingIndexCollectionRunsRepository(session)
+
+
+@router.get("/{instance_id}/collection-info", response_model=MissingIndexCollectionInfoResponse)
+async def get_missing_index_collection_info(
+    instance_id: UUID,
+    repository: Annotated[
+        MissingIndexCollectionRunsRepository,
+        Depends(get_missing_index_collection_runs_repository),
+    ],
+) -> MissingIndexCollectionInfoResponse:
+    """Endpoint separado do de listagem (mesmo padrao de outras informacoes auxiliares deste
+    projeto) - a tela consulta os dois, sem acoplar um ao outro."""
+    row = await repository.get_for_instance(instance_id)
+    if row is None:
+        return MissingIndexCollectionInfoResponse(last_collected_at=None, stats_since=None)
+    return MissingIndexCollectionInfoResponse(
+        last_collected_at=row.collected_at, stats_since=row.stats_since
+    )
 
 
 @router.get("/{instance_id}", response_model=list[MissingIndexSuggestionResponse])

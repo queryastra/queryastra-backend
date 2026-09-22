@@ -65,6 +65,7 @@ EXPECTED_REST_PATHS = {
     "/api/v1/alerts/silences",
     "/api/v1/alerts/silences/{silence_id}",
     "/api/v1/missing-index-suggestions/{instance_id}",
+    "/api/v1/missing-index-suggestions/{instance_id}/collection-info",
     "/api/v1/backup-status/{instance_id}",
     "/api/v1/transactions/{instance_id}",
     "/api/v1/transactions/{instance_id}/{transaction_identifier}",

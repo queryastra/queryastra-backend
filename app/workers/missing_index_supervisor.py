@@ -25,6 +25,9 @@ from app.collectors.connection import ConnectionParams
 from app.collectors.factory import create_collector
 from app.core.logging import get_logger
 from app.repositories.instances_repository import InstancesRepository
+from app.repositories.missing_index_collection_runs_repository import (
+    MissingIndexCollectionRunsRepository,
+)
 from app.repositories.missing_index_suggestions_repository import (
     MissingIndexSuggestionsRepository,
 )
@@ -40,6 +43,9 @@ _CollectorFactory = Callable[..., Collector]
 _InstancesRepositoryFactory = Callable[[AsyncSession], InstancesRepository]
 _MissingIndexSuggestionsRepositoryFactory = Callable[
     [AsyncSession], MissingIndexSuggestionsRepository
+]
+_MissingIndexCollectionRunsRepositoryFactory = Callable[
+    [AsyncSession], MissingIndexCollectionRunsRepository
 ]
 
 
@@ -58,6 +64,9 @@ class MissingIndexSupervisor:
         missing_index_suggestions_repository_factory: (
             _MissingIndexSuggestionsRepositoryFactory
         ) = MissingIndexSuggestionsRepository,
+        missing_index_collection_runs_repository_factory: (
+            _MissingIndexCollectionRunsRepositoryFactory
+        ) = MissingIndexCollectionRunsRepository,
     ) -> None:
         self._session_factory = session_factory
         self._check_interval_seconds = check_interval_seconds
@@ -66,6 +75,9 @@ class MissingIndexSupervisor:
         self._instances_repository_factory = instances_repository_factory
         self._missing_index_suggestions_repository_factory = (
             missing_index_suggestions_repository_factory
+        )
+        self._missing_index_collection_runs_repository_factory = (
+            missing_index_collection_runs_repository_factory
         )
         self._stop_event = asyncio.Event()
 
@@ -146,9 +158,22 @@ class MissingIndexSupervisor:
                 )
                 try:
                     suggestions = await collector.collect_missing_index_suggestions()
+                    now = datetime.now(UTC)
                     if suggestions:
                         repository = self._missing_index_suggestions_repository_factory(session)
-                        await repository.upsert_batch(suggestions, datetime.now(UTC))
+                        await repository.upsert_batch(suggestions, now)
+
+                    # Item 4 (pedido do usuario): registra a checagem MESMO quando nao ha
+                    # nenhuma sugestao - sem isso, nao ha como distinguir "nunca coletou" de
+                    # "coletou e nao achou nada". `stats_since` (reinicio do motor) responde uma
+                    # pergunta DIFERENTE de `collected_at` (quando o worker rodou) - ver docstring
+                    # do modelo.
+                    stats_since = await collector.get_engine_start_time()
+                    collection_runs_repository = (
+                        self._missing_index_collection_runs_repository_factory(session)
+                    )
+                    await collection_runs_repository.upsert(instance_id, now, stats_since)
+
                     logger.info(
                         "Checagem de indice ausente concluida instance_id=%s suggestion_count=%s",
                         instance_id,

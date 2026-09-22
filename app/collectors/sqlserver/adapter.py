@@ -900,6 +900,39 @@ def _connect_and_collect(
     )
 
 
+def _connect_and_get_engine_start_time(
+    connection: ConnectionParams, query_timeout_seconds: float
+) -> datetime | None:
+    """Helper sincrono (mesmo padrao de `_connect_and_collect_missing_indexes`) - quando o
+    servico do SQL Server foi iniciado pela ultima vez (`sqlserver_start_time`, sempre 1 linha).
+    Usado pra informar desde quando as estatisticas de indice ausente acumulam."""
+    login_timeout_seconds = int(connection.connect_timeout_seconds)
+    conn = pymssql.connect(
+        server=connection.host,
+        port=str(connection.port),
+        user=connection.username,
+        password=connection.secret_value,
+        timeout=int(query_timeout_seconds),
+        login_timeout=login_timeout_seconds,
+    )
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT sqlserver_start_time FROM sys.dm_os_sys_info")
+        row = cursor.fetchone()
+        # `sqlserver_start_time` vem NAIVE, no horario local do servidor - mesma correcao ja
+        # documentada em `_as_utc` (sem isso, o valor exibido fica deslocado pelo fuso do
+        # servidor, ex. ~3h adiantado/atrasado em relacao ao instante UTC real).
+        cursor.execute("SELECT GETUTCDATE() - GETDATE()")
+        offset_row = cursor.fetchone()
+        cursor.close()
+    finally:
+        conn.close()
+    if row is None or row[0] is None:
+        return None
+    server_utc_offset = cast(timedelta, offset_row[0]) if offset_row is not None else timedelta(0)
+    return _as_utc(cast(datetime, row[0]), server_utc_offset)
+
+
 def _connect_and_collect_missing_indexes(
     connection: ConnectionParams,
     instance_id: UUID,
@@ -2221,6 +2254,23 @@ class SQLServerCollector:
                 self._instance_id,
                 settings.collection_query_timeout_seconds,
                 settings.collection_max_rows,
+            ),
+            timeout=overall_timeout,
+        )
+
+    async def get_engine_start_time(self) -> datetime | None:
+        """`sys.dm_os_sys_info.sqlserver_start_time` - ver docstring do Protocol."""
+        settings = get_settings()
+        overall_timeout = (
+            self._connection_params.connect_timeout_seconds
+            + settings.collection_query_timeout_seconds
+        )
+        return await asyncio.wait_for(
+            run_in_instance_executor(
+                self._instance_id,
+                _connect_and_get_engine_start_time,
+                self._connection_params,
+                settings.collection_query_timeout_seconds,
             ),
             timeout=overall_timeout,
         )

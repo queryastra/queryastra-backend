@@ -141,6 +141,20 @@ class Collector(Protocol):
         """
         ...
 
+    async def get_engine_start_time(self) -> datetime | None:
+        """Quando o motor (servico SQL Server / cluster PostgreSQL) foi iniciado pela ultima vez.
+
+        Usado por `MissingIndexSupervisor` pra informar DESDE QUANDO as estatisticas de uso
+        acumuladas (`sys.dm_db_missing_index_group_stats`/`pg_stat_user_tables`) sao validas — os
+        dois motores ZERAM esses contadores cumulativos no proprio restart do servico, entao
+        "ultima coleta" (quando o worker rodou) e "desde quando os dados refletem uso real" sao
+        perguntas DIFERENTES: um tempdb reiniciado ha 1 ano acumulou dado por muito mais tempo
+        (mais confiavel) que um reiniciado ha 1 semana (dado mais escasso), mesmo que a ultima
+        coleta tenha sido ha poucos minutos nos dois casos. SQL Server:
+        `sys.dm_os_sys_info.sqlserver_start_time`; PostgreSQL: `pg_postmaster_start_time()`.
+        `None` so em caso de erro de coleta (nunca inventa um valor)."""
+        ...
+
     async def collect_backup_status(self) -> list[NormalizedBackupStatus]:
         """Executa a checagem de backup/archiving (`Docs/collector-queries.md` §6, Q16).
 
