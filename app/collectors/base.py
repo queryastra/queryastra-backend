@@ -23,6 +23,7 @@ from uuid import UUID
 from app.normalizers.models import (
     NormalizedBackupStatus,
     NormalizedBlockingEvent,
+    NormalizedConfirmedTransactionError,
     NormalizedDeadlockEvent,
     NormalizedMetricSample,
     NormalizedMissingIndexSuggestion,
@@ -159,6 +160,29 @@ class Collector(Protocol):
         `system_health`, sempre ativo por padrao, evento `xml_deadlock_report`) — PostgreSQL nao
         expoe detalhe de deadlock via SQL, devolve lista vazia sempre (so o contador agregado
         `pg_stat_database.deadlocks`, ja coletado como metrica em `collect()`).
+        """
+        ...
+
+    async def ensure_transaction_error_capture(self) -> bool:
+        """Cria/inicia (idempotente) a sessao Extended Events dedicada `sqlserver.error_reported`
+        usada por `collect_transaction_error_events` (Etapa 10, item 3) — chamado a cada ciclo do
+        `TransactionErrorSupervisor`, antes de ler. So SQL Server; exige a permissao de servidor
+        `ALTER ANY EVENT SESSION` (nao verificada como capacidade formal de cadastro — degrada em
+        runtime, ver docstring do adaptador). Devolve `True` quando a sessao existe/esta ativa
+        (pronta pra leitura), `False` quando a criacao falhou (permissao ausente ou outro erro) -
+        o chamador loga e pula a checagem deste ciclo, nunca propaga excecao. PostgreSQL: sempre
+        `True` sem fazer nada (nao ha Extended Events nesse motor).
+        """
+        ...
+
+    async def collect_transaction_error_events(self) -> list[NormalizedConfirmedTransactionError]:
+        """Le a sessao Extended Events dedicada (Etapa 10, item 3) e devolve os erros de
+        severidade >= 16 reportados na ultima hora, um por sessao/instante.
+
+        Diferente de `last_error_code` (`sys.dm_exec_requests.prev_error`, melhor esforco, so
+        existe enquanto a sessao ainda tem request ativa), este captura o erro no INSTANTE em que
+        e' levantado — a sessao XE retem o evento independente do estado atual da sessao. So
+        SQL Server — PostgreSQL devolve lista vazia sempre (sem Extended Events nesse motor).
         """
         ...
 

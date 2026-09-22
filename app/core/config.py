@@ -176,6 +176,24 @@ class Settings(BaseSettings):
         default=30.0, alias="DEADLOCK_QUERY_TIMEOUT_SECONDS"
     )
 
+    # Etapa 10, item 3 (captura confiavel de erro por transacao) - liga o supervisor de sessao
+    # Extended Events dedicada (TransactionErrorSupervisor, so SQL Server) no lifespan do backend.
+    # Default false - mesma politica de seguranca dos demais workers.
+    transaction_error_supervisor_enabled: bool = Field(
+        default=False, alias="TRANSACTION_ERROR_SUPERVISOR_ENABLED"
+    )
+    # Intervalo (segundos) entre leituras da sessao dedicada por instancia ativa. Default 2
+    # minutos - mais frequente que deadlock (5min) porque um erro de transacao e mais comum e
+    # mais util de ver rapido, mas ainda baixa frequencia (nao a cada poucos segundos).
+    transaction_error_check_interval_seconds: int = Field(
+        default=120, alias="TRANSACTION_ERROR_CHECK_INTERVAL_SECONDS"
+    )
+    # Timeout dedicado - mesmo racional/valor de `deadlock_query_timeout_seconds` (ler `.xel` em
+    # disco tem o mesmo perfil de custo do target de deadlock).
+    transaction_error_query_timeout_seconds: float = Field(
+        default=30.0, alias="TRANSACTION_ERROR_QUERY_TIMEOUT_SECONDS"
+    )
+
     # Canal de e-mail de notificacao de alerta (`app.workers.alerting_worker`). Todos vazios por
     # padrao = canal desabilitado (nenhum envio real, mesmo default seguro do webhook). So
     # `alert_smtp_host` habilita o envio; `alert_email_to` (lista separada por virgula) precisa

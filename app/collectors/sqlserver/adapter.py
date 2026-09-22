@@ -92,6 +92,7 @@ from app.normalizers.metric_names import (
 from app.normalizers.models import (
     NormalizedBackupStatus,
     NormalizedBlockingEvent,
+    NormalizedConfirmedTransactionError,
     NormalizedDeadlockEvent,
     NormalizedMetricSample,
     NormalizedMissingIndexSuggestion,
@@ -444,6 +445,64 @@ _DEADLOCK_FILE_TARGET_QUERY = """
     SELECT event_data, timestamp_utc
     FROM sys.fn_xe_file_target_read_file('system_health*.xel', NULL, NULL, NULL)
     WHERE object_name = 'xml_deadlock_report'
+      AND timestamp_utc >= DATEADD(HOUR, -1, SYSUTCDATETIME())
+"""
+
+# Etapa 10, item 3 (captura confiavel de erro por transacao) — ao contrario do deadlock (que
+# reaproveita a sessao `system_health` ja sempre ativa), aqui precisamos de uma sessao Extended
+# Events DEDICADA e NOVA (`sqlserver.error_reported` nao e capturado por `system_health` por
+# padrao) - `_ensure_transaction_error_session` cria/inicia de forma idempotente (checa
+# `sys.server_event_sessions`/`sys.dm_xe_sessions` antes). Exige a permissao de servidor
+# `ALTER ANY EVENT SESSION`; sem ela, a criacao falha e o supervisor loga e pula esta instancia
+# neste ciclo (nunca propaga excecao) - nao tratado como capacidade formal de cadastro (mesmo
+# racional de "degrada em runtime" ja usado por outras checagens de baixa frequencia).
+#
+# `WHERE severity >= 16` (bug real ja documentado em `_build_transaction_events`: severidade
+# sozinha NAO distingue um erro real de ruido recuperavel do mesmo nivel - ex. "The cursor was
+# not declared", severidade 16, nao aborta a transacao) - severidade >= 16 e' o corte real entre
+# "erro de usuario que precisa de atencao" e mensagens informativas (severidade < 11), mas
+# CONTINUA sem confirmar causalidade de rollback (isso exigiria correlacionar com um evento de
+# rollback - fora de escopo aqui, nao implementado por falta de forma segura de verificar o nome
+# exato do evento contra uma instancia real neste momento). A melhoria real e concreta desta
+# feature: o `prev_error` (`sys.dm_exec_requests`) SOME assim que a sessao fica idle apos o erro -
+# a sessao XE retem o evento independente do estado atual da sessao.
+_TRANSACTION_ERROR_SESSION_NAME = "ab_xql_pm_transaction_errors"
+
+_TRANSACTION_ERROR_SESSION_EXISTS_QUERY = f"""
+    SELECT name FROM sys.server_event_sessions WHERE name = '{_TRANSACTION_ERROR_SESSION_NAME}'
+"""
+
+_TRANSACTION_ERROR_SESSION_RUNNING_QUERY = f"""
+    SELECT s.name FROM sys.dm_xe_sessions AS s WHERE s.name = '{_TRANSACTION_ERROR_SESSION_NAME}'
+"""
+
+_CREATE_TRANSACTION_ERROR_SESSION_SQL = f"""
+    CREATE EVENT SESSION [{_TRANSACTION_ERROR_SESSION_NAME}] ON SERVER
+    ADD EVENT sqlserver.error_reported(
+        ACTION (sqlserver.session_id, sqlserver.database_name)
+        WHERE severity >= 16
+    )
+    ADD TARGET package0.event_file(
+        SET filename = N'{_TRANSACTION_ERROR_SESSION_NAME}.xel',
+        max_file_size = 10,
+        max_rollover_files = 2
+    )
+    WITH (
+        MAX_MEMORY = 4096 KB,
+        EVENT_RETENTION_MODE = ALLOW_SINGLE_EVENT_LOSS,
+        MAX_DISPATCH_LATENCY = 5 SECONDS,
+        STARTUP_STATE = ON
+    )
+"""
+
+_START_TRANSACTION_ERROR_SESSION_SQL = f"""
+    ALTER EVENT SESSION [{_TRANSACTION_ERROR_SESSION_NAME}] ON SERVER STATE = START
+"""
+
+_TRANSACTION_ERROR_FILE_TARGET_QUERY = f"""
+    SELECT event_data, timestamp_utc
+    FROM sys.fn_xe_file_target_read_file('{_TRANSACTION_ERROR_SESSION_NAME}*.xel', NULL, NULL, NULL)
+    WHERE object_name = 'error_reported'
       AND timestamp_utc >= DATEADD(HOUR, -1, SYSUTCDATETIME())
 """
 
@@ -1243,6 +1302,130 @@ def _parse_xe_timestamp(timestamp_raw: str | None) -> datetime:
         return datetime.fromisoformat(timestamp_raw)
     except ValueError:
         return datetime.now(UTC)
+
+
+def _connect_and_ensure_transaction_error_session(
+    connection: ConnectionParams, query_timeout_seconds: float
+) -> bool:
+    """Cria/inicia (idempotente) a sessao Extended Events dedicada `_TRANSACTION_ERROR_SESSION_
+    NAME` - helper sincrono (mesmo padrao de `_connect_and_collect_deadlocks`), chamado a cada
+    ciclo do `TransactionErrorSupervisor` antes de ler. Devolve `False` (nunca levanta excecao)
+    quando a criacao/inicio falha - permissao ausente (`ALTER ANY EVENT SESSION`) e o caso mais
+    comum, mas qualquer erro aqui so desativa esta feature para esta instancia neste ciclo, nunca
+    derruba o supervisor."""
+    login_timeout_seconds = int(connection.connect_timeout_seconds)
+    conn = pymssql.connect(
+        server=connection.host,
+        port=str(connection.port),
+        user=connection.username,
+        password=connection.secret_value,
+        timeout=int(query_timeout_seconds),
+        login_timeout=login_timeout_seconds,
+    )
+    try:
+        cursor = conn.cursor()
+        cursor.execute(_TRANSACTION_ERROR_SESSION_EXISTS_QUERY)
+        if cursor.fetchone() is None:
+            cursor.execute(_CREATE_TRANSACTION_ERROR_SESSION_SQL)
+            conn.commit()
+        cursor.execute(_TRANSACTION_ERROR_SESSION_RUNNING_QUERY)
+        if cursor.fetchone() is None:
+            cursor.execute(_START_TRANSACTION_ERROR_SESSION_SQL)
+            conn.commit()
+        cursor.close()
+        return True
+    except Exception:
+        logger.exception(
+            "Falha ao criar/iniciar a sessao Extended Events %s - "
+            "captura confiavel de erro por transacao desativada neste ciclo "
+            "(permissao ALTER ANY EVENT SESSION ausente e a causa mais comum)",
+            _TRANSACTION_ERROR_SESSION_NAME,
+        )
+        return False
+    finally:
+        conn.close()
+
+
+def _connect_and_collect_transaction_errors(
+    connection: ConnectionParams, instance_id: UUID, query_timeout_seconds: float
+) -> list[NormalizedConfirmedTransactionError]:
+    """Helper sincrono (mesmo padrao de `_connect_and_collect_deadlocks`): le o target `event_file`
+    da sessao dedicada e extrai os eventos `error_reported` (severidade >= 16, ja filtrado na
+    propria sessao) da ultima hora."""
+    login_timeout_seconds = int(connection.connect_timeout_seconds)
+    conn = pymssql.connect(
+        server=connection.host,
+        port=str(connection.port),
+        user=connection.username,
+        password=connection.secret_value,
+        timeout=int(query_timeout_seconds),
+        login_timeout=login_timeout_seconds,
+    )
+    try:
+        cursor = conn.cursor(as_dict=True)
+        cursor.execute(_TRANSACTION_ERROR_FILE_TARGET_QUERY)
+        rows = list(cursor.fetchall())
+        cursor.close()
+    finally:
+        conn.close()
+
+    return _build_confirmed_transaction_errors(rows, instance_id)
+
+
+def _xe_event_field(event_el: ElementTree.Element, name: str) -> str | None:
+    """Le `<data name="X"><value>...</value></data>` ou `<action name="X"><value>...</value>
+    </action>` — mesma estrutura de `value` filho nos dois casos."""
+    field_el = event_el.find(f"./data[@name='{name}']/value")
+    if field_el is None:
+        field_el = event_el.find(f"./action[@name='{name}']/value")
+    return field_el.text if field_el is not None else None
+
+
+def _build_confirmed_transaction_errors(
+    rows: list[dict], instance_id: UUID
+) -> list[NormalizedConfirmedTransactionError]:
+    """Faz o parse do XML de cada linha (uma linha por evento `error_reported`, ja filtrado na
+    query) - `error_number`/`severity` sao numericos, `message` e mascarado por completo
+    (`mask_sql_literals`, blanket - texto de erro nao tem contexto de coluna pra mascaramento
+    seletivo) antes de sair do coletor."""
+    errors: list[NormalizedConfirmedTransactionError] = []
+    for row in rows:
+        event_data = row.get("event_data")
+        if not event_data:
+            continue
+        try:
+            event_el = ElementTree.fromstring(event_data)
+        except ElementTree.ParseError:
+            logger.warning(
+                "Evento error_reported com XML invalido para instance_id=%s - ignorado",
+                instance_id,
+            )
+            continue
+
+        session_id = _xe_event_field(event_el, "session_id")
+        error_number = _xe_event_field(event_el, "error_number")
+        severity = _xe_event_field(event_el, "severity")
+        message = _xe_event_field(event_el, "message")
+        if session_id is None or error_number is None or severity is None or message is None:
+            continue
+
+        timestamp_value = row.get("timestamp_utc")
+        time_value = (
+            timestamp_value
+            if isinstance(timestamp_value, datetime)
+            else _parse_xe_timestamp(event_el.get("timestamp"))
+        )
+        errors.append(
+            NormalizedConfirmedTransactionError(
+                instance_id=instance_id,
+                session_id=session_id,
+                error_number=int(error_number),
+                severity=int(severity),
+                message_masked=mask_sql_literals(message),
+                time=time_value,
+            )
+        )
+    return errors
 
 
 def _parse_deadlock_process(process: ElementTree.Element, is_victim: bool) -> dict[str, Any]:
@@ -2188,6 +2371,58 @@ class SQLServerCollector:
                 self._connection_params,
                 self._instance_id,
                 settings.deadlock_query_timeout_seconds,
+            ),
+            timeout=overall_timeout,
+        )
+
+    async def ensure_transaction_error_capture(self) -> bool:
+        """Cria/inicia (idempotente) a sessao Extended Events dedicada (Etapa 10, item 3) - ver
+        `_connect_and_ensure_transaction_error_session`. Devolve `False` (nunca levanta excecao)
+        quando a criacao/inicio falha, inclusive por timeout - o chamador (`TransactionError
+        Supervisor`) loga e pula a leitura deste ciclo."""
+        settings = get_settings()
+        overall_timeout = (
+            self._connection_params.connect_timeout_seconds
+            + settings.transaction_error_query_timeout_seconds
+        )
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(
+                    _connect_and_ensure_transaction_error_session,
+                    self._connection_params,
+                    settings.transaction_error_query_timeout_seconds,
+                ),
+                timeout=overall_timeout,
+            )
+        except TimeoutError:
+            logger.warning(
+                "Timeout ao criar/iniciar a sessao Extended Events %s para instance_id=%s",
+                _TRANSACTION_ERROR_SESSION_NAME,
+                self._instance_id,
+            )
+            return False
+
+    async def collect_transaction_error_events(self) -> list[NormalizedConfirmedTransactionError]:
+        """Target `event_file` da sessao dedicada (Etapa 10, item 3) - ver
+        `_connect_and_collect_transaction_errors`. Mesmo timeout dedicado de
+        `ensure_transaction_error_capture` (ler `.xel` em disco tem o mesmo perfil de custo do
+        target de deadlock)."""
+        if self._instance_id is None:
+            raise ValueError(
+                "SQLServerCollector.collect_transaction_error_events requer instance_id de uma "
+                "instancia ja cadastrada."
+            )
+        settings = get_settings()
+        overall_timeout = (
+            self._connection_params.connect_timeout_seconds
+            + settings.transaction_error_query_timeout_seconds
+        )
+        return await asyncio.wait_for(
+            asyncio.to_thread(
+                _connect_and_collect_transaction_errors,
+                self._connection_params,
+                self._instance_id,
+                settings.transaction_error_query_timeout_seconds,
             ),
             timeout=overall_timeout,
         )

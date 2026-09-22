@@ -32,6 +32,7 @@ from app.workers.plan_compile_timeout_supervisor import PlanCompileTimeoutSuperv
 from app.workers.plan_history_supervisor import PlanHistorySupervisor
 from app.workers.polling_supervisor import PollingSupervisor
 from app.workers.problem_events_retention_worker import ProblemEventsRetentionWorker
+from app.workers.transaction_error_supervisor import TransactionErrorSupervisor
 
 logger = get_logger(__name__)
 
@@ -63,6 +64,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     backup_status_task: asyncio.Task[None] | None = None
     deadlock_supervisor: DeadlockSupervisor | None = None
     deadlock_task: asyncio.Task[None] | None = None
+    transaction_error_supervisor: TransactionErrorSupervisor | None = None
+    transaction_error_task: asyncio.Task[None] | None = None
     problem_events_retention_worker: ProblemEventsRetentionWorker | None = None
     problem_events_retention_task: asyncio.Task[None] | None = None
     extended_health_metrics_supervisor: ExtendedHealthMetricsSupervisor | None = None
@@ -151,6 +154,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     else:
         logger.info("DeadlockSupervisor desabilitado (DEADLOCK_SUPERVISOR_ENABLED=false)")
 
+    if settings.transaction_error_supervisor_enabled:
+        transaction_error_supervisor = TransactionErrorSupervisor(
+            async_session_factory, settings.transaction_error_check_interval_seconds
+        )
+        transaction_error_task = asyncio.create_task(transaction_error_supervisor.run())
+        logger.info(
+            "TransactionErrorSupervisor habilitado (check_interval=%ss)",
+            settings.transaction_error_check_interval_seconds,
+        )
+    else:
+        logger.info(
+            "TransactionErrorSupervisor desabilitado (TRANSACTION_ERROR_SUPERVISOR_ENABLED=false)"
+        )
+
     if settings.problem_events_retention_worker_enabled:
         problem_events_retention_worker = ProblemEventsRetentionWorker(
             async_session_factory,
@@ -228,6 +245,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if deadlock_supervisor is not None and deadlock_task is not None:
         deadlock_supervisor.stop()
         await deadlock_task
+    if transaction_error_supervisor is not None and transaction_error_task is not None:
+        transaction_error_supervisor.stop()
+        await transaction_error_task
     if problem_events_retention_worker is not None and problem_events_retention_task is not None:
         problem_events_retention_worker.stop()
         await problem_events_retention_task

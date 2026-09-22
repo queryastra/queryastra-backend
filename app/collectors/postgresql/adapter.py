@@ -87,6 +87,7 @@ from app.normalizers.metric_names import (
 from app.normalizers.models import (
     NormalizedBackupStatus,
     NormalizedBlockingEvent,
+    NormalizedConfirmedTransactionError,
     NormalizedDeadlockEvent,
     NormalizedMetricSample,
     NormalizedMissingIndexSuggestion,
@@ -914,6 +915,17 @@ class PostgreSQLCollector:
         `pg_stat_database.deadlocks`, ja coletado como metrica em `collect()`) — sempre lista
         vazia, sem tentar conectar (mesmo padrao ja usado pro plano de execucao sob demanda no
         PostgreSQL, Etapa 11)."""
+        return []
+
+    async def ensure_transaction_error_capture(self) -> bool:
+        """PostgreSQL nao tem Extended Events — sempre `True` sem fazer nada (nunca ha o que
+        criar/iniciar neste motor)."""
+        return True
+
+    async def collect_transaction_error_events(self) -> list[NormalizedConfirmedTransactionError]:
+        """PostgreSQL nao tem Extended Events — sempre lista vazia, sem tentar conectar (mesma
+        classe de limitacao ja documentada pra CPU/deadlock neste projeto: "SQL Server pode,
+        Postgres nao pode")."""
         return []
 
     async def collect_freespace_metrics(self) -> list[NormalizedMetricSample]:

@@ -195,6 +195,33 @@ class NormalizedTransactionEvent(BaseModel):
     flag_reason: str | None = None
 
 
+class NormalizedConfirmedTransactionError(BaseModel):
+    """Erro de sessao capturado via a sessao Extended Events dedicada `sqlserver.error_reported`
+    (severidade >= 16) — Etapa 10, item 3. Destino: enriquece uma linha JA EXISTENTE de
+    `transaction_events` (`confirmed_error_code`/`confirmed_error_message_masked`), correlacionada
+    por `session_id` — nunca cria uma linha nova (o evento so tem `session_id`, nao
+    `transaction_identifier`, entao nao ha como montar uma `TransactionEvent` valida so a partir
+    dele; ver `TransactionErrorSupervisor`/`TransactionEventsRepository.
+    tag_confirmed_errors_by_session`).
+
+    Diferente de `last_error_code` (`sys.dm_exec_requests.prev_error`, melhor esforco, some assim
+    que a sessao fica idle apos o erro): este e' capturado no INSTANTE em que o erro e levantado
+    pela sessao XE, e persiste independente do estado atual da sessao — resolve a lacuna
+    documentada de `prev_error`. Ainda NAO e' confirmacao causal de que o erro derrubou a
+    transacao (isso exigiria correlacionar com um evento de rollback, fora de escopo aqui — ver
+    docstring de `TransactionErrorSupervisor`) - so SQL Server, PostgreSQL nao tem o conceito de
+    Extended Events."""
+
+    model_config = ConfigDict(frozen=True)
+
+    instance_id: UUID
+    session_id: str
+    error_number: int
+    severity: int
+    message_masked: str
+    time: datetime
+
+
 class NormalizedMissingIndexSuggestion(BaseModel):
     """Sugestao de indice ausente normalizada — destino: tabela relacional
     `missing_index_suggestions` (upsert por instance_id/database_name/table_name/suggestion, nao

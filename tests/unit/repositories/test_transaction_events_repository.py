@@ -316,6 +316,61 @@ async def test_tag_open_transactions_by_session_adds_deadlock_tag(
     assert set(row.flag_reason.split(",")) == {"bloqueio", "deadlock"}
 
 
+async def test_tag_confirmed_errors_by_session_enriches_open_transaction(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """Etapa 10, item 3 - correlacao com a sessao Extended Events dedicada: uma transacao aberta
+    com `session_id` batendo ganha `confirmed_error_code`/`confirmed_error_message_masked` e a
+    tag `"erro"` em `flag_reason`, sem perder a tag anterior."""
+    repo = TransactionEventsRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.upsert_batch(
+        test_instance.id,
+        [
+            NormalizedTransactionEvent(
+                instance_id=test_instance.id,
+                transaction_identifier="tx-com-erro",
+                session_id="62",
+                database_name="AB_COBRANCA",
+                transaction_type="local",
+                transaction_uow=None,
+                begin_time=now,
+                state="ativa",
+                last_error_code=None,
+                flag_reason="bloqueio",
+            ),
+        ],
+        {"tx-com-erro"},
+        now,
+    )
+
+    tagged = await repo.tag_confirmed_errors_by_session(
+        test_instance.id,
+        {"62": (547, "The INSERT statement conflicted with the CHECK constraint.")},
+    )
+
+    assert tagged == 1
+    row = await repo.get_by_identifier(test_instance.id, "tx-com-erro")
+    assert row is not None
+    assert row.confirmed_error_code == 547
+    assert row.confirmed_error_message_masked == (
+        "The INSERT statement conflicted with the CHECK constraint."
+    )
+    assert set(row.flag_reason.split(",")) == {"bloqueio", "erro"}
+
+
+async def test_tag_confirmed_errors_by_session_ignores_session_without_open_transaction(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    repo = TransactionEventsRepository(db_session)
+
+    tagged = await repo.tag_confirmed_errors_by_session(
+        test_instance.id, {"999": (547, "erro sem transacao rastreada")}
+    )
+
+    assert tagged == 0
+
+
 async def test_purge_closed_before_removes_only_old_closed_rows(
     db_session: AsyncSession, test_instance: Instance
 ) -> None:

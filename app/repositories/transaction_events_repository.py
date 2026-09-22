@@ -197,6 +197,43 @@ class TransactionEventsRepository(BaseRepository):
                 row.flag_reason = merged
         await self._session.commit()
 
+    async def tag_confirmed_errors_by_session(
+        self, instance_id: UUID, errors_by_session: dict[str, tuple[int, str]]
+    ) -> int:
+        """Correlacao com a sessao Extended Events dedicada (Etapa 10, item 3,
+        `app/workers/transaction_error_supervisor.py`) - `errors_by_session` mapeia `session_id`
+        -> `(error_number, message_masked)` do erro mais severo/recente visto neste ciclo.
+        Preenche `confirmed_error_code`/`confirmed_error_message_masked` e adiciona `"erro"` a
+        `flag_reason` de qualquer transacao AINDA ABERTA com esse `session_id` - mesmo racional
+        de `tag_open_transactions_by_session` (melhor esforco, so enriquece uma linha ja
+        existente por outro motivo; nao cria uma linha nova, o evento XE so tem `session_id`, nao
+        `transaction_identifier`). Devolve quantas linhas foram atualizadas (log do chamador)."""
+        if not errors_by_session:
+            return 0
+        rows = (
+            (
+                await self._session.execute(
+                    sa.select(TransactionEvent).where(
+                        TransactionEvent.instance_id == instance_id,
+                        TransactionEvent.closed_at.is_(None),
+                        TransactionEvent.session_id.in_(errors_by_session.keys()),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for row in rows:
+            # `session_id` nunca e None aqui - o `WHERE ... IN (...)` acima ja exclui isso (IN
+            # nunca casa NULL) - mypy nao sabe disso a partir do tipo da coluna (`str | None`).
+            assert row.session_id is not None
+            error_number, message_masked = errors_by_session[row.session_id]
+            row.confirmed_error_code = error_number
+            row.confirmed_error_message_masked = message_masked
+            row.flag_reason = _merge_tags(row.flag_reason, "erro")
+        await self._session.commit()
+        return len(rows)
+
     async def purge_closed_before(self, cutoff: datetime) -> int:
         """Expurgo por idade (`app/workers/problem_events_retention_worker.py`) — so linhas JA
         ENCERRADAS ha mais tempo que `cutoff`; uma transacao ainda aberta nunca e removida,

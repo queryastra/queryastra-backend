@@ -65,6 +65,13 @@ class TransactionEvent(Base):
     begin_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     state: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_error_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Etapa 10, item 3 — captura confiavel via Extended Events dedicada (`sqlserver.
+    # error_reported`, severidade >= 16, `TransactionErrorSupervisor`), diferente de
+    # `last_error_code` (prev_error, melhor esforco, desaparece quando a sessao fica idle): este
+    # par e' capturado no INSTANTE em que o erro e levantado e persiste independente do estado
+    # atual da sessao. Ainda nao e' confirmacao causal de rollback (ver docstring do supervisor).
+    confirmed_error_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    confirmed_error_message_masked: Mapped[str | None] = mapped_column(Text, nullable=True)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
