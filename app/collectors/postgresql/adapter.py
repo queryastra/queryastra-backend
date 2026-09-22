@@ -362,7 +362,12 @@ class PostgreSQLCollector:
             reason="; ".join(missing),
         )
 
-    async def collect(self) -> CollectionResult:
+    async def collect(
+        self,
+        *,
+        sleeping_min_duration_ms: int | None = None,
+        sleeping_database_overrides_ms: dict[str, int] | None = None,
+    ) -> CollectionResult:
         """Executa um ciclo de coleta: sessao ativa, bloqueio (nivel direto) e metricas de recurso.
 
         Ver `Docs/collector-queries.md` §1 (sessao ativa), §2 (bloqueio), §5 (metricas de
@@ -453,6 +458,8 @@ class PostgreSQLCollector:
             blocking_events,
             collected_at,
             settings.transaction_orphan_threshold_minutes,
+            sleeping_min_duration_ms,
+            sleeping_database_overrides_ms or {},
         )
         open_transaction_identifiers = [
             str(row["pid"]) for row in all_session_rows if row["xact_start"] is not None
@@ -665,6 +672,8 @@ class PostgreSQLCollector:
         blocking_events: list[NormalizedBlockingEvent],
         collected_at: datetime,
         orphan_threshold_minutes: int,
+        sleeping_min_duration_ms: int | None,
+        sleeping_database_overrides_ms: dict[str, int],
     ) -> list[NormalizedTransactionEvent]:
         """Transacoes DIGNAS DE NOTA neste ciclo — qualquer sessao com `xact_start IS NOT NULL`
         em `all_session_rows` (todas as sessoes conectadas, nao so as ativas — pega tambem "idle
@@ -674,7 +683,12 @@ class PostgreSQLCollector:
         espelho de toda transacao aberta (ver `app.collectors.transaction_flagging`).
         `transaction_identifier` = o proprio `pid` (Postgres nao tem conceito de transacao
         nomeada separada da sessao — ao contrario do SQL Server, so pode haver 1 transacao
-        aberta por backend por vez)."""
+        aberta por backend por vez).
+
+        `sleeping_min_duration_ms`/`sleeping_database_overrides_ms` (novas tarefas do usuario,
+        itens 1/2): `state` ja vem de `_ALL_SESSIONS_QUERY` (sem filtro `!= 'idle'`) — "idle in
+        transaction"/"idle in transaction (aborted)" e o sinal direto de sessao ociosa, sem
+        precisar de query nova."""
         assert self._instance_id is not None  # garantido por collect()
         instance_id: UUID = self._instance_id
         blocking_involved_transaction_ids = {
@@ -689,12 +703,18 @@ class PostgreSQLCollector:
             if xact_start is None:
                 continue
             transaction_identifier = str(row["pid"])
+            database_name = row["datname"]
+            effective_sleeping_threshold_ms = sleeping_database_overrides_ms.get(
+                database_name if database_name is not None else "", sleeping_min_duration_ms
+            )
             flag_reason = compute_flag_reason(
                 involved_in_blocking=transaction_identifier in blocking_involved_transaction_ids,
                 has_error=False,
                 begin_time=xact_start,
                 now=collected_at,
                 orphan_threshold_minutes=orphan_threshold_minutes,
+                is_idle=row["state"] in ("idle in transaction", "idle in transaction (aborted)"),
+                sleeping_threshold_ms=effective_sleeping_threshold_ms,
             )
             if flag_reason is None:
                 continue

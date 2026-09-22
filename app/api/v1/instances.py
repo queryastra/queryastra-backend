@@ -17,9 +17,13 @@ from app.api.deps import get_db_session
 from app.collectors.base import CapabilityResult
 from app.collectors.capabilities import has_missing_mandatory_capability
 from app.models.instance_database_lock_override import InstanceDatabaseLockOverride
+from app.models.instance_database_sleeping_override import InstanceDatabaseSleepingOverride
 from app.repositories.alerts_repository import AlertsRepository
 from app.repositories.instance_database_lock_overrides_repository import (
     InstanceDatabaseLockOverridesRepository,
+)
+from app.repositories.instance_database_sleeping_overrides_repository import (
+    InstanceDatabaseSleepingOverridesRepository,
 )
 from app.repositories.instances_repository import InstancesRepository
 from app.repositories.metric_samples_repository import MetricSamplesRepository
@@ -86,6 +90,7 @@ class InstanceResponse(BaseModel):
     criticality: str
     polling_interval_seconds: int
     min_lock_time_ms: int | None
+    min_sleeping_time_ms: int | None
     auth_method: str
     active: bool
     created_at: datetime
@@ -132,6 +137,9 @@ class InstanceSummaryResponse(BaseModel):
     # Aditivo — sub-tela "Tempo mínimo de bloqueio" (override ad-hoc por instância). `None` =
     # sem override, usa o valor global (`system_settings.blocking_min_duration_ms`).
     min_lock_time_ms: int | None
+    # Mesmo padrão, para "Transações em Sleeping" — `None` usa
+    # `system_settings.sleeping_min_duration_ms`.
+    min_sleeping_time_ms: int | None
     health_status: str
     collection_coverage: str
     active: bool
@@ -239,6 +247,12 @@ def get_instance_database_lock_overrides_repository(
     return InstanceDatabaseLockOverridesRepository(session)
 
 
+def get_instance_database_sleeping_overrides_repository(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> InstanceDatabaseSleepingOverridesRepository:
+    return InstanceDatabaseSleepingOverridesRepository(session)
+
+
 # --- Endpoints -----------------------------------------------------------------------------
 
 
@@ -323,6 +337,7 @@ async def list_instances(
                 criticality=instance.criticality,
                 polling_interval_seconds=instance.polling_interval_seconds,
                 min_lock_time_ms=instance.min_lock_time_ms,
+                min_sleeping_time_ms=instance.min_sleeping_time_ms,
                 health_status=derived.health_status,
                 collection_coverage=derived.collection_coverage,
                 active=instance.active,
@@ -578,6 +593,220 @@ async def reset_all_lock_time_overrides(
     return LockTimeOverridesResetResponse(
         instances_cleared=instances_cleared,
         database_overrides_cleared=database_overrides_cleared,
+    )
+
+
+class InstanceMinSleepingTimeUpdateRequest(BaseModel):
+    """Mesmo padrão de `InstanceMinLockTimeUpdateRequest`, para "Transações em Sleeping"."""
+
+    min_sleeping_time_ms: int | None = Field(ge=0)
+
+
+@router.patch("/{instance_id}/min-sleeping-time", response_model=InstanceDetailResponse)
+async def update_instance_min_sleeping_time(
+    instance_id: UUID,
+    payload: InstanceMinSleepingTimeUpdateRequest,
+    repository: Annotated[InstancesRepository, Depends(get_instances_repository)],
+    status_service: Annotated[
+        InstanceDerivedStatusService, Depends(get_instance_derived_status_service)
+    ],
+) -> InstanceDetailResponse:
+    instance = await repository.set_min_sleeping_time_ms(instance_id, payload.min_sleeping_time_ms)
+    if instance is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Instancia nao encontrada."
+        )
+    derived = await status_service.compute(instance_id)
+    return InstanceDetailResponse(
+        **InstanceResponse.model_validate(instance).model_dump(),
+        health_status=derived.health_status,
+        collection_coverage=derived.collection_coverage,
+        capability_errors=[],
+        last_collected_at=derived.last_collected_at,
+    )
+
+
+class InstanceDatabaseSleepingOverrideResponse(BaseModel):
+    """Mesmo padrão de `InstanceDatabaseLockOverrideResponse`, para "Transações em Sleeping"."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    database_name: str
+    min_sleeping_time_ms: int
+
+
+class InstanceDatabaseSleepingOverrideUpsertRequest(BaseModel):
+    database_name: str = Field(min_length=1)
+    min_sleeping_time_ms: int = Field(ge=0)
+
+
+class SleepingTimeOverridesResetResponse(BaseModel):
+    instances_cleared: int
+    database_overrides_cleared: int
+
+
+@router.get(
+    "/{instance_id}/database-sleeping-time-overrides",
+    response_model=list[InstanceDatabaseSleepingOverrideResponse],
+)
+async def list_instance_database_sleeping_overrides(
+    instance_id: UUID,
+    repository: Annotated[
+        InstanceDatabaseSleepingOverridesRepository,
+        Depends(get_instance_database_sleeping_overrides_repository),
+    ],
+) -> list[InstanceDatabaseSleepingOverrideResponse]:
+    overrides = await repository.list_for_instance(instance_id)
+    return [InstanceDatabaseSleepingOverrideResponse.model_validate(o) for o in overrides]
+
+
+@router.put(
+    "/{instance_id}/database-sleeping-time-overrides",
+    response_model=InstanceDatabaseSleepingOverrideResponse,
+)
+async def set_instance_database_sleeping_override(
+    instance_id: UUID,
+    payload: InstanceDatabaseSleepingOverrideUpsertRequest,
+    repository: Annotated[
+        InstanceDatabaseSleepingOverridesRepository,
+        Depends(get_instance_database_sleeping_overrides_repository),
+    ],
+) -> InstanceDatabaseSleepingOverrideResponse:
+    override: InstanceDatabaseSleepingOverride = await repository.set(
+        instance_id, payload.database_name, payload.min_sleeping_time_ms
+    )
+    return InstanceDatabaseSleepingOverrideResponse.model_validate(override)
+
+
+@router.delete(
+    "/{instance_id}/database-sleeping-time-overrides/{database_name}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def clear_instance_database_sleeping_override(
+    instance_id: UUID,
+    database_name: str,
+    repository: Annotated[
+        InstanceDatabaseSleepingOverridesRepository,
+        Depends(get_instance_database_sleeping_overrides_repository),
+    ],
+) -> None:
+    cleared = await repository.clear(instance_id, database_name)
+    if not cleared:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Nenhum override encontrado para esse banco nessa instância.",
+        )
+
+
+@router.delete("/sleeping-time-overrides/reset", response_model=SleepingTimeOverridesResetResponse)
+async def reset_all_sleeping_time_overrides(
+    instances_repository: Annotated[InstancesRepository, Depends(get_instances_repository)],
+    database_overrides_repository: Annotated[
+        InstanceDatabaseSleepingOverridesRepository,
+        Depends(get_instance_database_sleeping_overrides_repository),
+    ],
+) -> SleepingTimeOverridesResetResponse:
+    instances_cleared = await instances_repository.clear_all_min_sleeping_time_overrides()
+    database_overrides_cleared = await database_overrides_repository.clear_all()
+    return SleepingTimeOverridesResetResponse(
+        instances_cleared=instances_cleared,
+        database_overrides_cleared=database_overrides_cleared,
+    )
+
+
+class AdHocOverrideInstanceEntry(BaseModel):
+    """Uma instância com override ATIVO de um parâmetro ad-hoc (bloqueio ou sleeping)."""
+
+    instance_id: UUID
+    instance_name: str
+    min_duration_ms: int
+
+
+class AdHocOverrideDatabaseEntry(BaseModel):
+    """Um banco específico com override ATIVO de um parâmetro ad-hoc."""
+
+    instance_id: UUID
+    instance_name: str
+    database_name: str
+    min_duration_ms: int
+
+
+class AdHocOverrideGroup(BaseModel):
+    instance_overrides: list[AdHocOverrideInstanceEntry]
+    database_overrides: list[AdHocOverrideDatabaseEntry]
+
+
+class AdHocOverridesSummaryResponse(BaseModel):
+    """Resumo de TODOS os overrides ad-hoc ativos (bloqueio e sleeping, todas as instâncias) —
+    pedido explícito do usuário: "não tem como descobrir quais servidores/BDs já tinham tempos
+    ad hoc configurados". Usado pela UI (Configurações → Geral) tanto para exibir a lista quanto
+    para inicializar corretamente o checkbox "Limites ad hoc" (que antes sempre resetava pra
+    desmarcado ao remontar, mesmo com overrides ativos no backend)."""
+
+    blocking: AdHocOverrideGroup
+    sleeping: AdHocOverrideGroup
+
+
+@router.get("/ad-hoc-overrides/summary", response_model=AdHocOverridesSummaryResponse)
+async def get_ad_hoc_overrides_summary(
+    instances_repository: Annotated[InstancesRepository, Depends(get_instances_repository)],
+    lock_overrides_repository: Annotated[
+        InstanceDatabaseLockOverridesRepository,
+        Depends(get_instance_database_lock_overrides_repository),
+    ],
+    sleeping_overrides_repository: Annotated[
+        InstanceDatabaseSleepingOverridesRepository,
+        Depends(get_instance_database_sleeping_overrides_repository),
+    ],
+) -> AdHocOverridesSummaryResponse:
+    instances = await instances_repository.list_all()
+    instance_name_by_id = {instance.id: instance.name for instance in instances}
+
+    blocking_instance_overrides = [
+        AdHocOverrideInstanceEntry(
+            instance_id=instance.id,
+            instance_name=instance.name,
+            min_duration_ms=instance.min_lock_time_ms,
+        )
+        for instance in instances
+        if instance.min_lock_time_ms is not None
+    ]
+    sleeping_instance_overrides = [
+        AdHocOverrideInstanceEntry(
+            instance_id=instance.id,
+            instance_name=instance.name,
+            min_duration_ms=instance.min_sleeping_time_ms,
+        )
+        for instance in instances
+        if instance.min_sleeping_time_ms is not None
+    ]
+    lock_database_overrides = [
+        AdHocOverrideDatabaseEntry(
+            instance_id=override.instance_id,
+            instance_name=instance_name_by_id.get(override.instance_id, "desconhecida"),
+            database_name=override.database_name,
+            min_duration_ms=override.min_lock_time_ms,
+        )
+        for override in await lock_overrides_repository.list_all()
+    ]
+    sleeping_database_overrides = [
+        AdHocOverrideDatabaseEntry(
+            instance_id=override.instance_id,
+            instance_name=instance_name_by_id.get(override.instance_id, "desconhecida"),
+            database_name=override.database_name,
+            min_duration_ms=override.min_sleeping_time_ms,
+        )
+        for override in await sleeping_overrides_repository.list_all()
+    ]
+    return AdHocOverridesSummaryResponse(
+        blocking=AdHocOverrideGroup(
+            instance_overrides=blocking_instance_overrides,
+            database_overrides=lock_database_overrides,
+        ),
+        sleeping=AdHocOverrideGroup(
+            instance_overrides=sleeping_instance_overrides,
+            database_overrides=sleeping_database_overrides,
+        ),
     )
 
 

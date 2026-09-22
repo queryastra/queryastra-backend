@@ -404,3 +404,174 @@ async def test_reset_all_lock_time_overrides_clears_instance_and_database_overri
         f"/api/v1/instances/{test_instance.id}/database-lock-time-overrides"
     )
     assert overrides_response.json() == []
+
+
+async def test_update_instance_min_sleeping_time_sets_override(
+    client: AsyncClient, test_instance: Instance
+) -> None:
+    """Mesmo padrão de `min-lock-time`, para "Transações em Sleeping" (novas tarefas do usuário,
+    itens 1/2)."""
+    assert test_instance.min_sleeping_time_ms is None
+
+    response = await client.patch(
+        f"/api/v1/instances/{test_instance.id}/min-sleeping-time",
+        json={"min_sleeping_time_ms": 600000},
+    )
+    assert response.status_code == 200
+    assert response.json()["min_sleeping_time_ms"] == 600000
+
+
+async def test_update_instance_min_sleeping_time_null_clears_override(
+    client: AsyncClient, test_instance: Instance
+) -> None:
+    await client.patch(
+        f"/api/v1/instances/{test_instance.id}/min-sleeping-time",
+        json={"min_sleeping_time_ms": 600000},
+    )
+
+    response = await client.patch(
+        f"/api/v1/instances/{test_instance.id}/min-sleeping-time",
+        json={"min_sleeping_time_ms": None},
+    )
+    assert response.status_code == 200
+    assert response.json()["min_sleeping_time_ms"] is None
+
+
+async def test_update_instance_min_sleeping_time_rejects_negative_value(
+    client: AsyncClient, test_instance: Instance
+) -> None:
+    response = await client.patch(
+        f"/api/v1/instances/{test_instance.id}/min-sleeping-time",
+        json={"min_sleeping_time_ms": -1},
+    )
+    assert response.status_code == 422
+
+
+async def test_set_database_sleeping_time_override_creates_and_updates(
+    client: AsyncClient, test_instance: Instance
+) -> None:
+    create_response = await client.put(
+        f"/api/v1/instances/{test_instance.id}/database-sleeping-time-overrides",
+        json={"database_name": "AB_COBRANCA", "min_sleeping_time_ms": 600000},
+    )
+    assert create_response.status_code == 200
+    assert create_response.json() == {
+        "database_name": "AB_COBRANCA",
+        "min_sleeping_time_ms": 600000,
+    }
+
+    update_response = await client.put(
+        f"/api/v1/instances/{test_instance.id}/database-sleeping-time-overrides",
+        json={"database_name": "AB_COBRANCA", "min_sleeping_time_ms": 900000},
+    )
+    assert update_response.status_code == 200
+    assert update_response.json()["min_sleeping_time_ms"] == 900000
+
+    list_response = await client.get(
+        f"/api/v1/instances/{test_instance.id}/database-sleeping-time-overrides"
+    )
+    assert list_response.status_code == 200
+    assert list_response.json() == [
+        {"database_name": "AB_COBRANCA", "min_sleeping_time_ms": 900000}
+    ]
+
+
+async def test_clear_database_sleeping_time_override(
+    client: AsyncClient, test_instance: Instance
+) -> None:
+    await client.put(
+        f"/api/v1/instances/{test_instance.id}/database-sleeping-time-overrides",
+        json={"database_name": "AB_COBRANCA", "min_sleeping_time_ms": 600000},
+    )
+
+    delete_response = await client.delete(
+        f"/api/v1/instances/{test_instance.id}/database-sleeping-time-overrides/AB_COBRANCA"
+    )
+    assert delete_response.status_code == 204
+
+    list_response = await client.get(
+        f"/api/v1/instances/{test_instance.id}/database-sleeping-time-overrides"
+    )
+    assert list_response.json() == []
+
+
+async def test_clear_database_sleeping_time_override_404_when_no_override_exists(
+    client: AsyncClient, test_instance: Instance
+) -> None:
+    response = await client.delete(
+        f"/api/v1/instances/{test_instance.id}/database-sleeping-time-overrides/NUNCA_CONFIGURADO"
+    )
+    assert response.status_code == 404
+
+
+async def test_reset_all_sleeping_time_overrides_clears_instance_and_database_overrides(
+    client: AsyncClient, test_instance: Instance
+) -> None:
+    await client.patch(
+        f"/api/v1/instances/{test_instance.id}/min-sleeping-time",
+        json={"min_sleeping_time_ms": 600000},
+    )
+    await client.put(
+        f"/api/v1/instances/{test_instance.id}/database-sleeping-time-overrides",
+        json={"database_name": "AB_COBRANCA", "min_sleeping_time_ms": 300000},
+    )
+
+    reset_response = await client.delete("/api/v1/instances/sleeping-time-overrides/reset")
+    assert reset_response.status_code == 200
+    body = reset_response.json()
+    assert body["instances_cleared"] >= 1
+    assert body["database_overrides_cleared"] >= 1
+
+    instance_response = await client.get(f"/api/v1/instances/{test_instance.id}")
+    assert instance_response.json()["min_sleeping_time_ms"] is None
+
+    overrides_response = await client.get(
+        f"/api/v1/instances/{test_instance.id}/database-sleeping-time-overrides"
+    )
+    assert overrides_response.json() == []
+
+
+async def test_ad_hoc_overrides_summary_reports_active_overrides_of_both_parameters(
+    client: AsyncClient, test_instance: Instance
+) -> None:
+    """Pedido explícito do usuário (item 3): saber, de relance, quais instâncias/bancos já têm
+    override ativo — tanto de bloqueio quanto de sleeping, sem navegar instância por instância."""
+    await client.patch(
+        f"/api/v1/instances/{test_instance.id}/min-lock-time",
+        json={"min_lock_time_ms": 500},
+    )
+    await client.put(
+        f"/api/v1/instances/{test_instance.id}/database-lock-time-overrides",
+        json={"database_name": "AB_COBRANCA", "min_lock_time_ms": 300},
+    )
+    await client.patch(
+        f"/api/v1/instances/{test_instance.id}/min-sleeping-time",
+        json={"min_sleeping_time_ms": 600000},
+    )
+    await client.put(
+        f"/api/v1/instances/{test_instance.id}/database-sleeping-time-overrides",
+        json={"database_name": "AB_FATURAS", "min_sleeping_time_ms": 900000},
+    )
+
+    response = await client.get("/api/v1/instances/ad-hoc-overrides/summary")
+    assert response.status_code == 200
+    body = response.json()
+
+    blocking_instance_ids = {row["instance_id"] for row in body["blocking"]["instance_overrides"]}
+    assert str(test_instance.id) in blocking_instance_ids
+    blocking_databases = {
+        (row["instance_id"], row["database_name"]) for row in body["blocking"]["database_overrides"]
+    }
+    assert (str(test_instance.id), "AB_COBRANCA") in blocking_databases
+
+    sleeping_instance_ids = {row["instance_id"] for row in body["sleeping"]["instance_overrides"]}
+    assert str(test_instance.id) in sleeping_instance_ids
+    sleeping_databases = {
+        (row["instance_id"], row["database_name"]) for row in body["sleeping"]["database_overrides"]
+    }
+    assert (str(test_instance.id), "AB_FATURAS") in sleeping_databases
+
+    # Reset pra nao vazar estado pro proximo teste - reaproveita os 2 endpoints de reset ja
+    # cobertos pelos testes acima.
+    await client.delete("/api/v1/instances/lock-time-overrides/reset")
+    await client.delete("/api/v1/instances/sleeping-time-overrides/reset")

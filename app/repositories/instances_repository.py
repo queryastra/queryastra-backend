@@ -121,6 +121,28 @@ class InstancesRepository(BaseRepository):
         await self._session.commit()
         return cast(sa.CursorResult, result).rowcount or 0
 
+    async def set_min_sleeping_time_ms(
+        self, instance_id: UUID, value: int | None
+    ) -> Instance | None:
+        """Mesmo padrão de `set_min_lock_time_ms`, para "Transações em Sleeping"."""
+        instance = await self.get_by_id(instance_id)
+        if instance is None:
+            return None
+        instance.min_sleeping_time_ms = value
+        await self._session.commit()
+        await self._session.refresh(instance)
+        return instance
+
+    async def clear_all_min_sleeping_time_overrides(self) -> int:
+        """Mesmo padrão de `clear_all_min_lock_time_overrides`, para "Transações em Sleeping"."""
+        result = await self._session.execute(
+            update(Instance)
+            .where(Instance.min_sleeping_time_ms.is_not(None))
+            .values(min_sleeping_time_ms=None)
+        )
+        await self._session.commit()
+        return cast(sa.CursorResult, result).rowcount or 0
+
     async def create(self, instance: Instance) -> Instance:
         self._session.add(instance)
         await self._session.commit()

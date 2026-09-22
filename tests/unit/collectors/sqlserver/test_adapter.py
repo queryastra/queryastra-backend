@@ -337,6 +337,110 @@ async def test_collect_does_not_flag_transaction_for_a_benign_prev_error(
     assert result.transaction_events == []
 
 
+async def test_collect_flags_idle_transaction_as_sleeping_when_past_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Novas tarefas do usuario (itens 1/2): sessao SEM request ativa (nao aparece em
+    `_SESSION_ACTIVITY_QUERY`/`session_rows`) dona de uma transacao aberta ha mais tempo que o
+    limite configurado ganha a tag "sleeping"."""
+    just_started = datetime.now(UTC).replace(tzinfo=None)
+    transaction_rows = [
+        {
+            "transaction_id": 999,
+            "session_id": 70,
+            "transaction_begin_time": just_started,
+            "transaction_type": 1,
+            "transaction_state": 2,
+            "transaction_uow": None,
+        }
+    ]
+    transaction_database_rows = [{"transaction_id": 999, "database_name": "app_db"}]
+    _patch_connect(
+        monkeypatch,
+        version_row={"product_version": "16.0.1000.6"},
+        session_rows=[],  # sessao 70 sem request ativa -> ociosa
+        counter_rows=_COUNTER_ROWS,
+        transaction_rows=transaction_rows,
+        transaction_database_rows=transaction_database_rows,
+    )
+
+    collector = SQLServerCollector(connection=_CONNECTION, instance_id=uuid4())
+    result = await collector.collect(sleeping_min_duration_ms=0)
+
+    assert len(result.transaction_events) == 1
+    assert result.transaction_events[0].flag_reason == "sleeping"
+
+
+async def test_collect_does_not_flag_active_session_transaction_as_sleeping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mesmo cenario acima, mas a sessao TEM request ativa (aparece em `session_rows`) - nao e'
+    ociosa, entao nao ganha "sleeping" mesmo com o limite zerado."""
+    just_started = datetime.now(UTC).replace(tzinfo=None)
+    session_rows = [_request_row(session_id=70, query_text="SELECT 1", transaction_id=999)]
+    transaction_rows = [
+        {
+            "transaction_id": 999,
+            "session_id": 70,
+            "transaction_begin_time": just_started,
+            "transaction_type": 1,
+            "transaction_state": 2,
+            "transaction_uow": None,
+        }
+    ]
+    transaction_database_rows = [{"transaction_id": 999, "database_name": "app_db"}]
+    _patch_connect(
+        monkeypatch,
+        version_row={"product_version": "16.0.1000.6"},
+        session_rows=session_rows,
+        counter_rows=_COUNTER_ROWS,
+        transaction_rows=transaction_rows,
+        transaction_database_rows=transaction_database_rows,
+    )
+
+    collector = SQLServerCollector(connection=_CONNECTION, instance_id=uuid4())
+    result = await collector.collect(sleeping_min_duration_ms=0)
+
+    assert result.transaction_events == []
+
+
+async def test_collect_prefers_database_sleeping_override_over_instance_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Override por banco (`sleeping_database_overrides_ms`) vence o valor de
+    instancia/global (`sleeping_min_duration_ms`) - mesma precedencia de bloqueio."""
+    just_started = datetime.now(UTC).replace(tzinfo=None)
+    transaction_rows = [
+        {
+            "transaction_id": 999,
+            "session_id": 70,
+            "transaction_begin_time": just_started,
+            "transaction_type": 1,
+            "transaction_state": 2,
+            "transaction_uow": None,
+        }
+    ]
+    transaction_database_rows = [{"transaction_id": 999, "database_name": "app_db"}]
+    _patch_connect(
+        monkeypatch,
+        version_row={"product_version": "16.0.1000.6"},
+        session_rows=[],
+        counter_rows=_COUNTER_ROWS,
+        transaction_rows=transaction_rows,
+        transaction_database_rows=transaction_database_rows,
+    )
+
+    collector = SQLServerCollector(connection=_CONNECTION, instance_id=uuid4())
+    # Valor de instancia/global bem alto (nunca dispara) - so o override de "app_db" (0) dispara.
+    result = await collector.collect(
+        sleeping_min_duration_ms=999_999_999,
+        sleeping_database_overrides_ms={"app_db": 0},
+    )
+
+    assert len(result.transaction_events) == 1
+    assert result.transaction_events[0].flag_reason == "sleeping"
+
+
 async def test_collect_omits_cpu_metrics_when_ring_buffer_is_empty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

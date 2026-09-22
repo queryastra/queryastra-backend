@@ -116,12 +116,23 @@ class Collector(Protocol):
         """
         ...
 
-    async def collect(self) -> CollectionResult:
+    async def collect(
+        self,
+        *,
+        sleeping_min_duration_ms: int | None = None,
+        sleeping_database_overrides_ms: dict[str, int] | None = None,
+    ) -> CollectionResult:
         """Executa um ciclo completo de coleta e retorna as amostras normalizadas.
 
         Implementacoes devem: abrir conexao com timeout: normalizar por engine antes de
         retornar; nunca persistir texto de SQL sem passar por
         `app.masking.sql_masking.mask_sql_literals` antes.
+
+        `sleeping_min_duration_ms`/`sleeping_database_overrides_ms` (novas tarefas do usuario):
+        limiar efetivo (ja resolvido pelo chamador — `PollingWorker`, precedencia banco > instancia
+        > global, mesmo padrao de `blocking_min_duration_ms`) usado para marcar uma transacao
+        aberta com sessao ociosa como "sleeping" em `flag_reason`. `None`/`{}` (default) desativa
+        a checagem — mesmo comportamento de antes desta feature.
         """
         ...
 

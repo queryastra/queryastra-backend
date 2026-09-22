@@ -724,6 +724,8 @@ def _connect_and_collect(
     max_rows: int,
     collected_at: datetime,
     transaction_orphan_threshold_minutes: int,
+    sleeping_min_duration_ms: int | None,
+    sleeping_database_overrides_ms: dict[str, int],
 ) -> tuple[
     list[NormalizedMetricSample],
     list[NormalizedQuerySample],
@@ -887,6 +889,8 @@ def _connect_and_collect(
         collected_at,
         transaction_orphan_threshold_minutes,
         server_utc_offset,
+        sleeping_min_duration_ms,
+        sleeping_database_overrides_ms,
     )
     open_transaction_identifiers = [str(row["transaction_id"]) for row in transaction_rows]
     return (
@@ -1923,6 +1927,8 @@ def _build_transaction_events(
     collected_at: datetime,
     orphan_threshold_minutes: int,
     server_utc_offset: timedelta,
+    sleeping_min_duration_ms: int | None,
+    sleeping_database_overrides_ms: dict[str, int],
 ) -> list[NormalizedTransactionEvent]:
     """Transacoes DIGNAS DE NOTA neste ciclo — `_TRANSACTION_QUERY` (join `sys.dm_tran_session_
     transactions`/`sys.dm_tran_active_transactions`) enumera toda transacao ABERTA, mas so vira
@@ -1947,11 +1953,20 @@ def _build_transaction_events(
     trabalho futuro, nao implementado). Por isso `has_error` NUNCA mais alimenta `flag_reason`
     (nao e' mais motivo pra gravar uma transacao sozinho) - `last_error_code` continua capturado
     e exibido, mas so como contexto informativo quando a transacao ja foi gravada por outro
-    motivo (bloqueio/orfa/deadlock)."""
+    motivo (bloqueio/orfa/deadlock).
+
+    `sleeping_min_duration_ms`/`sleeping_database_overrides_ms` (novas tarefas do usuario, itens
+    1/2): `session_rows` (`_SESSION_ACTIVITY_QUERY`) so tem sessao com REQUEST ATIVA (INNER JOIN
+    `sys.dm_exec_requests`) — uma sessao dona de transacao que NAO aparece ali esta ociosa
+    ("sleeping", sem request). O limiar efetivo por transacao prioriza o override do banco
+    (`sleeping_database_overrides_ms`, resolvido pelo `PollingWorker`) sobre o valor de
+    instancia/global (`sleeping_min_duration_ms`) — mesma precedencia de `blocking_min_duration_ms`.
+    """
     database_name_by_transaction_id = {
         str(row["transaction_id"]): row["database_name"] for row in transaction_database_rows
     }
     prev_error_by_session_id = {str(row["session_id"]): row["prev_error"] for row in session_rows}
+    active_session_ids = {str(row["session_id"]) for row in session_rows}
     blocking_involved_transaction_ids = {
         tx_id
         for e in blocking_events
@@ -1968,6 +1983,10 @@ def _build_transaction_events(
         prev_error = prev_error_by_session_id.get(session_id)
         last_error_code = int(prev_error) if prev_error is not None and prev_error != 0 else None
         begin_time = _as_utc(row["transaction_begin_time"], server_utc_offset)
+        database_name = database_name_by_transaction_id.get(transaction_id)
+        effective_sleeping_threshold_ms = sleeping_database_overrides_ms.get(
+            database_name if database_name is not None else "", sleeping_min_duration_ms
+        )
         flag_reason = compute_flag_reason(
             involved_in_blocking=transaction_id in blocking_involved_transaction_ids,
             # `prev_error` nao e' confiavel como sinal de falha real (ver docstring da funcao) —
@@ -1977,6 +1996,8 @@ def _build_transaction_events(
             begin_time=begin_time,
             now=collected_at,
             orphan_threshold_minutes=orphan_threshold_minutes,
+            is_idle=session_id not in active_session_ids,
+            sleeping_threshold_ms=effective_sleeping_threshold_ms,
         )
         if flag_reason is None:
             continue
@@ -2170,7 +2191,12 @@ class SQLServerCollector:
                 )
             ]
 
-    async def collect(self) -> CollectionResult:
+    async def collect(
+        self,
+        *,
+        sleeping_min_duration_ms: int | None = None,
+        sleeping_database_overrides_ms: dict[str, int] | None = None,
+    ) -> CollectionResult:
         """Executa um ciclo de coleta: sessao/request ativa, bloqueio (nivel direto) e contadores
         de recurso RAW.
 
@@ -2214,6 +2240,8 @@ class SQLServerCollector:
                 settings.collection_max_rows,
                 collected_at,
                 settings.transaction_orphan_threshold_minutes,
+                sleeping_min_duration_ms,
+                sleeping_database_overrides_ms or {},
             ),
             timeout=overall_timeout,
         )

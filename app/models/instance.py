@@ -83,6 +83,10 @@ class Instance(Base):
     # (`app.models.system_settings`) — `PollingWorker._run_cycle` resolve isso a cada ciclo.
     min_lock_time_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # Mesmo padrão do override acima, para "Transações em Sleeping" — NULL (padrão) usa
+    # `system_settings.sleeping_min_duration_ms`.
+    min_sleeping_time_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
     created_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)

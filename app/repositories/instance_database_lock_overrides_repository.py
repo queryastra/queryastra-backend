@@ -20,6 +20,13 @@ class InstanceDatabaseLockOverridesRepository(BaseRepository):
         )
         return list((await self._session.execute(stmt)).scalars().all())
 
+    async def list_all(self) -> list[InstanceDatabaseLockOverride]:
+        """Todas as instâncias/bancos com override ativo — usado pelo resumo "Limites ad hoc"
+        (Configurações → Geral), pra saber o que já está configurado sem precisar navegar
+        instância por instância."""
+        stmt = sa.select(InstanceDatabaseLockOverride)
+        return list((await self._session.execute(stmt)).scalars().all())
+
     async def set(
         self, instance_id: UUID, database_name: str, min_lock_time_ms: int
     ) -> InstanceDatabaseLockOverride:

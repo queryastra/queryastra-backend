@@ -39,6 +39,13 @@ class SystemSettings(Base):
     # `blocking_events` — filtra ruído de bloqueios muito curtos/irrelevantes. 0 = sem filtro
     # (comportamento anterior a esta feature, captura tudo).
     blocking_min_duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Tempo mínimo (ms) que uma transação precisa estar aberta E com a sessão ociosa (sem request
+    # ativa/"sleeping" no SQL Server, "idle in transaction" no PostgreSQL) para ganhar a tag
+    # "sleeping" em `transaction_events.flag_reason` — mesmo padrão/convenção de
+    # `blocking_min_duration_ms` (0 = sem filtro, marca toda transação ociosa imediatamente).
+    # Diferente de `transaction_orphan_threshold_minutes` (`app/core/config.py`, `.env`, global
+    # fixo, sem override) — este é editável na UI e tem override por instância/banco.
+    sleeping_min_duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )

@@ -131,6 +131,25 @@ class _FakeBlockingIncidentsRepository:
         self.calls.append((instance_id, events, observed_at))
 
 
+class _FakeSystemSettingsRow:
+    blocking_min_duration_ms = 0
+    sleeping_min_duration_ms = 0
+
+
+class _FakeSystemSettingsRepository:
+    """`PollingWorker._run_cycle` resolve o limite de "sleeping" ANTES de chamar
+    `collector.collect()` (precisa ser passado como parametro) — diferente do de bloqueio,
+    resolvido DEPOIS (so filtra eventos ja coletados). Sem este fake, `system_settings_
+    repository_factory` cairia no default real (`SystemSettingsRepository`), que exige um
+    `AsyncSession` de verdade — incompativel com `_FakeSession` deste modulo."""
+
+    def __init__(self, session: object) -> None:
+        del session
+
+    async def get(self) -> _FakeSystemSettingsRow:
+        return _FakeSystemSettingsRow()
+
+
 def _build_result(instance_id) -> CollectionResult:  # noqa: ANN001 - fake
     from datetime import UTC, datetime
 
@@ -157,7 +176,12 @@ class _FakeCollector:
     async def check_capabilities(self):  # noqa: ANN201 - fake
         return []
 
-    async def collect(self) -> CollectionResult:
+    async def collect(
+        self,
+        *,
+        sleeping_min_duration_ms: int | None = None,
+        sleeping_database_overrides_ms: dict[str, int] | None = None,
+    ) -> CollectionResult:
         type(self).calls_by_instance[self._instance_id] = (
             type(self).calls_by_instance.get(self._instance_id, 0) + 1
         )
@@ -201,6 +225,7 @@ def _make_supervisor(
         blocking_events_repository_factory=_FakeBlockingEventsRepository,
         transaction_events_repository_factory=_FakeTransactionEventsRepository,
         blocking_incidents_repository_factory=_FakeBlockingIncidentsRepository,
+        system_settings_repository_factory=_FakeSystemSettingsRepository,
         collector_factory=collector_factory or _FakeCollector,
         **kwargs,
     )

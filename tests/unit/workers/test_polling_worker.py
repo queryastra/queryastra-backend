@@ -34,12 +34,21 @@ class _FakeCollector:
         self._result = result
         self._exc = exc
         self.calls = 0
+        self.last_sleeping_min_duration_ms: int | None = None
+        self.last_sleeping_database_overrides_ms: dict[str, int] | None = None
 
     async def check_capabilities(self):  # noqa: ANN201 - fake, assinatura simples
         return []
 
-    async def collect(self) -> CollectionResult:
+    async def collect(
+        self,
+        *,
+        sleeping_min_duration_ms: int | None = None,
+        sleeping_database_overrides_ms: dict[str, int] | None = None,
+    ) -> CollectionResult:
         self.calls += 1
+        self.last_sleeping_min_duration_ms = sleeping_min_duration_ms
+        self.last_sleeping_database_overrides_ms = sleeping_database_overrides_ms
         if self._exc is not None:
             raise self._exc
         assert self._result is not None
@@ -101,11 +110,12 @@ class _FakeBlockingEventsRepository:
 @dataclass
 class _FakeSystemSettingsRow:
     blocking_min_duration_ms: int
+    sleeping_min_duration_ms: int = 0
 
 
 class _FakeSystemSettingsRepository:
-    def __init__(self, blocking_min_duration_ms: int) -> None:
-        self._row = _FakeSystemSettingsRow(blocking_min_duration_ms)
+    def __init__(self, blocking_min_duration_ms: int, sleeping_min_duration_ms: int = 0) -> None:
+        self._row = _FakeSystemSettingsRow(blocking_min_duration_ms, sleeping_min_duration_ms)
         self.get_calls = 0
 
     async def get(self) -> _FakeSystemSettingsRow:
@@ -520,8 +530,11 @@ async def test_run_cycle_prefers_instance_override_over_global_setting() -> None
     await worker._run_cycle()
 
     assert blocking_repo.batches == [result.blocking_events]
-    # O global nunca foi consultado - o override por instancia ja resolveu o limite.
-    assert settings_repo.get_calls == 0
+    # O global E' consultado 1x (nao 0x): o override de BLOQUEIO ja resolveu sem precisar dele,
+    # mas o de "sleeping" (`instance.min_sleeping_time_ms`, nao setado por
+    # `_make_instance_with_override` aqui) ainda cai pro global - so 1 round-trip real ao
+    # repositorio gracas ao cache dentro de `_run_cycle` (`_get_system_settings_row`), nao 2.
+    assert settings_repo.get_calls == 1
 
 
 async def test_run_cycle_falls_back_to_global_setting_when_override_is_null() -> None:

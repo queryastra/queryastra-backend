@@ -16,6 +16,8 @@ async def test_get_settings_returns_singleton_row(client: AsyncClient) -> None:
     body = response.json()
     assert "blocking_min_duration_ms" in body
     assert isinstance(body["blocking_min_duration_ms"], int)
+    assert "sleeping_min_duration_ms" in body
+    assert isinstance(body["sleeping_min_duration_ms"], int)
 
 
 async def test_patch_settings_updates_and_persists_the_value(
@@ -36,5 +38,31 @@ async def test_patch_settings_updates_and_persists_the_value(
 
 async def test_patch_settings_rejects_negative_value(client: AsyncClient) -> None:
     response = await client.patch("/api/v1/settings", json={"blocking_min_duration_ms": -1})
+
+    assert response.status_code == 422
+
+
+async def test_patch_settings_updates_sleeping_field_independently(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """Atualização PARCIAL — mandar só `sleeping_min_duration_ms` não deve mexer no valor de
+    `blocking_min_duration_ms` já persistido (cada campo tem seu próprio auto-save na UI)."""
+    repo = SystemSettingsRepository(db_session)
+    try:
+        await repo.update_blocking_min_duration_ms(1234)
+
+        response = await client.patch("/api/v1/settings", json={"sleeping_min_duration_ms": 600000})
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["sleeping_min_duration_ms"] == 600000
+        assert body["blocking_min_duration_ms"] == 1234
+    finally:
+        await repo.update_blocking_min_duration_ms(0)
+        await repo.update_sleeping_min_duration_ms(0)
+
+
+async def test_patch_settings_rejects_negative_sleeping_value(client: AsyncClient) -> None:
+    response = await client.patch("/api/v1/settings", json={"sleeping_min_duration_ms": -1})
 
     assert response.status_code == 422

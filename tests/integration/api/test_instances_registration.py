@@ -55,7 +55,7 @@ class _FakeCollector:
     async def check_capabilities(self) -> list[CapabilityResult]:
         return self._capabilities
 
-    async def collect(self):  # pragma: no cover - fora de escopo deste teste
+    async def collect(self, **_kwargs):  # pragma: no cover - fora de escopo deste teste
         raise NotImplementedError
 
     async def close(self) -> None:

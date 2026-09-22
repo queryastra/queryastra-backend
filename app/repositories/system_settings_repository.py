@@ -20,7 +20,11 @@ class SystemSettingsRepository(BaseRepository):
         if row is not None:
             return row
 
-        row = SystemSettings(id=SYSTEM_SETTINGS_SINGLETON_ID, blocking_min_duration_ms=0)
+        row = SystemSettings(
+            id=SYSTEM_SETTINGS_SINGLETON_ID,
+            blocking_min_duration_ms=0,
+            sleeping_min_duration_ms=0,
+        )
         self._session.add(row)
         try:
             await self._session.commit()
@@ -38,6 +42,13 @@ class SystemSettingsRepository(BaseRepository):
     async def update_blocking_min_duration_ms(self, value: int) -> SystemSettings:
         row = await self.get()
         row.blocking_min_duration_ms = value
+        await self._session.commit()
+        await self._session.refresh(row)
+        return row
+
+    async def update_sleeping_min_duration_ms(self, value: int) -> SystemSettings:
+        row = await self.get()
+        row.sleeping_min_duration_ms = value
         await self._session.commit()
         await self._session.refresh(row)
         return row

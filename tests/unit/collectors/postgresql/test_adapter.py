@@ -291,6 +291,93 @@ async def test_collect_enriches_idle_blocker_identity(monkeypatch: pytest.Monkey
     assert event.blocker_machine == "10.0.0.9"
 
 
+async def test_collect_flags_idle_in_transaction_session_as_sleeping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Novas tarefas do usuario (itens 1/2): sessao com `state='idle in transaction'` ha mais
+    tempo que o limite configurado ganha a tag "sleeping" (`_ALL_SESSIONS_QUERY` ja traz `state`
+    sem o filtro `!= 'idle'`, entao nao precisa de query nova)."""
+    all_session_rows = [
+        {
+            "pid": 700,
+            "usename": "app_user",
+            "application_name": "worker",
+            "client_addr": "10.0.0.7",
+            "datname": "app_db",
+            "xact_start": datetime.now(UTC) - timedelta(seconds=10),
+            "state": "idle in transaction",
+        },
+    ]
+    fake_conn = _FakeConnection(
+        version_num=170000, session_rows=[], blocking_rows=[], all_session_rows=all_session_rows
+    )
+    _patch_connect(monkeypatch, fake_conn)
+
+    collector = PostgreSQLCollector(connection=_CONNECTION, instance_id=uuid4())
+    result = await collector.collect(sleeping_min_duration_ms=0)
+
+    assert len(result.transaction_events) == 1
+    assert result.transaction_events[0].flag_reason == "sleeping"
+
+
+async def test_collect_does_not_flag_active_session_as_sleeping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mesmo cenario, mas `state='active'` - nao e' ociosa, entao nao ganha "sleeping" mesmo com
+    o limite zerado."""
+    all_session_rows = [
+        {
+            "pid": 700,
+            "usename": "app_user",
+            "application_name": "worker",
+            "client_addr": "10.0.0.7",
+            "datname": "app_db",
+            "xact_start": datetime.now(UTC) - timedelta(seconds=10),
+            "state": "active",
+        },
+    ]
+    fake_conn = _FakeConnection(
+        version_num=170000, session_rows=[], blocking_rows=[], all_session_rows=all_session_rows
+    )
+    _patch_connect(monkeypatch, fake_conn)
+
+    collector = PostgreSQLCollector(connection=_CONNECTION, instance_id=uuid4())
+    result = await collector.collect(sleeping_min_duration_ms=0)
+
+    assert result.transaction_events == []
+
+
+async def test_collect_prefers_database_sleeping_override_over_instance_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Override por banco (`sleeping_database_overrides_ms`) vence o valor de
+    instancia/global - mesma precedencia de bloqueio."""
+    all_session_rows = [
+        {
+            "pid": 700,
+            "usename": "app_user",
+            "application_name": "worker",
+            "client_addr": "10.0.0.7",
+            "datname": "app_db",
+            "xact_start": datetime.now(UTC),
+            "state": "idle in transaction",
+        },
+    ]
+    fake_conn = _FakeConnection(
+        version_num=170000, session_rows=[], blocking_rows=[], all_session_rows=all_session_rows
+    )
+    _patch_connect(monkeypatch, fake_conn)
+
+    collector = PostgreSQLCollector(connection=_CONNECTION, instance_id=uuid4())
+    result = await collector.collect(
+        sleeping_min_duration_ms=999_999_999,
+        sleeping_database_overrides_ms={"app_db": 0},
+    )
+
+    assert len(result.transaction_events) == 1
+    assert result.transaction_events[0].flag_reason == "sleeping"
+
+
 async def test_collect_populates_blocked_object_from_pg_locks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
