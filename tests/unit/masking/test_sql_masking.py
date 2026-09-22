@@ -58,6 +58,21 @@ def test_empty_string_returns_empty_string() -> None:
     assert mask_sql_literals("") == ""
 
 
+def test_strips_trailing_nul_byte_from_driver_artifact() -> None:
+    """Bug real (Autklinux20, driver jTDS, 2026-09-22): o SQL Server as vezes devolve texto de
+    query com um byte NUL sobrando no final - o PostgreSQL rejeita `\\x00` em qualquer coluna de
+    texto (`CharacterNotInRepertoireError`), o que derrubava o insert do ciclo inteiro."""
+    sql = "FETCH API_CURSOR0000000000000496\x00"
+    assert "\x00" not in mask_sql_literals(sql)
+    assert "\x00" not in mask_sql_literals_for_display(sql)
+
+
+def test_strips_nul_byte_in_the_middle_of_text() -> None:
+    sql = "SELECT * FROM t WHERE name = 'jo\x00ao'"
+    assert "\x00" not in mask_sql_literals(sql)
+    assert "\x00" not in mask_sql_literals_for_display(sql)
+
+
 @pytest.mark.parametrize(
     ("sql", "sensitive_value"),
     [
@@ -141,6 +156,11 @@ def test_mask_showplan_xml_literals_masks_string_parameter_value() -> None:
 def test_mask_showplan_xml_literals_without_parameters_is_unchanged() -> None:
     xml = '<RelOp NodeId="0" PhysicalOp="Clustered Index Scan" EstimatedTotalSubtreeCost="1.5" />'
     assert mask_showplan_xml_literals(xml) == xml
+
+
+def test_mask_showplan_xml_literals_strips_nul_byte() -> None:
+    xml = '<RelOp NodeId="0" PhysicalOp="Clustered Index Scan" />\x00'
+    assert "\x00" not in mask_showplan_xml_literals(xml)
 
 
 class TestMaskSqlLiteralsForDisplay:

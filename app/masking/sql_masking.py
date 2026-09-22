@@ -46,6 +46,21 @@ MASK_STRING = "?"
 MASK_NUMBER = "?"
 
 
+def _strip_nul_bytes(sql: str) -> str:
+    """Remove bytes NUL (`\\x00`) do texto antes de qualquer outro processamento.
+
+    Bug real confirmado ao vivo (2026-09-22, instancia Autklinux20, driver jTDS): o SQL Server
+    as vezes devolve texto de query com um `\\x00` sobrando no final (ex.:
+    `"FETCH API_CURSOR0000000000000496\\x00"`) - artefato de buffer de string do driver/motor,
+    nao um literal de verdade. O PostgreSQL rejeita categoricamente `\\x00` em qualquer coluna de
+    texto (`CharacterNotInRepertoireError`, nao e uma questao real de encoding UTF-8), entao um
+    NUL sobrevivendo ate a persistencia derruba o `insert_batch` inteiro daquele ciclo de
+    polling. Removido aqui (nao substituido por outro caractere) porque nunca carrega informacao
+    de negocio - e sempre um artefato de transporte.
+    """
+    return sql.replace("\x00", "")
+
+
 def _mask_string_content(content: str) -> str:
     """Mascara o CONTEUDO de um literal de string (sem as aspas externas), preservando `%` na
     posição original — a pedido explícito do usuário: um padrão `LIKE` como `'%valor%'`/
@@ -113,6 +128,7 @@ def mask_sql_literals(sql: str) -> str:
     não-PII diferentes gerariam hashes diferentes, fragmentando esse agrupamento em todo o
     produto — por isso a separação em duas funções, não uma flag na mesma função.
     """
+    sql = _strip_nul_bytes(sql)
     masked = _STRING_LITERAL_RE.sub(_mask_string_literal, sql)
     masked = _NUMERIC_LITERAL_RE.sub(MASK_NUMBER, masked)
     return masked
@@ -307,6 +323,7 @@ def mask_sql_literals_for_display(sql: str) -> str:
     esse resultado voltaria a "encontrar" e mascarar esses dígitos como se fossem números soltos
     (bug real encontrado ao escrever os testes desta função).
     """
+    sql = _strip_nul_bytes(sql)
     insert_ranges = _find_insert_value_column_ranges(sql)
     string_matches = list(_STRING_LITERAL_RE.finditer(sql))
     string_spans = [(m.start(), m.end()) for m in string_matches]
@@ -371,4 +388,4 @@ def mask_showplan_xml_literals(plan_xml: str) -> str:
     def _mask(match: re.Match[str]) -> str:
         return f'{match.group(1)}="?"'
 
-    return _PARAMETER_VALUE_ATTR_RE.sub(_mask, plan_xml)
+    return _PARAMETER_VALUE_ATTR_RE.sub(_mask, _strip_nul_bytes(plan_xml))
