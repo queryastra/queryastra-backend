@@ -4,14 +4,29 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import asyncpg
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.models.instance import Instance
 from app.normalizers.metric_names import COLLECTOR_CYCLE_DURATION_MS, COLLECTOR_CYCLE_ERROR_COUNT
 from app.normalizers.models import NormalizedMetricSample
 from app.repositories._tables import metric_samples_table
 from app.repositories.metric_samples_repository import MetricSamplesRepository
+
+
+async def _refresh_continuous_aggregate(view_name: str) -> None:
+    """`CALL refresh_continuous_aggregate(...)` nao pode rodar dentro de uma transacao
+    (confirmado ao vivo contra o Postgres/TimescaleDB de dev) - a sessao ORM do app sempre abre
+    uma implicitamente (`autobegin`), entao os testes do Estagio B (`metric_samples_hourly`/
+    `_daily`) precisam de uma conexao asyncpg crua, fora do `db_session` de teste."""
+    dsn = get_settings().database_url.replace("postgresql+asyncpg://", "postgresql://")
+    conn = await asyncpg.connect(dsn)
+    try:
+        await conn.execute(f"CALL refresh_continuous_aggregate('{view_name}', NULL, NULL)")
+    finally:
+        await conn.close()
 
 
 async def test_insert_batch_persists_rows(
@@ -183,6 +198,89 @@ async def test_list_series_without_metric_names_filter_returns_none_filtered(
 
     assert {row.metric_name for row in rows} == {"metric_a", "metric_b"}
     assert rows[0].value == 1.0
+
+
+async def test_list_series_medium_window_reads_hourly_aggregate(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """Etapa 10, item 4 (Estagio B) - janela > `_RAW_TABLE_MAX_WINDOW` (2 dias) le
+    `metric_samples_hourly`, nao a hypertable bruta. Prova disso (nao so inspecao da query): a
+    amostra existe na hypertable bruta desde o insert, mas `list_series` so a devolve depois do
+    refresh do continuous aggregate - se ainda lesse `metric_samples` diretamente, apareceria
+    mesmo sem o refresh."""
+    repo = MetricSamplesRepository(db_session)
+    sample_time = datetime.now(UTC) - timedelta(days=10)
+    await repo.insert_batch(
+        [
+            NormalizedMetricSample(
+                time=sample_time,
+                target_type="instance",
+                target_id=test_instance.id,
+                metric_name="metric_medium_window",
+                value=42.0,
+            )
+        ]
+    )
+
+    window_kwargs = {
+        "since": sample_time - timedelta(hours=1),
+        "until": datetime.now(UTC),
+        "limit": 100,
+    }
+    rows_before_refresh = await repo.list_series(
+        "instance", test_instance.id, ["metric_medium_window"], **window_kwargs
+    )
+    assert rows_before_refresh == []  # ainda nao materializado no aggregate
+
+    await _refresh_continuous_aggregate("metric_samples_hourly")
+
+    rows_after_refresh = await repo.list_series(
+        "instance", test_instance.id, ["metric_medium_window"], **window_kwargs
+    )
+    assert len(rows_after_refresh) == 1
+    assert rows_after_refresh[0].value == 42.0
+
+
+async def test_list_series_long_window_reads_daily_aggregate(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """Mesma prova do teste acima, mas pra janela > `_HOURLY_MAX_WINDOW` (45 dias) -
+    `metric_samples_daily`, que depende de `metric_samples_hourly` ja estar materializado."""
+    repo = MetricSamplesRepository(db_session)
+    sample_time = datetime.now(UTC) - timedelta(days=60)
+    await repo.insert_batch(
+        [
+            NormalizedMetricSample(
+                time=sample_time,
+                target_type="instance",
+                target_id=test_instance.id,
+                metric_name="metric_long_window",
+                value=7.0,
+            )
+        ]
+    )
+
+    window_kwargs = {
+        # `metric_samples_daily.bucket` trunca pro INICIO do dia (00:00 UTC) - a folga de 1 dia
+        # (nao 1h, como no teste do hourly acima) garante que o bucket do dia caia dentro da
+        # janela mesmo quando `sample_time` e mais tarde no dia que a meia-noite.
+        "since": sample_time - timedelta(days=1),
+        "until": datetime.now(UTC),
+        "limit": 100,
+    }
+    rows_before_refresh = await repo.list_series(
+        "instance", test_instance.id, ["metric_long_window"], **window_kwargs
+    )
+    assert rows_before_refresh == []
+
+    await _refresh_continuous_aggregate("metric_samples_hourly")
+    await _refresh_continuous_aggregate("metric_samples_daily")
+
+    rows_after_refresh = await repo.list_series(
+        "instance", test_instance.id, ["metric_long_window"], **window_kwargs
+    )
+    assert len(rows_after_refresh) == 1
+    assert rows_after_refresh[0].value == 7.0
 
 
 async def test_get_latest_value_returns_none_when_no_telemetry(

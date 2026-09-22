@@ -10,7 +10,7 @@ real ja migrada.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 from uuid import UUID
 
 import sqlalchemy as sa
@@ -19,13 +19,25 @@ from app.normalizers.models import NormalizedMetricSample
 from app.repositories._tables import metric_samples_table
 from app.repositories.base import BaseRepository
 
+# Etapa 10, item 4 (Estagio B) - `metric_samples_hourly`/`_daily` agora tem `add_continuous_
+# aggregate_policy` de verdade (migration `b7c2f4e9a1d6`), entao `list_series` passa a ler dos
+# aggregates quando a janela pedida e longa demais pra ser eficiente/correta contra a hypertable
+# bruta. Limiares alinhados com a retencao ja configurada (30 dias bruto / 90 dias hora / 5 anos
+# dia) - nunca pedir dado a um nivel que ja pode ter sido expurgado por retention:
+#   - janela <= 2 dias: hypertable bruta (granularidade fina, o caso comum de "Dia"/"Por hora")
+#   - 2 dias < janela <= 45 dias: `metric_samples_hourly` (bem dentro dos 90 dias de retencao dela)
+#   - janela > 45 dias: `metric_samples_daily` (retencao de 5 anos, cobre o modo "Tudo")
+_RAW_TABLE_MAX_WINDOW = timedelta(days=2)
+_HOURLY_MAX_WINDOW = timedelta(days=45)
+
 
 class MetricSamplesRepository(BaseRepository):
     """Persistencia e leitura de `NormalizedMetricSample` na hypertable `metric_samples`.
 
-    Leitura direta da hypertable bruta — os continuous aggregates
-    (`metric_samples_hourly`/`daily`) foram criados `WITH NO DATA` e sem policy de refresh, estao
-    vazios e nunca atualizados. Nenhum metodo de leitura aqui consulta os aggregates.
+    `list_series` roteia pra `metric_samples`/`metric_samples_hourly`/`metric_samples_daily`
+    conforme o tamanho da janela pedida (ver `_RAW_TABLE_MAX_WINDOW`/`_HOURLY_MAX_WINDOW`) - os
+    demais metodos (telemetria de ciclo, baseline de anomaly detection, coverage) continuam so
+    contra a hypertable bruta, que e onde esse dado sempre existe mais recente.
     """
 
     async def insert_batch(self, samples: list[NormalizedMetricSample]) -> None:
@@ -66,15 +78,40 @@ class MetricSamplesRepository(BaseRepository):
         Page Life Expectancy, etc.) sem NENHUM ponto na tela de "Dia inteiro" — nao e so volume de
         dado, e uma metrica inteira desaparecendo silenciosamente. Mantem as amostras mais
         RECENTES por metrica (`ORDER BY time DESC` dentro do particionamento), depois reordena
-        cronologicamente pra exibicao."""
-        stmt = sa.text("""
+        cronologicamente pra exibicao.
+
+        Fonte escolhida pelo tamanho da janela (Etapa 10, item 4, Estagio B) — ver
+        `_RAW_TABLE_MAX_WINDOW`/`_HOURLY_MAX_WINDOW`: janela curta le a hypertable bruta
+        (granularidade fina), janela media le `metric_samples_hourly`, janela longa le
+        `metric_samples_daily` (`avg_value` no lugar de `value`, `bucket` no lugar de `time`) -
+        os 2 aggregates agora agrupam por `labels` tambem (migration `b7c2f4e9a1d6`), entao uma
+        metrica com `labels` distintos (ex.: freespace por volume) nunca e misturada numa unica
+        media."""
+        window = until - since
+        if window <= _RAW_TABLE_MAX_WINDOW:
+            source_table, time_column, value_column = "metric_samples", "time", "value"
+        elif window <= _HOURLY_MAX_WINDOW:
+            source_table, time_column, value_column = (
+                "metric_samples_hourly",
+                "bucket",
+                "avg_value",
+            )
+        else:
+            source_table, time_column, value_column = (
+                "metric_samples_daily",
+                "bucket",
+                "avg_value",
+            )
+
+        stmt = sa.text(f"""
             WITH ranked AS (
                 SELECT
-                    time, target_type, target_id, metric_name, labels, value,
-                    ROW_NUMBER() OVER (PARTITION BY metric_name ORDER BY time DESC) AS rn
-                FROM metric_samples
+                    {time_column} AS time, target_type, target_id, metric_name, labels,
+                    {value_column} AS value,
+                    ROW_NUMBER() OVER (PARTITION BY metric_name ORDER BY {time_column} DESC) AS rn
+                FROM {source_table}
                 WHERE target_type = :target_type AND target_id = :target_id
-                  AND time >= :since AND time <= :until
+                  AND {time_column} >= :since AND {time_column} <= :until
                   AND (CAST(:metric_names AS text[]) IS NULL OR metric_name = ANY(:metric_names))
             )
             SELECT time, target_type, target_id, metric_name, labels, value
@@ -82,6 +119,8 @@ class MetricSamplesRepository(BaseRepository):
             WHERE rn <= :limit
             ORDER BY metric_name, time
         """)
+        # source_table/time_column/value_column acima sao constantes internas fixas (nunca
+        # input do usuario) - nao ha concatenacao de dado externo na query.
         result = await self._session.execute(
             stmt,
             {
