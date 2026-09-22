@@ -156,13 +156,23 @@ class WaitTypeSummaryResponse(BaseModel):
 
 
 class QuerySampleDetailResponse(BaseModel):
-    """Uma amostra bruta de execucao, dentro do detalhe de uma query (nivel 3/folha)."""
+    """Uma amostra de execucao, dentro do detalhe de uma query (nivel 3/folha).
+
+    `wait_time_ms` continua sendo o valor BRUTO da tabela (cumulativo desde o inicio da mesma
+    espera continua - ver docstring de `QuerySamplesRepository`), mantido por transparencia/
+    depuracao. `effective_wait_ms`/`effective_cpu_ms` sao o delta corrigido por sessao (mesma
+    unidade usada por todo grafico/agregacao desta ferramenta) - a UI deve somar os dois pra
+    mostrar a duracao real desta amostra especifica, nao `wait_time_ms` sozinho (bug real
+    corrigido: a soma de `wait_time_ms` das amostras nao batia com o total do grafico de
+    espera)."""
 
     time: datetime
     duration_ms: int | None
     wait_type: str | None
     wait_event_native: str | None
     wait_time_ms: int | None
+    effective_wait_ms: int | None
+    effective_cpu_ms: int | None
     session_id: str | None
     db_user: str | None
     program: str | None
@@ -780,7 +790,7 @@ async def list_timeslice(
     db_user: Annotated[str | None, Query()] = None,
     wait_event_native: Annotated[str | None, Query()] = None,
 ) -> list[BucketEntryResponse]:
-    """"Fatia de Tempo" — drill-down temporal fino DENTRO de uma janela já estreita (uma hora, um
+    """ "Fatia de Tempo" — drill-down temporal fino DENTRO de uma janela já estreita (uma hora, um
     intervalo de 10min, etc.), pedido explícito do usuário com o "Timeslice" do SolarWinds DPA
     como referência. Generaliza os 4 `wait_time_by_bucket_and_*` já existentes (que hoje só
     aceitavam `bucket="day"/"hour"`) pras 4 granularidades sub-hora — um único endpoint com

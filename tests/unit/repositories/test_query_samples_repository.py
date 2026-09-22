@@ -1018,7 +1018,7 @@ async def test_wait_time_by_bucket_and_database_supports_sub_hour_granularity(
     second_offset_minutes: float,
     same_bucket: bool,
 ) -> None:
-    """"Fatia de Tempo" (drill-down temporal fino, pedido explicito do usuario): granularidades
+    """ "Fatia de Tempo" (drill-down temporal fino, pedido explicito do usuario): granularidades
     sub-hora usam aritmetica de epoch (sem `date_trunc` nativo pra 10min/1min) — confirma que 2
     amostras dentro da MESMA janela de bucket caem juntas, e que amostras em janelas diferentes
     nao se misturam."""
@@ -1174,6 +1174,67 @@ async def test_query_detail_returns_raw_samples_for_hash(
     assert session_ids == {"1", "2"}
     # Ordenado por time desc — o mais recente (session_id="2") vem primeiro.
     assert rows[0].session_id == "2"
+
+
+async def test_query_detail_returns_effective_wait_delta_not_raw_value(
+    db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """Regressao real (relatada pelo usuario ao vivo): a soma de `wait_time_ms` BRUTO das
+    amostras desta tela nao batia com o total do grafico de espera, que ja usava o delta
+    corrigido (`effective_wait_ms`) em todo outro lugar - `query_detail` era o unico metodo desta
+    classe que ainda devolvia o valor cru direto da tabela. Mesmo cenario de 3 amostras
+    continuas (100/250/400) usado em `test_top_sql_sums_effective_wait_delta_for_continuous_
+    wait_same_session` - aqui confirmando que `query_detail` expoe o MESMO delta por amostra
+    (100, 150, 150), nao os valores brutos (100, 250, 400)."""
+    repo = QuerySamplesRepository(db_session)
+    now = datetime.now(UTC)
+    await repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=now,
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-continuous-detail",
+                sql_text_masked="SELECT ? FROM t",
+                session_id="sess-detail",
+                wait_event_native="PAGEIOLATCH_SH",
+                wait_time_ms=100,
+            ),
+            NormalizedQuerySample(
+                time=now + timedelta(seconds=10),
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-continuous-detail",
+                sql_text_masked="SELECT ? FROM t",
+                session_id="sess-detail",
+                wait_event_native="PAGEIOLATCH_SH",
+                wait_time_ms=250,
+            ),
+            NormalizedQuerySample(
+                time=now + timedelta(seconds=20),
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-continuous-detail",
+                sql_text_masked="SELECT ? FROM t",
+                session_id="sess-detail",
+                wait_event_native="PAGEIOLATCH_SH",
+                wait_time_ms=400,
+            ),
+        ]
+    )
+
+    rows = await repo.query_detail(
+        test_instance.id,
+        "hash-continuous-detail",
+        since=now - timedelta(minutes=1),
+        until=now + timedelta(minutes=1),
+        limit=10,
+    )
+
+    assert len(rows) == 3
+    by_time = sorted(rows, key=lambda r: r.time)
+    assert [r.wait_time_ms for r in by_time] == [100, 250, 400]  # cru, preservado por transparencia
+    assert [r.effective_wait_ms for r in by_time] == [100, 150, 150]  # corrigido - o que a UI usa
 
 
 async def test_top_sql_sums_effective_wait_delta_for_continuous_wait_same_session(

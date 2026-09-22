@@ -292,9 +292,7 @@ class QuerySamplesRepository(BaseRepository):
         )
         return list((await self._session.execute(stmt)).fetchall())
 
-    async def list_distinct_database_names(
-        self, instance_id: UUID, since: datetime
-    ) -> list[str]:
+    async def list_distinct_database_names(self, instance_id: UUID, since: datetime) -> list[str]:
         """Nomes de banco distintos que essa instância teve nos últimos `since` — bem mais barato
         que `top_sql_by_database` (bug real relatado pelo usuário ao vivo: o select de banco de
         dados da tela de Configurações usava `top_sql_by_database`, que roda a CTE de
@@ -1029,20 +1027,47 @@ class QuerySamplesRepository(BaseRepository):
     async def query_detail(
         self, instance_id: UUID, sql_hash: str, since: datetime, until: datetime, limit: int
     ) -> list[sa.Row]:
-        """Amostras brutas (nao agregadas) de um `sql_hash` especifico — nivel 3 (folha) do
-        drill-down hierarquico. Usado para mostrar o historico de execucoes de uma query."""
-        stmt = (
-            sa.select(query_samples_table)
-            .where(
-                query_samples_table.c.instance_id == instance_id,
-                query_samples_table.c.sql_hash == sql_hash,
-                query_samples_table.c.time >= since,
-                query_samples_table.c.time <= until,
-            )
-            .order_by(query_samples_table.c.time.desc())
-            .limit(limit)
+        """Amostras (nao agregadas) de um `sql_hash` especifico — nivel 3 (folha) do drill-down
+        hierarquico. Usado para mostrar o historico de execucoes de uma query.
+
+        BUG REAL corrigido (relatado pelo usuario ao vivo: soma das durações desta lista nao
+        batia com o total da barra do grafico de espera, e o wait nativo/tipo tambem parecia
+        "errado"): esta query devolvia `wait_time_ms` BRUTO (cumulativo desde o inicio da MESMA
+        espera continua, ver docstring da classe) direto da tabela, sem passar pela CTE
+        `_EFFECTIVE_WAIT_SELECT` que TODO metodo agregado desta classe ja usa — a soma das
+        amostras brutas nao tinha nenhuma relacao confiavel com o total agregado (podia sobrar
+        OU faltar, dependendo de quantas amostras consecutivas cairam na mesma espera continua).
+        Corrigido computando `effective_wait_ms`/`effective_cpu_ms` (mesmo delta por sessao) e
+        devolvendo os dois - o valor exibido na UI passa a ser a soma dos dois por amostra,
+        exatamente a mesma unidade que compoe o total do grafico."""
+        stmt = sa.text(
+            f"""
+            WITH effective AS ({self._EFFECTIVE_WAIT_SELECT})
+            SELECT
+                qs.*,
+                e.effective_wait_ms,
+                e.effective_cpu_ms
+            FROM query_samples AS qs
+            INNER JOIN effective AS e
+                ON e.session_id IS NOT DISTINCT FROM qs.session_id AND e.time = qs.time
+            WHERE qs.instance_id = :instance_id AND qs.sql_hash = :sql_hash
+              AND qs.time >= :since AND qs.time <= :until
+            ORDER BY qs.time DESC
+            LIMIT :limit
+        """
         )
-        return list((await self._session.execute(stmt)).fetchall())
+        result = await self._session.execute(
+            stmt,
+            {
+                "instance_id": instance_id,
+                "sql_hash": sql_hash,
+                "since": since,
+                "until": until,
+                "limit": limit,
+                "benign_wait_types": list(self._BENIGN_WAIT_EVENT_NATIVE),
+            },
+        )
+        return list(result.fetchall())
 
     async def wait_summary(
         self, instance_id: UUID, since: datetime, until: datetime
