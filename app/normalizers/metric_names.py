@@ -24,6 +24,14 @@ PG_CHECKPOINT_SYNC_TIME_MS = "postgresql_checkpoint_sync_time_ms_total"
 PG_CHECKPOINT_BUFFERS_WRITTEN = "postgresql_checkpoint_buffers_written_total"
 
 SQLSERVER_ACTIVE_SESSION_COUNT = "sqlserver_active_session_count"
+# Contador CUMULATIVO de deadlocks desde o start do servico (`sys.dm_os_performance_counters`,
+# "Number of Deadlocks/sec", cntr_type=272696 — NAO faz parte de
+# SQLSERVER_RAW_COUNTER_TO_METRIC_NAME, tipo de contador diferente). Comparado ciclo a ciclo pelo
+# `PollingWorker` (que ja roda a cada `polling_interval_seconds`, ate 1s numa instancia critica)
+# para detectar QUE um deadlock aconteceu na hora, antes mesmo do `system_health` publicar o
+# relatorio completo (que pode demorar dezenas de minutos) — ver
+# `app.repositories.deadlock_events_repository.DeadlockEventsRepository.insert_pending`.
+SQLSERVER_DEADLOCKS_TOTAL = "sqlserver_deadlocks_total"
 SQLSERVER_PAGE_LIFE_EXPECTANCY = "sqlserver_page_life_expectancy_seconds"
 SQLSERVER_PROCESSES_BLOCKED = "sqlserver_processes_blocked"
 SQLSERVER_TARGET_SERVER_MEMORY_KB = "sqlserver_target_server_memory_kb"

@@ -165,6 +165,16 @@ class Settings(BaseSettings):
     deadlock_check_interval_seconds: int = Field(
         default=300, alias="DEADLOCK_CHECK_INTERVAL_SECONDS"
     )
+    # Timeout dedicado (nao reaproveita `collection_query_timeout_seconds`, pensado pra polling de
+    # alta frequencia) - ler o target `event_file` via `sys.fn_xe_file_target_read_file` exige
+    # abrir e escanear arquivos `.xel` em disco (varios MB cada, tipicamente uns 4-5 arquivos
+    # retidos), bem mais lento que o antigo `ring_buffer` em memoria. Confirmado ao vivo: com o
+    # timeout generico (5s) varias instancias reais estouravam esse limite. 30s e generoso o
+    # suficiente pra essa checagem de baixa frequencia (1x a cada `deadlock_check_interval_seconds`,
+    # nunca por instancia mais de uma vez por ciclo) sem arriscar travar o supervisor.
+    deadlock_query_timeout_seconds: float = Field(
+        default=30.0, alias="DEADLOCK_QUERY_TIMEOUT_SECONDS"
+    )
 
     # Canal de e-mail de notificacao de alerta (`app.workers.alerting_worker`). Todos vazios por
     # padrao = canal desabilitado (nenhum envio real, mesmo default seguro do webhook). So

@@ -81,6 +81,7 @@ from app.masking.sql_masking import (
 )
 from app.normalizers.metric_names import (
     SQLSERVER_ACTIVE_SESSION_COUNT,
+    SQLSERVER_DEADLOCKS_TOTAL,
     SQLSERVER_INSTANCE_CPU_PERCENT,
     SQLSERVER_OS_CPU_PERCENT,
     SQLSERVER_RAW_COUNTER_TO_METRIC_NAME,
@@ -303,6 +304,24 @@ _PERFORMANCE_COUNTERS_QUERY = """
       AND RTRIM(instance_name) = ''
 """
 
+# Contador CUMULATIVO (nunca zera, so cresce) de deadlocks desde que o servico do SQL Server
+# subiu — `cntr_type=272696` (PERF_COUNTER_BULK_COUNT), tipo diferente dos 4 contadores RAW
+# acima (`cntr_type=65792`), por isso query separada. Usado pelo `PollingWorker` (que ja roda a
+# cada `polling_interval_seconds`, ate 1s numa instancia critica) para detectar um deadlock NA
+# HORA em que acontece, comparando este valor contra o ciclo anterior — sem isso, so saberiamos
+# depois que o SQL Server publicasse o relatorio completo em `system_health`, o que na pratica
+# demorou 25-35min num teste real do usuario (ver `_DEADLOCK_FILE_TARGET_QUERY`/
+# `_DEADLOCK_RING_BUFFER_QUERY`). Deteccao instantanea != detalhe instantaneo: aqui so sabemos
+# QUE aconteceu, os detalhes (vitima/sobrevivente/SQL/recurso) continuam vindo depois, do
+# `system_health`, via `DeadlockEventsRepository` reconciliando o registro "pendente" criado por
+# esta deteccao com o registro completo assim que ele aparecer.
+_DEADLOCK_COUNTER_QUERY = """
+    SELECT cntr_value
+    FROM sys.dm_os_performance_counters
+    WHERE RTRIM(counter_name) = 'Number of Deadlocks/sec'
+      AND RTRIM(instance_name) = '_Total'
+"""
+
 # Consulta oficial da Microsoft pra CPU via o ring buffer de scheduler monitor (atualizado a cada
 # ~1 minuto pelo proprio motor, independente do intervalo de poll) — sem permissao alem de VIEW
 # SERVER STATE (ja mandatoria). `SystemIdle` = % ocioso do SO inteiro; `SQLProcessUtilization` = %
@@ -392,16 +411,40 @@ _REPLICA_STATE_QUERY = """
     INNER JOIN sys.availability_replicas AS ars ON ars.replica_id = drs.replica_id
 """
 
-# Etapa 10, item 7 (Deadlocks) — ring buffer `system_health`, sessao Extended Events nativa e
-# sempre ativa por padrao desde o SQL Server 2008 (nunca precisa ser criada). `target_data` e um
-# XML com varios tipos de evento acumulados recentemente (buffer circular, poucos MB) — filtrar
-# so `xml_deadlock_report` e mais simples/barato fazendo o parse em Python (`_build_deadlock_
-# events`) do que via XQuery T-SQL.
+# Etapa 10, item 7 (Deadlocks) — sessao Extended Events `system_health`, nativa e sempre ativa
+# por padrao desde o SQL Server 2008 (nunca precisa ser criada).
+#
+# Historico real desta query (2026-09-21, confirmado ao vivo pelo usuario, 2 rodadas de teste):
+# o target `ring_buffer` (usado aqui originalmente) e um buffer em MEMORIA de poucos MB, com um
+# problema documentado em varias versoes do SQL Server de NAO refletir `xml_deadlock_report` de
+# forma confiavel — no teste do usuario, o evento nunca apareceu ali (nem via query direta dele
+# no SSMS). Trocado para o target `event_file` (`.xel` no disco, `sys.fn_xe_file_target_read_file`)
+# por ser a alternativa documentada pela comunidade SQL Server — mas o mesmo teste ao vivo revelou
+# que, NESTA instancia, o `event_file` estava BEM MAIS lento a refletir o evento que o proprio
+# `ring_buffer` (o `ring_buffer`, com o codigo antigo, achou o mesmo deadlock ~24min depois do
+# evento; o `event_file` ainda nao tinha o mesmo deadlock 35+min depois). Ou seja: nenhum dos 2
+# targets e consistentemente mais rapido — o atraso de dispatch e imprevisivel e varia por
+# instancia/carga. Decisao final: consultar OS DOIS e mesclar (deduplicado em
+# `_build_deadlock_events`, ja que o mesmo deadlock frequentemente aparece nos dois eventualmente)
+# — maximiza a chance de pegar o evento assim que QUALQUER um dos dois o tiver, sem trocar
+# confiabilidade por velocidade ou vice-versa.
 _DEADLOCK_RING_BUFFER_QUERY = """
     SELECT CAST(xet.target_data AS NVARCHAR(MAX)) AS target_data
     FROM sys.dm_xe_session_targets AS xet
     INNER JOIN sys.dm_xe_sessions AS xes ON xes.address = xet.event_session_address
     WHERE xes.name = 'system_health' AND xet.target_name = 'ring_buffer'
+"""
+
+# `'system_health*.xel'` (sem caminho) resolve para a pasta padrao `MSSQL\\Log` da propria
+# instancia desde o SQL Server 2016 — sem precisar descobrir/hardcodar o caminho. Mesma permissao
+# ja exigida (`VIEW SERVER STATE` no SQL Server ate 2019; 2022+ pede
+# `VIEW SERVER PERFORMANCE STATE`, fora de escopo tratar aqui). Janela de 1h (bem mais que os
+# 5min do ciclo do supervisor) da margem de sobra pra qualquer atraso de flush do arquivo.
+_DEADLOCK_FILE_TARGET_QUERY = """
+    SELECT event_data, timestamp_utc
+    FROM sys.fn_xe_file_target_read_file('system_health*.xel', NULL, NULL, NULL)
+    WHERE object_name = 'xml_deadlock_report'
+      AND timestamp_utc >= DATEADD(HOUR, -1, SYSUTCDATETIME())
 """
 
 # Etapa 11 (plano de execucao sob demanda) — busca o `plan_handle` cujo statement isolado
@@ -700,6 +743,9 @@ def _connect_and_collect(
         cursor.execute(_CPU_UTILIZATION_QUERY)
         cpu_row = cursor.fetchone()
 
+        cursor.execute(_DEADLOCK_COUNTER_QUERY)
+        deadlock_counter_row = cursor.fetchone()
+
         cursor.close()
     finally:
         conn.close()
@@ -766,7 +812,7 @@ def _connect_and_collect(
         collected_at,
     )
     metric_samples = _build_metric_samples(
-        session_rows, counter_rows, cpu_row, instance_id, collected_at
+        session_rows, counter_rows, cpu_row, deadlock_counter_row, instance_id, collected_at
     )
     transaction_events = _build_transaction_events(
         transaction_rows,
@@ -1039,8 +1085,13 @@ def _connect_and_collect_deadlocks(
     instance_id: UUID,
     query_timeout_seconds: float,
 ) -> list[NormalizedDeadlockEvent]:
-    """Helper sincrono (mesmo padrao de `_connect_and_collect_missing_indexes`): le o ring buffer
-    `system_health` e extrai os eventos `xml_deadlock_report` acumulados recentemente."""
+    """Helper sincrono (mesmo padrao de `_connect_and_collect_missing_indexes`): le AMBOS os
+    targets da sessao `system_health` (`event_file` em disco e `ring_buffer` em memoria) e
+    mescla os eventos `xml_deadlock_report` de cada um antes de normalizar — nenhum dos dois se
+    mostrou consistentemente mais rapido ao vivo (ver docstring de `_DEADLOCK_RING_BUFFER_QUERY`),
+    entao consultar os dois maximiza a chance de capturar o evento assim que QUALQUER um dos dois
+    o tiver. Duplicatas entre os dois targets (o mesmo deadlock aparecendo em ambos) sao
+    resolvidas depois, na reconciliacao de `DeadlockEventsRepository.insert_new`."""
     login_timeout_seconds = int(connection.connect_timeout_seconds)
     conn = pymssql.connect(
         server=connection.host,
@@ -1052,18 +1103,48 @@ def _connect_and_collect_deadlocks(
     )
     try:
         cursor = conn.cursor(as_dict=True)
-        cursor.execute(_DEADLOCK_RING_BUFFER_QUERY)
+        cursor.execute(_DEADLOCK_FILE_TARGET_QUERY)
         rows = list(cursor.fetchall())
+        cursor.execute(_DEADLOCK_RING_BUFFER_QUERY)
+        ring_buffer_rows = list(cursor.fetchall())
         cursor.close()
     finally:
         conn.close()
 
+    rows.extend(_extract_ring_buffer_event_rows(ring_buffer_rows, instance_id))
     return _build_deadlock_events(rows, instance_id)
 
 
+def _extract_ring_buffer_event_rows(
+    ring_buffer_rows: list[dict], instance_id: UUID
+) -> list[dict[str, Any]]:
+    """O target `ring_buffer` devolve 1 linha com um XML-envelope (`target_data`) contendo VARIOS
+    `<event>` acumulados recentemente — diferente do target `event_file`, que ja filtra/devolve 1
+    linha por evento. Isola cada `<event name="xml_deadlock_report">` do envelope e devolve no
+    MESMO formato de linha que `_build_deadlock_events` ja espera (`event_data` = XML do `<event>`
+    isolado, `timestamp_utc` ausente — `_build_deadlock_events` cai pro atributo `timestamp` do
+    proprio `<event>` nesse caso)."""
+    event_rows: list[dict[str, Any]] = []
+    for row in ring_buffer_rows:
+        target_data = row.get("target_data")
+        if not target_data:
+            continue
+        try:
+            root = ElementTree.fromstring(target_data)
+        except ElementTree.ParseError:
+            logger.warning(
+                "Ring buffer system_health com XML invalido para instance_id=%s - ignorado",
+                instance_id,
+            )
+            continue
+        for event_el in root.findall(".//event[@name='xml_deadlock_report']"):
+            event_rows.append({"event_data": ElementTree.tostring(event_el, encoding="unicode")})
+    return event_rows
+
+
 def _build_deadlock_events(rows: list[dict], instance_id: UUID) -> list[NormalizedDeadlockEvent]:
-    """Faz o parse do XML do ring buffer (uma linha por target `ring_buffer` — normalmente 1 só)
-    e extrai cada evento `xml_deadlock_report` como um `NormalizedDeadlockEvent`.
+    """Faz o parse do XML de cada linha (uma linha por evento `xml_deadlock_report` do target
+    `event_file`, ja filtrado na query — `event_data` e o `<event>` inteiro daquele evento).
 
     O `<deadlock>` de cada evento tem `<victim-list>` (id do processo vitima, escolhido pelo
     motor pra rollback), `<process-list>` (TODOS os processos envolvidos — sessao, banco,
@@ -1076,25 +1157,26 @@ def _build_deadlock_events(rows: list[dict], instance_id: UUID) -> list[Normaliz
     """
     events: list[NormalizedDeadlockEvent] = []
     for row in rows:
-        target_data = row.get("target_data")
-        if not target_data:
+        event_data = row.get("event_data")
+        if not event_data:
             continue
         try:
-            root = ElementTree.fromstring(target_data)
+            event_el = ElementTree.fromstring(event_data)
         except ElementTree.ParseError:
             logger.warning(
-                "Ring buffer system_health com XML invalido para instance_id=%s - ignorado",
+                "Evento xml_deadlock_report com XML invalido para instance_id=%s - ignorado",
                 instance_id,
             )
             continue
 
-        for event_el in root.findall(".//event[@name='xml_deadlock_report']"):
-            deadlock_el = event_el.find("./data[@name='xml_report']/value/deadlock")
-            if deadlock_el is None:
-                continue
-
-            timestamp_raw = event_el.get("timestamp")
-            time_value = _parse_xe_timestamp(timestamp_raw)
+        deadlock_el = event_el.find("./data[@name='xml_report']/value/deadlock")
+        if deadlock_el is not None:
+            timestamp_value = row.get("timestamp_utc")
+            time_value = (
+                timestamp_value
+                if isinstance(timestamp_value, datetime)
+                else _parse_xe_timestamp(event_el.get("timestamp"))
+            )
 
             process_elements = deadlock_el.findall("./process-list/process")
             victim_ids = {
@@ -1707,6 +1789,7 @@ def _build_metric_samples(
     session_rows: list[dict],
     counter_rows: list[dict],
     cpu_row: dict | None,
+    deadlock_counter_row: dict | None,
     instance_id: UUID,
     collected_at: datetime,
 ) -> list[NormalizedMetricSample]:
@@ -1754,6 +1837,16 @@ def _build_metric_samples(
                 target_id=instance_id,
                 metric_name=metric_name,
                 value=float(row["cntr_value"]),
+            )
+        )
+    if deadlock_counter_row is not None:
+        samples.append(
+            NormalizedMetricSample(
+                time=collected_at,
+                target_type="instance",
+                target_id=instance_id,
+                metric_name=SQLSERVER_DEADLOCKS_TOTAL,
+                value=float(deadlock_counter_row["cntr_value"]),
             )
         )
     return samples
@@ -2071,10 +2164,14 @@ class SQLServerCollector:
         )
 
     async def collect_deadlock_events(self) -> list[NormalizedDeadlockEvent]:
-        """Ring buffer `system_health` (Etapa 10, item 7) — sempre ativo por padrao desde o SQL
-        Server 2008, sem precisar criar nenhuma Extended Events session nova. Instancia inteira
-        numa unica chamada, retido/deduplicado pelo repositorio (o mesmo deadlock pode aparecer
-        em chamadas consecutivas enquanto ainda estiver no ring buffer)."""
+        """Target `event_file` da sessao `system_health` (Etapa 10, item 7) — sempre ativa por
+        padrao desde o SQL Server 2008, sem precisar criar nenhuma Extended Events session nova.
+        Instancia inteira numa unica chamada, retido/deduplicado pelo repositorio (o mesmo
+        deadlock pode aparecer em chamadas consecutivas dentro da janela de 1h da query).
+
+        Timeout proprio (`deadlock_query_timeout_seconds`, bem maior que o das coletas de alta
+        frequencia) — ler `.xel` em disco e mais lento que o `ring_buffer` em memoria usado antes
+        aqui, confirmado ao vivo (timeout generico de poll estourava em instancias reais)."""
         if self._instance_id is None:
             raise ValueError(
                 "SQLServerCollector.collect_deadlock_events requer instance_id de uma instancia "
@@ -2083,14 +2180,14 @@ class SQLServerCollector:
         settings = get_settings()
         overall_timeout = (
             self._connection_params.connect_timeout_seconds
-            + settings.collection_query_timeout_seconds
+            + settings.deadlock_query_timeout_seconds
         )
         return await asyncio.wait_for(
             asyncio.to_thread(
                 _connect_and_collect_deadlocks,
                 self._connection_params,
                 self._instance_id,
-                settings.collection_query_timeout_seconds,
+                settings.deadlock_query_timeout_seconds,
             ),
             timeout=overall_timeout,
         )

@@ -14,7 +14,11 @@ from uuid import uuid4
 from app.collectors.base import CollectionResult
 from app.core.events import event_bus
 from app.models.instance import Instance, InstanceMaintenanceWindow
-from app.normalizers.metric_names import COLLECTOR_CYCLE_DURATION_MS, COLLECTOR_CYCLE_ERROR_COUNT
+from app.normalizers.metric_names import (
+    COLLECTOR_CYCLE_DURATION_MS,
+    COLLECTOR_CYCLE_ERROR_COUNT,
+    SQLSERVER_DEADLOCKS_TOTAL,
+)
 from app.normalizers.models import (
     NormalizedBlockingEvent,
     NormalizedMetricSample,
@@ -45,12 +49,37 @@ class _FakeCollector:
         return None
 
 
+@dataclass
+class _FakeLatestValueRow:
+    value: float
+
+
 class _FakeMetricSamplesRepository:
-    def __init__(self) -> None:
+    def __init__(self, latest_value: float | None = None) -> None:
         self.batches: list[list[NormalizedMetricSample]] = []
+        self._latest_value = latest_value
 
     async def insert_batch(self, samples: list[NormalizedMetricSample]) -> None:
         self.batches.append(samples)
+
+    async def get_latest_value(
+        self,
+        target_type: str,
+        target_id,
+        metric_name: str,  # noqa: ANN001 - fake, assinatura simples
+    ) -> _FakeLatestValueRow | None:
+        if self._latest_value is None:
+            return None
+        return _FakeLatestValueRow(value=self._latest_value)
+
+
+class _FakeDeadlockEventsRepository:
+    def __init__(self) -> None:
+        self.pending_calls: list[tuple] = []
+
+    async def insert_pending(self, instance_id, time):  # noqa: ANN001, ANN201 - fake, assinatura simples
+        self.pending_calls.append((instance_id, time))
+        return None
 
 
 class _FakeQuerySamplesRepository:
@@ -596,3 +625,82 @@ async def test_run_cycle_database_override_does_not_affect_other_databases() -> 
     await worker._run_cycle()
 
     assert blocking_repo.batches == [[]]
+
+
+async def test_run_cycle_creates_pending_deadlocks_when_counter_increments() -> None:
+    """Deteccao instantanea (bug real relatado ao vivo pelo usuario) — quando o repositorio de
+    deadlock e injetado e o contador `sqlserver_deadlocks_total` subiu desde o ciclo anterior,
+    cria N registros pendentes (N = incremento), um por deadlock detectado."""
+    instance_id = uuid4()
+    base_result = _build_result(instance_id)
+    collected_at = base_result.collected_at
+    result = replace(
+        base_result,
+        metric_samples=[
+            *base_result.metric_samples,
+            NormalizedMetricSample(
+                time=collected_at,
+                target_type="instance",
+                target_id=instance_id,
+                metric_name=SQLSERVER_DEADLOCKS_TOTAL,
+                value=5.0,
+            ),
+        ],
+    )
+    collector = _FakeCollector(result=result)
+    metric_repo = _FakeMetricSamplesRepository(latest_value=3.0)  # valor do ciclo anterior
+    deadlock_repo = _FakeDeadlockEventsRepository()
+    instances_repo = _FakeInstancesRepository(instance=None)
+
+    worker = PollingWorker(
+        instance_id,
+        collector,
+        10,
+        metric_repo,
+        _FakeQuerySamplesRepository(),
+        _FakeBlockingEventsRepository(),
+        instances_repo,
+        deadlock_events_repository=deadlock_repo,
+    )
+    await worker._run_cycle()
+
+    assert len(deadlock_repo.pending_calls) == 2  # 5 - 3 = 2 deadlocks novos
+    assert all(call[0] == instance_id for call in deadlock_repo.pending_calls)
+
+
+async def test_run_cycle_skips_pending_deadlock_when_counter_unchanged() -> None:
+    """Sem incremento (ou sem baseline anterior) — nenhum registro pendente criado, mesmo com o
+    repositorio injetado."""
+    instance_id = uuid4()
+    base_result = _build_result(instance_id)
+    result = replace(
+        base_result,
+        metric_samples=[
+            *base_result.metric_samples,
+            NormalizedMetricSample(
+                time=base_result.collected_at,
+                target_type="instance",
+                target_id=instance_id,
+                metric_name=SQLSERVER_DEADLOCKS_TOTAL,
+                value=3.0,
+            ),
+        ],
+    )
+    collector = _FakeCollector(result=result)
+    metric_repo = _FakeMetricSamplesRepository(latest_value=3.0)  # mesmo valor - sem incremento
+    deadlock_repo = _FakeDeadlockEventsRepository()
+    instances_repo = _FakeInstancesRepository(instance=None)
+
+    worker = PollingWorker(
+        instance_id,
+        collector,
+        10,
+        metric_repo,
+        _FakeQuerySamplesRepository(),
+        _FakeBlockingEventsRepository(),
+        instances_repo,
+        deadlock_events_repository=deadlock_repo,
+    )
+    await worker._run_cycle()
+
+    assert deadlock_repo.pending_calls == []

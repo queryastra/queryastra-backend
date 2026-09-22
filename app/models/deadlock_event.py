@@ -40,7 +40,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
@@ -68,3 +68,8 @@ class DeadlockEvent(Base):
     resource_description: Mapped[str | None] = mapped_column(Text, nullable=True)
     raw_xml_masked: Mapped[str | None] = mapped_column(Text, nullable=True)
     detail: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    # Detecao instantanea (contador `sqlserver_deadlocks_total`, `PollingWorker`) — True enquanto
+    # so sabemos QUE um deadlock aconteceu (so `instance_id`/`time` preenchidos), False assim que
+    # `DeadlockEventsRepository` reconcilia com o relatorio completo vindo do `system_health`
+    # (nunca cria uma segunda linha pro mesmo evento).
+    pending: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")

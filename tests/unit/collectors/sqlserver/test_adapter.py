@@ -76,6 +76,7 @@ class _FakeCursor:
         transaction_database_rows: list,
         cpu_row: dict[str, Any] | None = None,
         partitions_rows: list | None = None,
+        deadlock_counter_row: dict[str, Any] | None = None,
     ) -> None:
         self._version_row = version_row
         self._session_rows = session_rows
@@ -86,6 +87,7 @@ class _FakeCursor:
         self._transaction_database_rows = transaction_database_rows
         self._cpu_row = cpu_row
         self._partitions_rows = partitions_rows or []
+        self._deadlock_counter_row = deadlock_counter_row
         self._pending: list[dict[str, Any]] = []
 
     def execute(self, query: str, params: tuple[object, ...] | None = None) -> None:
@@ -111,6 +113,13 @@ class _FakeCursor:
             self._pending = self._transaction_rows
         elif "dm_exec_sessions" in query:
             self._pending = self._all_session_rows
+        # Checagem mais especifica ANTES do branch generico de performance_counters logo abaixo -
+        # a query do contador de deadlocks tambem consulta `sys.dm_os_performance_counters`, so
+        # que filtrada por outro `counter_name`/`cntr_type` (ver `_DEADLOCK_COUNTER_QUERY`).
+        elif "Number of Deadlocks" in query:
+            self._pending = (
+                [self._deadlock_counter_row] if self._deadlock_counter_row is not None else []
+            )
         elif "dm_os_performance_counters" in query:
             self._pending = self._counter_rows
         elif "dm_os_ring_buffers" in query:
@@ -142,6 +151,7 @@ class _FakeConnection:
         transaction_database_rows: list,
         cpu_row: dict[str, Any] | None = None,
         partitions_rows: list | None = None,
+        deadlock_counter_row: dict[str, Any] | None = None,
     ) -> None:
         self._version_row = version_row
         self._session_rows = session_rows
@@ -152,6 +162,7 @@ class _FakeConnection:
         self._transaction_database_rows = transaction_database_rows
         self._cpu_row = cpu_row
         self._partitions_rows = partitions_rows
+        self._deadlock_counter_row = deadlock_counter_row
         self.closed = False
 
     def cursor(self, as_dict: bool = False) -> _FakeCursor:
@@ -166,6 +177,7 @@ class _FakeConnection:
             self._transaction_database_rows,
             self._cpu_row,
             self._partitions_rows,
+            self._deadlock_counter_row,
         )
 
     def close(self) -> None:
@@ -183,6 +195,7 @@ def _patch_connect(
     transaction_database_rows: list | None = None,
     cpu_row: dict[str, Any] | None = None,
     partitions_rows: list | None = None,
+    deadlock_counter_row: dict[str, Any] | None = None,
 ) -> _FakeConnection:
     # `all_session_rows` default: identidade equivalente a `session_rows` (converte cada linha de
     # request pras 4 colunas de `_ALL_SESSIONS_QUERY`) — suficiente pra maioria dos testes, que
@@ -207,6 +220,7 @@ def _patch_connect(
         transaction_database_rows if transaction_database_rows is not None else [],
         cpu_row,
         partitions_rows,
+        deadlock_counter_row,
     )
 
     def fake_connect(**kwargs: object) -> _FakeConnection:
@@ -244,6 +258,43 @@ async def test_collect_parses_cpu_utilization_from_ring_buffer(
     by_name = {sample.metric_name: sample.value for sample in result.metric_samples}
     assert by_name["sqlserver_instance_cpu_percent"] == 12.0
     assert by_name["sqlserver_os_cpu_percent"] == 20.0
+
+
+async def test_collect_parses_deadlock_counter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`sqlserver_deadlocks_total` vem do contador cumulativo dedicado (query separada da dos 4
+    contadores RAW, `cntr_type` diferente) — usado pelo `PollingWorker` pra detectar um deadlock
+    na hora (comparando ciclo a ciclo), sem esperar o `system_health` publicar o relatorio
+    completo."""
+    _patch_connect(
+        monkeypatch,
+        version_row={"product_version": "16.0.1000.6"},
+        session_rows=[],
+        counter_rows=_COUNTER_ROWS,
+        deadlock_counter_row={"cntr_value": 7},
+    )
+
+    collector = SQLServerCollector(connection=_CONNECTION, instance_id=uuid4())
+    result = await collector.collect()
+
+    by_name = {sample.metric_name: sample.value for sample in result.metric_samples}
+    assert by_name["sqlserver_deadlocks_total"] == 7.0
+
+
+async def test_collect_omits_deadlock_counter_when_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sem a linha (raro, mas honesto — nao inventa 0) - a metrica simplesmente nao aparece."""
+    _patch_connect(
+        monkeypatch,
+        version_row={"product_version": "16.0.1000.6"},
+        session_rows=[],
+        counter_rows=_COUNTER_ROWS,
+        deadlock_counter_row=None,
+    )
+
+    collector = SQLServerCollector(connection=_CONNECTION, instance_id=uuid4())
+    result = await collector.collect()
+
+    metric_names = {sample.metric_name for sample in result.metric_samples}
+    assert "sqlserver_deadlocks_total" not in metric_names
 
 
 async def test_collect_does_not_flag_transaction_for_a_benign_prev_error(

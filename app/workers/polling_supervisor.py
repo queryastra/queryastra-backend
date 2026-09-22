@@ -29,6 +29,7 @@ from app.core.logging import get_logger
 from app.models.instance import Instance
 from app.repositories.blocking_events_repository import BlockingEventsRepository
 from app.repositories.blocking_incidents_repository import BlockingIncidentsRepository
+from app.repositories.deadlock_events_repository import DeadlockEventsRepository
 from app.repositories.instances_repository import InstancesRepository
 from app.repositories.metric_samples_repository import MetricSamplesRepository
 from app.repositories.query_samples_repository import QuerySamplesRepository
@@ -51,6 +52,7 @@ _BlockingEventsRepositoryFactory = Callable[[AsyncSession], BlockingEventsReposi
 _TransactionEventsRepositoryFactory = Callable[[AsyncSession], TransactionEventsRepository]
 _BlockingIncidentsRepositoryFactory = Callable[[AsyncSession], BlockingIncidentsRepository]
 _SystemSettingsRepositoryFactory = Callable[[AsyncSession], SystemSettingsRepository]
+_DeadlockEventsRepositoryFactory = Callable[[AsyncSession], DeadlockEventsRepository]
 
 
 @dataclass(slots=True)
@@ -89,6 +91,9 @@ class PollingSupervisor:
         system_settings_repository_factory: _SystemSettingsRepositoryFactory = (
             SystemSettingsRepository
         ),
+        deadlock_events_repository_factory: _DeadlockEventsRepositoryFactory = (
+            DeadlockEventsRepository
+        ),
     ) -> None:
         self._session_factory = session_factory
         self._discovery_interval_seconds = discovery_interval_seconds
@@ -101,6 +106,7 @@ class PollingSupervisor:
         self._transaction_events_repository_factory = transaction_events_repository_factory
         self._blocking_incidents_repository_factory = blocking_incidents_repository_factory
         self._system_settings_repository_factory = system_settings_repository_factory
+        self._deadlock_events_repository_factory = deadlock_events_repository_factory
         self._stop_event = asyncio.Event()
         self._instance_tasks: dict[UUID, _InstanceTaskHandle] = {}
 
@@ -268,6 +274,9 @@ class PollingSupervisor:
                         self._transaction_events_repository_factory(session),
                         self._blocking_incidents_repository_factory(session),
                         system_settings_repository=self._system_settings_repository_factory(
+                            session
+                        ),
+                        deadlock_events_repository=self._deadlock_events_repository_factory(
                             session
                         ),
                     )

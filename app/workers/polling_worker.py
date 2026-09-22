@@ -46,10 +46,15 @@ from app.collectors.base import Collector
 from app.core.events import event_bus
 from app.core.logging import get_logger
 from app.models.instance import Instance
-from app.normalizers.metric_names import COLLECTOR_CYCLE_DURATION_MS, COLLECTOR_CYCLE_ERROR_COUNT
+from app.normalizers.metric_names import (
+    COLLECTOR_CYCLE_DURATION_MS,
+    COLLECTOR_CYCLE_ERROR_COUNT,
+    SQLSERVER_DEADLOCKS_TOTAL,
+)
 from app.normalizers.models import NormalizedBlockingEvent, NormalizedMetricSample
 from app.repositories.blocking_events_repository import BlockingEventsRepository
 from app.repositories.blocking_incidents_repository import BlockingIncidentsRepository
+from app.repositories.deadlock_events_repository import DeadlockEventsRepository
 from app.repositories.instance_database_lock_overrides_repository import (
     InstanceDatabaseLockOverridesRepository,
 )
@@ -58,6 +63,12 @@ from app.repositories.metric_samples_repository import MetricSamplesRepository
 from app.repositories.query_samples_repository import QuerySamplesRepository
 from app.repositories.system_settings_repository import SystemSettingsRepository
 from app.repositories.transaction_events_repository import TransactionEventsRepository
+
+# Cap defensivo pro numero de registros "pendentes" criados num unico ciclo, mesmo que o
+# contador cumulativo salte um valor muito maior (ex.: apos um restart do SQL Server que zera o
+# contador e o proximo ciclo o ve "subir" de 0 pra um valor alto de outra fonte - cenario nao
+# esperado na pratica, mas evita uma inundacao de linhas pendentes por engano).
+_MAX_PENDING_DEADLOCKS_PER_CYCLE = 10
 
 logger = get_logger(__name__)
 
@@ -104,6 +115,7 @@ class PollingWorker:
         instance_database_lock_overrides_repository: (
             InstanceDatabaseLockOverridesRepository | None
         ) = None,
+        deadlock_events_repository: DeadlockEventsRepository | None = None,
     ) -> None:
         self._instance_id = instance_id
         self._collector = collector
@@ -127,6 +139,11 @@ class PollingWorker:
         self._instance_database_lock_overrides_repository = (
             instance_database_lock_overrides_repository
         )
+        # Opcional, keyword-only (default None) — deteccao instantanea de deadlock (bug real
+        # relatado ao vivo pelo usuario: o `system_health` demorou 25-35min pra publicar o
+        # relatorio completo). So ativa quando o chamador injeta o repositorio de verdade, mesmo
+        # padrao dos demais repositorios opcionais acima.
+        self._deadlock_events_repository = deadlock_events_repository
         self._stop_event = asyncio.Event()
 
     async def run(self) -> None:
@@ -164,8 +181,45 @@ class PollingWorker:
         error_count = 0
         try:
             result = await self._collector.collect()
+
+            # Deteccao instantanea de deadlock (bug real relatado ao vivo pelo usuario, ver
+            # `DeadlockEventsRepository`) — a leitura da metrica PRECEDE o `insert_batch` abaixo
+            # (que grava o valor NOVO), senao `get_latest_value` devolveria o valor que estamos
+            # prestes a inserir agora, nao o do ciclo anterior.
+            previous_deadlock_count: float | None = None
+            if self._deadlock_events_repository is not None:
+                previous_row = await self._metric_samples_repository.get_latest_value(
+                    "instance", self._instance_id, SQLSERVER_DEADLOCKS_TOTAL
+                )
+                previous_deadlock_count = previous_row.value if previous_row is not None else None
+
             await self._metric_samples_repository.insert_batch(result.metric_samples)
             await self._query_samples_repository.insert_batch(result.query_samples)
+
+            if self._deadlock_events_repository is not None and previous_deadlock_count is not None:
+                new_deadlock_sample = next(
+                    (
+                        sample
+                        for sample in result.metric_samples
+                        if sample.metric_name == SQLSERVER_DEADLOCKS_TOTAL
+                    ),
+                    None,
+                )
+                if (
+                    new_deadlock_sample is not None
+                    and new_deadlock_sample.value > previous_deadlock_count
+                ):
+                    increment = int(new_deadlock_sample.value - previous_deadlock_count)
+                    for _ in range(min(increment, _MAX_PENDING_DEADLOCKS_PER_CYCLE)):
+                        await self._deadlock_events_repository.insert_pending(
+                            self._instance_id, now
+                        )
+                    logger.info(
+                        "Deadlock detectado na hora (contador incrementou) "
+                        "instance_id=%s increment=%s",
+                        self._instance_id,
+                        increment,
+                    )
 
             blocking_events = result.blocking_events
             # Override ad-hoc por instancia (`instance.min_lock_time_ms`, a pedido explicito do
@@ -175,10 +229,7 @@ class PollingWorker:
             instance_min_duration_ms: int | None = (
                 instance.min_lock_time_ms if instance is not None else None
             )
-            if (
-                instance_min_duration_ms is None
-                and self._system_settings_repository is not None
-            ):
+            if instance_min_duration_ms is None and self._system_settings_repository is not None:
                 instance_min_duration_ms = (
                     await self._system_settings_repository.get()
                 ).blocking_min_duration_ms
