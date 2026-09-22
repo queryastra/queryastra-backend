@@ -42,6 +42,10 @@ class DeadlockEventResponse(BaseModel):
     resource_description: str | None
     raw_xml_masked: str | None
     detail: dict[str, Any] | None
+    # Deteccao instantanea (PollingWorker, contador sqlserver_deadlocks_total) - True enquanto so
+    # sabemos QUE um deadlock aconteceu (demais campos ainda None); False assim que
+    # DeadlockEventsRepository reconcilia com o relatorio completo do system_health.
+    pending: bool
 
     model_config = {"from_attributes": True}
 
