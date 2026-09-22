@@ -47,6 +47,8 @@ class TransactionEventResponse(BaseModel):
     begin_time: datetime | None
     state: str | None
     last_error_code: int | None
+    confirmed_error_code: int | None
+    confirmed_error_message_masked: str | None
     first_seen_at: datetime
     last_seen_at: datetime
     closed_at: datetime | None
@@ -141,6 +143,8 @@ def _to_response(
         begin_time=row.begin_time,
         state=row.state,
         last_error_code=row.last_error_code,
+        confirmed_error_code=row.confirmed_error_code,
+        confirmed_error_message_masked=row.confirmed_error_message_masked,
         first_seen_at=row.first_seen_at,
         last_seen_at=row.last_seen_at,
         closed_at=row.closed_at,
