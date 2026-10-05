@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, DateTime, Integer, SmallInteger
+from sqlalchemy import CheckConstraint, DateTime, Integer, SmallInteger, Text
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
@@ -46,6 +46,13 @@ class SystemSettings(Base):
     # Diferente de `transaction_orphan_threshold_minutes` (`app/core/config.py`, `.env`, global
     # fixo, sem override) — este é editável na UI e tem override por instância/banco.
     sleeping_min_duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Configuração SMTP para envio de relatórios por e-mail — editável pela UI (Configurações →
+    # Geral). smtp_password_encrypted armazena a senha cifrada com Fernet; nunca em texto puro.
+    smtp_host: Mapped[str | None] = mapped_column(Text, nullable=True)
+    smtp_port: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=587)
+    smtp_username: Mapped[str | None] = mapped_column(Text, nullable=True)
+    smtp_password_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    smtp_from_address: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )

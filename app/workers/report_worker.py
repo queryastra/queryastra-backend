@@ -1,8 +1,8 @@
-"""Worker de relatorios agendados â€” executa relatorios cujo `next_run_at` venceu.
+﻿"""Worker de relatorios agendados â€" executa relatorios cujo `next_run_at` venceu.
 
 Padrao identico aos demais workers deste projeto (MissingIndexSupervisor, BackupStatusSupervisor,
 etc.): construtor recebe `(async_session_factory, check_interval_seconds)`, expoe `.run()` e
-`.stop()`. Desligado por padrao â€” habilitar via `REPORT_WORKER_ENABLED=true` no `.env`.
+`.stop()`. Desligado por padrao â€" habilitar via `REPORT_WORKER_ENABLED=true` no `.env`.
 
 Para cada relatorio vencido:
   1. Gera o PDF em memoria.
@@ -30,6 +30,7 @@ from app.repositories.instances_repository import (
     InstancesRepository,  # noqa: F401 (used inside method)
 )
 from app.repositories.scheduled_reports_repository import ScheduledReportsRepository
+from app.repositories.system_settings_repository import SystemSettingsRepository
 from app.services.report_service import generate_report
 
 logger = get_logger(__name__)
@@ -140,27 +141,40 @@ class ReportWorker:
 
         # Tenta enviar email se configurado
         if report.email_recipients:
-            await self._try_send_email(report, pdf_bytes)
+            await self._try_send_email(session, report, pdf_bytes)
 
         next_run = _compute_next_run(report.schedule_cron, now) if report.is_recurring else None
         repo = ScheduledReportsRepository(session)
         await repo.update_after_run(report, status, error, next_run)
         logger.info("Relatorio %s gerado com sucesso (proxima execucao: %s)", report.id, next_run)
 
-    async def _try_send_email(self, report: ScheduledReport, pdf_bytes: bytes) -> None:
-        settings = get_settings()
-        if not settings.alert_smtp_host:
-            logger.debug("SMTP nao configurado â€” email nao enviado para relatorio %s", report.id)
+    async def _try_send_email(
+        self, session: AsyncSession, report: ScheduledReport, pdf_bytes: bytes
+    ) -> None:
+        # Lê config SMTP do banco (editável na UI). Fallback para .env se não configurado no banco.
+        settings_repo = SystemSettingsRepository(session)
+        db_settings = await settings_repo.get()
+        env = get_settings()
+
+        host = db_settings.smtp_host or env.alert_smtp_host
+        if not host:
+            logger.debug("SMTP nao configurado - email nao enviado para relatorio %s", report.id)
             return
+
+        port = db_settings.smtp_port or env.alert_smtp_port
+        username = db_settings.smtp_username or env.alert_smtp_username
+        password = settings_repo.get_smtp_password_plain(db_settings) or env.alert_smtp_password
+        sender = db_settings.smtp_from_address or env.alert_smtp_from or "reports@ab-xql-pm.local"
+
         try:
             filename = f"relatorio-{report.report_type}-{datetime.now(UTC).strftime('%Y%m%d')}.pdf"
             await asyncio.to_thread(
                 _send_email_with_attachment,
-                host=settings.alert_smtp_host,
-                port=settings.alert_smtp_port,
-                username=settings.alert_smtp_username,
-                password=settings.alert_smtp_password,
-                sender=settings.alert_smtp_from or "reports@ab-xql-pm.local",
+                host=host,
+                port=port,
+                username=username,
+                password=password,
+                sender=sender,
                 recipients=report.email_recipients,
                 subject=f"[AB-XQL-PM] {report.title}",
                 body=(
@@ -170,9 +184,7 @@ class ReportWorker:
                 attachment_bytes=pdf_bytes,
                 attachment_name=filename,
             )
-            logger.info(
-                "Email enviado para relatorio %s â†’ %s", report.id, report.email_recipients
-            )
+            logger.info("Email enviado para relatorio %s -> %s", report.id, report.email_recipients)
         except Exception:
             logger.exception(
                 "Falha ao enviar email para relatorio %s (nao bloqueia execucao)", report.id

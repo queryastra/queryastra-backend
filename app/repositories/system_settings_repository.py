@@ -8,8 +8,10 @@ de seed separado do resto do fluxo.
 
 from __future__ import annotations
 
+from cryptography.fernet import Fernet
 from sqlalchemy.exc import IntegrityError
 
+from app.core.config import get_settings
 from app.models.system_settings import SYSTEM_SETTINGS_SINGLETON_ID, SystemSettings
 from app.repositories.base import BaseRepository
 
@@ -52,3 +54,31 @@ class SystemSettingsRepository(BaseRepository):
         await self._session.commit()
         await self._session.refresh(row)
         return row
+
+    async def update_smtp_settings(
+        self,
+        host: str | None,
+        port: int,
+        username: str | None,
+        raw_password: str | None,
+        from_address: str | None,
+    ) -> SystemSettings:
+        """Atualiza config SMTP. raw_password=None preserva a senha já armazenada."""
+        row = await self.get()
+        row.smtp_host = host
+        row.smtp_port = port
+        row.smtp_username = username
+        row.smtp_from_address = from_address
+        if raw_password is not None:
+            key = get_settings().credential_encryption_key.encode()
+            row.smtp_password_encrypted = Fernet(key).encrypt(raw_password.encode()).decode()
+        await self._session.commit()
+        await self._session.refresh(row)
+        return row
+
+    def get_smtp_password_plain(self, row: SystemSettings) -> str | None:
+        """Decifra a senha SMTP armazenada. Retorna None se não configurada."""
+        if not row.smtp_password_encrypted:
+            return None
+        key = get_settings().credential_encryption_key.encode()
+        return Fernet(key).decrypt(row.smtp_password_encrypted.encode()).decode()
