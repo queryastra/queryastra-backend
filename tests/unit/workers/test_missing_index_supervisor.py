@@ -110,6 +110,7 @@ class _FakeCollector:
 
     _suggestions_by_instance: dict = {}
     _engine_start_time_by_instance: dict = {}
+    _engine_start_time_raises_for: set = set()
     calls_by_instance: dict = {}
     close_calls: list = []
 
@@ -123,6 +124,8 @@ class _FakeCollector:
         return type(self)._suggestions_by_instance.get(self._instance_id, [])
 
     async def get_engine_start_time(self) -> datetime | None:
+        if self._instance_id in type(self)._engine_start_time_raises_for:
+            raise RuntimeError("falha simulada ao consultar sys.dm_os_sys_info")
         return type(self)._engine_start_time_by_instance.get(self._instance_id)
 
     async def close(self) -> None:
@@ -132,6 +135,7 @@ class _FakeCollector:
 def _reset_fake_collector() -> None:
     _FakeCollector._suggestions_by_instance = {}
     _FakeCollector._engine_start_time_by_instance = {}
+    _FakeCollector._engine_start_time_raises_for = set()
     _FakeCollector.calls_by_instance = {}
     _FakeCollector.close_calls = []
 
@@ -279,6 +283,41 @@ async def test_run_one_instance_records_engine_start_time_from_collector() -> No
 
     _, _, stats_since = _FakeMissingIndexCollectionRunsRepository.upserts[0]
     assert stats_since == engine_start_time
+
+
+async def test_run_one_instance_still_records_collection_run_when_engine_start_time_fails() -> None:
+    """Regressao: `get_engine_start_time()` abre uma conexao PROPRIA (sys.dm_os_sys_info) e pode
+    falhar (ex.: credencial sem VIEW SERVER STATE) mesmo com a coleta principal de sugestoes ja
+    bem-sucedida. Essa falha secundaria nao pode impedir o registro do collection_run - senao a
+    UI mostra "nunca coletou" pra sempre, mesmo com sugestoes reais sendo atualizadas a cada
+    ciclo (o bug que motivou este teste)."""
+    _reset_fake_collector()
+    _reset_fake_repository()
+    _reset_fake_collection_runs_repository()
+    instance = _make_instance()
+    registry = {instance.id: instance}
+    suggestion = NormalizedMissingIndexSuggestion(
+        instance_id=instance.id,
+        database_name="db_a",
+        table_name="public.pedidos",
+        suggestion="candidato a indice",
+        impact_score=10.0,
+    )
+    _FakeCollector._suggestions_by_instance = {instance.id: [suggestion]}
+    _FakeCollector._engine_start_time_raises_for = {instance.id}
+    supervisor = _make_supervisor(registry)
+
+    await supervisor._run_one_instance(instance.id)
+
+    assert len(_FakeMissingIndexSuggestionsRepository.upserts) == 1
+    assert len(_FakeMissingIndexCollectionRunsRepository.upserts) == 1
+    recorded_instance_id, collected_at, stats_since = (
+        _FakeMissingIndexCollectionRunsRepository.upserts[0]
+    )
+    assert recorded_instance_id == instance.id
+    assert isinstance(collected_at, datetime)
+    assert stats_since is None
+    assert instance.id in _FakeCollector.close_calls
 
 
 async def test_run_one_instance_does_not_raise_when_instance_no_longer_exists() -> None:

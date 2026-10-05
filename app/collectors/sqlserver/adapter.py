@@ -554,6 +554,25 @@ _EXECUTION_PLAN_SEARCH_QUERY = """
 
 _EXECUTION_PLAN_XML_QUERY = "SELECT query_plan FROM sys.dm_exec_query_plan(%s)"
 
+# Item 10 (Query Store) — fallback quando o plano ja saiu do cache de planos. Query Store persiste
+# planos em disco (ate o limite de retencao configurado na instancia, tipicamente 30 dias) mesmo
+# depois de uma recompilacao ou pressao de memoria que expulsaria o plano do cache. So disponivel
+# quando o banco alvo tem Query Store habilitado (`is_query_store_on = 1` em `sys.databases`).
+#
+# Usa 3-part naming `[{db}].sys.query_store_query_text` — permitido sem `USE [db]` desde SQL
+# Server 2016. `db` e sanitizado em `_connect_and_fetch_plan_from_query_store` (remove `]` antes
+# de interpolar) — nunca e input direto do usuario, vem da nossa tabela `query_samples`.
+#
+# Limite de 2000 textos por banco (mesmo limite do scan do cache de plano): acao sob demanda,
+# nao parte do ciclo de coleta, scan pontual e aceitavel.
+_QUERY_STORE_TEXT_QUERY_TMPL = """
+    SELECT TOP (2000)
+        CAST(qsqt.query_sql_text AS nvarchar(max)) AS statement_text,
+        qsqt.query_text_id
+    FROM [{db}].sys.query_store_query_text AS qsqt
+    ORDER BY qsqt.query_text_id DESC
+"""
+
 # Plano REAL (com contagens de linha/CPU/IO reais de execucao, nao so estimativa de
 # compilacao) — so possivel sem Query Store (desligado por padrao on-premises) quando a mesma
 # sessao que rodou `sql_hash` AINDA esta em execucao no momento da busca
@@ -1619,6 +1638,68 @@ def _connect_and_fetch_execution_plan(
         conn.close()
 
 
+def _connect_and_fetch_plan_from_query_store(
+    connection: ConnectionParams,
+    sql_hash: str,
+    database_names: list[str],
+    query_timeout_seconds: float,
+) -> str | None:
+    """Helper sincrono — Item 10 (Query Store). Itera pelos `database_names` (bancos onde o
+    `sql_hash` foi visto em `query_samples`) procurando o plano no Query Store de cada banco via
+    3-part naming. Ignora silenciosamente bancos sem Query Store habilitado (excecao no cursor).
+    Devolve o XML do plano mais recente encontrado, ou `None` se nao achou em nenhum banco."""
+    login_timeout_seconds = int(connection.connect_timeout_seconds)
+    conn = pymssql.connect(
+        server=connection.host,
+        port=str(connection.port),
+        user=connection.username,
+        password=connection.secret_value,
+        timeout=int(query_timeout_seconds),
+        login_timeout=login_timeout_seconds,
+    )
+    try:
+        for db_name in database_names:
+            # Remove `]` para nao escapar o colchete de fechamento no 3-part naming — unico
+            # caractere que quebraria `[{db}]`. `db_name` vem da nossa tabela `query_samples`,
+            # nao de input arbitrario do usuario.
+            safe_db = db_name.replace("]", "")
+            try:
+                cursor = conn.cursor(as_dict=True)
+                cursor.execute(_QUERY_STORE_TEXT_QUERY_TMPL.format(db=safe_db))
+                rows: list[dict] = list(cursor.fetchall())
+                cursor.close()
+            except Exception:  # noqa: BLE001 - QS desabilitado ou banco sem acesso: pula
+                continue
+
+            query_text_id: int | None = None
+            for row in rows:
+                if _hash_query_text(row.get("statement_text")) == sql_hash:
+                    query_text_id = int(row["query_text_id"])
+                    break
+            if query_text_id is None:
+                continue
+
+            try:
+                cursor = conn.cursor(as_dict=True)
+                cursor.execute(
+                    f"SELECT TOP (1) CAST(qsp.query_plan AS nvarchar(max)) AS query_plan "
+                    f"FROM [{safe_db}].sys.query_store_plan AS qsp "
+                    f"JOIN [{safe_db}].sys.query_store_query AS qsq ON qsq.query_id = qsp.query_id "
+                    f"WHERE qsq.query_text_id = %s "
+                    f"ORDER BY qsp.last_execution_time DESC",
+                    (query_text_id,),
+                )
+                plan_row: dict | None = cursor.fetchone()
+                cursor.close()
+            except Exception:  # noqa: BLE001
+                continue
+            if plan_row and plan_row.get("query_plan"):
+                return str(plan_row["query_plan"])
+        return None
+    finally:
+        conn.close()
+
+
 def _hash_query_text(query_text: str | None) -> str | None:
     if not query_text:
         return None
@@ -2564,6 +2645,33 @@ class SQLServerCollector:
                 _connect_and_fetch_actual_execution_plan,
                 self._connection_params,
                 sql_hash,
+                settings.collection_query_timeout_seconds,
+            ),
+            timeout=overall_timeout,
+        )
+
+    async def fetch_plan_from_query_store(
+        self, sql_hash: str, database_names: list[str]
+    ) -> str | None:
+        """Item 10 — fallback de plano via Query Store quando o cache de plano nao tem o plano.
+        Pesquisa os `database_names` fornecidos (bancos onde o sql_hash foi visto em
+        `query_samples`). `None` quando nenhum banco tem o plano no Query Store (ou QS
+        desabilitado em todos). XML ainda NAO mascarado — mascaramento e responsabilidade do
+        chamador (`app.services.execution_plan_service`)."""
+        if not database_names:
+            return None
+        settings = get_settings()
+        overall_timeout = (
+            self._connection_params.connect_timeout_seconds
+            + settings.collection_query_timeout_seconds
+        )
+        return await asyncio.wait_for(
+            run_in_instance_executor(
+                self._instance_id,
+                _connect_and_fetch_plan_from_query_store,
+                self._connection_params,
+                sql_hash,
+                database_names,
                 settings.collection_query_timeout_seconds,
             ),
             timeout=overall_timeout,

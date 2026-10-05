@@ -42,24 +42,29 @@ _POSTGRESQL_NOT_SUPPORTED_REASON = (
     "auto_explain so escreve no log do servidor (sem funcao SQL-acessivel)."
 )
 _PLAN_NOT_FOUND_REASON = (
-    "Plano não encontrado no cache — pode ter sido removido (memória, recompilação) desde a "
-    "última execução, ou empurrado para fora da janela de busca por atividade de fundo muito "
-    "intensa nesta instância (CDC, replicação, o próprio monitoramento). Mais provável de "
-    "encontrar logo após ver a query rodando ao vivo."
+    "Plano não encontrado no cache nem no Query Store — pode ter sido removido (memória, "
+    "recompilação, limite de retenção do Query Store) desde a última execução. Mais provável "
+    "de encontrar logo após ver a query rodando ao vivo."
 )
 _CREDENTIAL_MISSING_REASON = "Credencial da instancia nao configurada."
 _CREDENTIAL_RESOLUTION_FAILED_REASON = "Falha ao resolver a credencial da instancia."
 
 
 async def fetch_execution_plan(
-    instance: Instance, sql_hash: str, credential_resolver: CredentialResolver
+    instance: Instance,
+    sql_hash: str,
+    credential_resolver: CredentialResolver,
+    database_names: list[str] | None = None,
 ) -> ExecutionPlanResult:
     """Busca o plano de execucao do SQL Server que corresponde a `sql_hash`, mascarando valores
-    de parametro embutidos no XML antes de devolver (`mask_showplan_xml_literals`). Tenta
-    primeiro o plano REAL (`fetch_actual_execution_plan` — so funciona se a sessao original
-    ainda estiver executando, sem Query Store nao ha outro jeito de ter contagens reais); se
-    nao encontrar, cai pro plano cacheado/estimado (`fetch_execution_plan` do collector, o
-    caminho ja existente desde a Etapa 11)."""
+    de parametro embutidos no XML antes de devolver. Fluxo de 3 etapas:
+      1. Plano REAL via sessao ativa (`fetch_actual_execution_plan`) — contagens reais, so
+         possivel enquanto a sessao original ainda executa.
+      2. Cache de plano (`fetch_execution_plan`) — plano estimado/cacheado, o caso comum.
+      3. Query Store (`fetch_plan_from_query_store`) — Item 10: persiste planos em disco mesmo
+         apos recompilacao/pressao de memoria; requer `database_names` para restringir a busca
+         aos bancos onde o sql_hash foi visto.
+    PostgreSQL: `available=False` direto, sem tentar conectar."""
     if instance.db_type != "sqlserver":
         return ExecutionPlanResult(
             available=False, plan_xml=None, reason=_POSTGRESQL_NOT_SUPPORTED_REASON
@@ -100,11 +105,23 @@ async def fetch_execution_plan(
                 source="actual",
             )
         plan_xml = await collector.fetch_execution_plan(sql_hash)
+        if plan_xml is not None:
+            return ExecutionPlanResult(
+                available=True,
+                plan_xml=mask_showplan_xml_literals(plan_xml),
+                reason=None,
+                source="cached",
+            )
+        # Item 10: fallback pro Query Store quando o cache de plano nao tem o plano.
+        qs_plan_xml = await collector.fetch_plan_from_query_store(sql_hash, database_names or [])
     finally:
         await collector.close()
 
-    if plan_xml is None:
+    if qs_plan_xml is None:
         return ExecutionPlanResult(available=False, plan_xml=None, reason=_PLAN_NOT_FOUND_REASON)
     return ExecutionPlanResult(
-        available=True, plan_xml=mask_showplan_xml_literals(plan_xml), reason=None, source="cached"
+        available=True,
+        plan_xml=mask_showplan_xml_literals(qs_plan_xml),
+        reason=None,
+        source="query_store",
     )

@@ -40,7 +40,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db_session, resolve_time_window
+from app.api.deps import check_instance_access, get_db_session, resolve_time_window
 from app.core.config import get_settings
 from app.models.blocking_incident import BlockingIncident
 from app.repositories.blocking_incidents_repository import BlockingIncidentsRepository
@@ -322,6 +322,7 @@ def _build_blocking_tree(
 @router.get("/blocking/{instance_id}", response_model=list[BlockingTreeNodeResponse])
 async def list_blocking_events(
     instance_id: UUID,
+    _access: Annotated[None, Depends(check_instance_access)],
     blocking_repo: Annotated[
         BlockingIncidentsRepository, Depends(get_blocking_incidents_repository)
     ],
@@ -350,6 +351,7 @@ async def list_blocking_events(
 @router.get("/blocking/{instance_id}/incidents", response_model=list[BlockingIncidentResponse])
 async def list_blocking_incidents(
     instance_id: UUID,
+    _access: Annotated[None, Depends(check_instance_access)],
     blocking_repo: Annotated[
         BlockingIncidentsRepository, Depends(get_blocking_incidents_repository)
     ],
@@ -404,6 +406,7 @@ async def list_blocking_incidents(
 async def get_session_blocking_detail(
     instance_id: UUID,
     session_id: str,
+    _access: Annotated[None, Depends(check_instance_access)],
     blocking_repo: Annotated[
         BlockingIncidentsRepository, Depends(get_blocking_incidents_repository)
     ],
@@ -478,6 +481,7 @@ async def get_session_blocking_detail(
 @router.get("/waits/{instance_id}", response_model=list[WaitSummaryEntryResponse])
 async def list_wait_summary(
     instance_id: UUID,
+    _access: Annotated[None, Depends(check_instance_access)],
     repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
     since: Annotated[datetime | None, Query(alias="from")] = None,
     until: Annotated[datetime | None, Query(alias="to")] = None,

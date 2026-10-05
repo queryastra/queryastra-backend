@@ -30,6 +30,9 @@ from app.models.instance import Instance
 from app.repositories.blocking_events_repository import BlockingEventsRepository
 from app.repositories.blocking_incidents_repository import BlockingIncidentsRepository
 from app.repositories.deadlock_events_repository import DeadlockEventsRepository
+from app.repositories.instance_database_sleeping_overrides_repository import (
+    InstanceDatabaseSleepingOverridesRepository,
+)
 from app.repositories.instances_repository import InstancesRepository
 from app.repositories.metric_samples_repository import MetricSamplesRepository
 from app.repositories.query_samples_repository import QuerySamplesRepository
@@ -53,6 +56,9 @@ _TransactionEventsRepositoryFactory = Callable[[AsyncSession], TransactionEvents
 _BlockingIncidentsRepositoryFactory = Callable[[AsyncSession], BlockingIncidentsRepository]
 _SystemSettingsRepositoryFactory = Callable[[AsyncSession], SystemSettingsRepository]
 _DeadlockEventsRepositoryFactory = Callable[[AsyncSession], DeadlockEventsRepository]
+_InstanceDatabaseSleepingOverridesRepositoryFactory = Callable[
+    [AsyncSession], InstanceDatabaseSleepingOverridesRepository
+]
 
 
 @dataclass(slots=True)
@@ -94,6 +100,9 @@ class PollingSupervisor:
         deadlock_events_repository_factory: _DeadlockEventsRepositoryFactory = (
             DeadlockEventsRepository
         ),
+        instance_database_sleeping_overrides_repository_factory: (
+            _InstanceDatabaseSleepingOverridesRepositoryFactory
+        ) = InstanceDatabaseSleepingOverridesRepository,
     ) -> None:
         self._session_factory = session_factory
         self._discovery_interval_seconds = discovery_interval_seconds
@@ -107,6 +116,9 @@ class PollingSupervisor:
         self._blocking_incidents_repository_factory = blocking_incidents_repository_factory
         self._system_settings_repository_factory = system_settings_repository_factory
         self._deadlock_events_repository_factory = deadlock_events_repository_factory
+        self._instance_database_sleeping_overrides_repository_factory = (
+            instance_database_sleeping_overrides_repository_factory
+        )
         self._stop_event = asyncio.Event()
         self._instance_tasks: dict[UUID, _InstanceTaskHandle] = {}
 
@@ -278,6 +290,9 @@ class PollingSupervisor:
                         ),
                         deadlock_events_repository=self._deadlock_events_repository_factory(
                             session
+                        ),
+                        instance_database_sleeping_overrides_repository=(
+                            self._instance_database_sleeping_overrides_repository_factory(session)
                         ),
                     )
                     await worker._run_cycle()  # noqa: SLF001 - reuso interno deliberado

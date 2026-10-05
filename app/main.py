@@ -18,12 +18,19 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.api.v1.router import api_v1_router
 from app.core import instance_executors
 from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
 from app.db.session import async_session_factory
+from app.models.system_settings import SYSTEM_SETTINGS_SINGLETON_ID, SystemSettings
+from app.repositories.instance_database_sleeping_overrides_repository import (
+    InstanceDatabaseSleepingOverridesRepository,
+)
+from app.repositories.users_repository import UsersRepository
+from app.services.auth_service import hash_password
 from app.workers.alerting_worker import AlertingWorker, EmailSettings
 from app.workers.backup_status_supervisor import BackupStatusSupervisor
 from app.workers.deadlock_supervisor import DeadlockSupervisor
@@ -33,6 +40,7 @@ from app.workers.plan_compile_timeout_supervisor import PlanCompileTimeoutSuperv
 from app.workers.plan_history_supervisor import PlanHistorySupervisor
 from app.workers.polling_supervisor import PollingSupervisor
 from app.workers.problem_events_retention_worker import ProblemEventsRetentionWorker
+from app.workers.report_worker import ReportWorker
 from app.workers.transaction_error_supervisor import TransactionErrorSupervisor
 
 logger = get_logger(__name__)
@@ -55,6 +63,37 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings.backend_executor_max_workers,
     )
 
+    # Seed: cria o usuario admin inicial se ainda nao existir.
+    async with async_session_factory() as session:
+        users_repo = UsersRepository(session)
+        existing = await users_repo.get_by_username(settings.admin_username)
+        if existing is None:
+            hashed = hash_password(settings.admin_password)
+            await users_repo.create(settings.admin_username, hashed, "admin")
+            await session.commit()
+            logger.info("Usuario admin seed criado: %s", settings.admin_username)
+
+    # Seed: grava system_settings com os valores das variaveis de ambiente se a linha ainda nao
+    # existir. ON CONFLICT (id) DO NOTHING — banco recem-criado recebe os valores do .env;
+    # uma linha ja existente (usuario ja configurou pela UI) NUNCA e sobrescrita por restart.
+    async with async_session_factory() as session:
+        stmt = (
+            pg_insert(SystemSettings)
+            .values(
+                id=SYSTEM_SETTINGS_SINGLETON_ID,
+                blocking_min_duration_ms=settings.blocking_min_duration_ms,
+                sleeping_min_duration_ms=settings.sleeping_min_duration_ms,
+            )
+            .on_conflict_do_nothing(index_elements=["id"])
+        )
+        await session.execute(stmt)
+        await session.commit()
+        logger.info(
+            "system_settings seed verificado (blocking_ms=%s, sleeping_ms=%s)",
+            settings.blocking_min_duration_ms,
+            settings.sleeping_min_duration_ms,
+        )
+
     supervisor: PollingSupervisor | None = None
     supervisor_task: asyncio.Task[None] | None = None
     alerting_worker: AlertingWorker | None = None
@@ -75,10 +114,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     plan_compile_timeout_task: asyncio.Task[None] | None = None
     plan_history_supervisor: PlanHistorySupervisor | None = None
     plan_history_task: asyncio.Task[None] | None = None
+    report_worker: ReportWorker | None = None
+    report_worker_task: asyncio.Task[None] | None = None
 
     if settings.polling_supervisor_enabled:
         supervisor = PollingSupervisor(
-            async_session_factory, settings.supervisor_discovery_interval_seconds
+            async_session_factory,
+            settings.supervisor_discovery_interval_seconds,
+            instance_database_sleeping_overrides_repository_factory=InstanceDatabaseSleepingOverridesRepository,
         )
         supervisor_task = asyncio.create_task(supervisor.run())
         logger.info(
@@ -229,6 +272,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     else:
         logger.info("PlanHistorySupervisor desabilitado (PLAN_HISTORY_SUPERVISOR_ENABLED=false)")
 
+    if settings.report_worker_enabled:
+        report_worker = ReportWorker(
+            async_session_factory, settings.report_worker_check_interval_seconds
+        )
+        report_worker_task = asyncio.create_task(report_worker.run())
+        logger.info(
+            "ReportWorker habilitado (check_interval=%ss)",
+            settings.report_worker_check_interval_seconds,
+        )
+    else:
+        logger.info("ReportWorker desabilitado (REPORT_WORKER_ENABLED=false)")
+
     yield
 
     if supervisor is not None and supervisor_task is not None:
@@ -261,6 +316,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if plan_history_supervisor is not None and plan_history_task is not None:
         plan_history_supervisor.stop()
         await plan_history_task
+    if report_worker is not None and report_worker_task is not None:
+        report_worker.stop()
+        await report_worker_task
     executor.shutdown(wait=False, cancel_futures=True)
     instance_executors.shutdown_all()
     logger.info("Lifespan finalizado")

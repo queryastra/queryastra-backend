@@ -23,7 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db_session
+from app.api.deps import check_instance_access, get_db_session
 from app.core.config import get_settings
 from app.repositories.deadlock_events_repository import DeadlockEventsRepository
 
@@ -59,6 +59,7 @@ def get_deadlock_events_repository(
 @router.get("/{instance_id}", response_model=list[DeadlockEventResponse])
 async def list_deadlocks(
     instance_id: UUID,
+    _access: Annotated[None, Depends(check_instance_access)],
     repository: Annotated[DeadlockEventsRepository, Depends(get_deadlock_events_repository)],
     since: Annotated[datetime | None, Query(alias="from")] = None,
     until: Annotated[datetime | None, Query(alias="to")] = None,
@@ -81,6 +82,7 @@ async def list_deadlocks(
 async def get_deadlock(
     instance_id: UUID,
     deadlock_id: UUID,
+    _access: Annotated[None, Depends(check_instance_access)],
     repository: Annotated[DeadlockEventsRepository, Depends(get_deadlock_events_repository)],
 ) -> DeadlockEventResponse:
     """Detalhe de um deadlock específico — grafo completo (`detail`) para abrir queries/

@@ -25,7 +25,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db_session
+from app.api.deps import check_instance_access, get_db_session
 from app.core.config import get_settings
 from app.models.blocking_incident import BlockingIncident
 from app.models.transaction_event import TransactionEvent
@@ -174,6 +174,7 @@ async def _resolve_text_by_hash(
 @router.get("/{instance_id}", response_model=list[TransactionEventResponse])
 async def list_transactions(
     instance_id: UUID,
+    _access: Annotated[None, Depends(check_instance_access)],
     repository: Annotated[TransactionEventsRepository, Depends(get_transaction_events_repository)],
     blocking_repository: Annotated[
         BlockingIncidentsRepository, Depends(get_blocking_incidents_repository)
@@ -212,6 +213,7 @@ async def list_transactions(
 async def get_transaction(
     instance_id: UUID,
     transaction_identifier: str,
+    _access: Annotated[None, Depends(check_instance_access)],
     repository: Annotated[TransactionEventsRepository, Depends(get_transaction_events_repository)],
     blocking_repository: Annotated[
         BlockingIncidentsRepository, Depends(get_blocking_incidents_repository)

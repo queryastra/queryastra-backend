@@ -17,7 +17,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db_session
+from app.api.deps import (
+    CurrentUser,
+    get_current_user,
+    get_db_session,
+    require_admin,
+    require_operator,
+)
 from app.models.alert import AlertEscalationLevel, AlertRule, AlertSilence
 from app.repositories.alerts_repository import AlertsRepository, AlertWithNames
 from app.services.custom_sql_guard import CustomSqlRejectedError, validate_custom_sql
@@ -226,6 +232,7 @@ def _to_alert_rule_response(
 async def create_alert_rule(
     payload: AlertRuleCreateRequest,
     repository: Annotated[AlertsRepository, Depends(get_alerts_repository)],
+    _: Annotated[CurrentUser, Depends(require_admin)],
 ) -> AlertRuleResponse:
     """Cria uma regra de alerta. `custom_sql` (quando presente) ja foi validado pelo
     bloqueio por palavra-chave no `model_validator` de `AlertRuleCreateRequest` — nunca
@@ -251,6 +258,7 @@ async def create_alert_rule(
 @router.get("/rules", response_model=list[AlertRuleResponse])
 async def list_alert_rules(
     repository: Annotated[AlertsRepository, Depends(get_alerts_repository)],
+    _: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> list[AlertRuleResponse]:
     """Lista todas as regras de alerta, ativas ou nao."""
     rules = await repository.list_rules()
@@ -265,6 +273,7 @@ async def list_alert_rules(
 async def get_alert_rule(
     rule_id: UUID,
     repository: Annotated[AlertsRepository, Depends(get_alerts_repository)],
+    _: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> AlertRuleResponse:
     """Busca uma regra por id — usado pela tela de edicao para pre-preencher o formulario."""
     rule = await repository.get_rule_by_id(rule_id)
@@ -281,6 +290,7 @@ async def update_alert_rule(
     rule_id: UUID,
     payload: AlertRuleCreateRequest,
     repository: Annotated[AlertsRepository, Depends(get_alerts_repository)],
+    _: Annotated[CurrentUser, Depends(require_admin)],
 ) -> AlertRuleResponse:
     """Atualiza uma regra existente — mesmo shape/validacao de `POST /rules` (substituicao
     completa, nao um patch parcial: o formulario de edicao sempre manda todos os campos).
@@ -309,6 +319,7 @@ async def update_alert_rule(
 async def delete_alert_rule(
     rule_id: UUID,
     repository: Annotated[AlertsRepository, Depends(get_alerts_repository)],
+    _: Annotated[CurrentUser, Depends(require_admin)],
 ) -> None:
     """Remove uma regra de alerta e todo o historico de `Alert`/notificacao/silenciamento
     associado (ver docstring de `AlertsRepository.delete_alert_rule`)."""
@@ -322,6 +333,7 @@ async def delete_alert_rule(
 @router.get("", response_model=list[AlertResponse])
 async def list_alerts(
     repository: Annotated[AlertsRepository, Depends(get_alerts_repository)],
+    _: Annotated[CurrentUser, Depends(get_current_user)],
     state: str | None = None,
     target_id: UUID | None = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 200,
@@ -336,6 +348,7 @@ async def list_alerts(
 async def acknowledge_alert(
     alert_id: UUID,
     repository: Annotated[AlertsRepository, Depends(get_alerts_repository)],
+    _: Annotated[CurrentUser, Depends(require_operator)],
 ) -> AlertResponse:
     """Reconhece um alerta aberto.
 
@@ -363,6 +376,7 @@ async def acknowledge_alert(
 async def close_alert(
     alert_id: UUID,
     repository: Annotated[AlertsRepository, Depends(get_alerts_repository)],
+    _: Annotated[CurrentUser, Depends(require_operator)],
 ) -> AlertResponse:
     """Fecha manualmente um alerta aberto (Fase 2, item 3) — usado pelo `reset_mode
     ="no_reset_manual"` (unica forma de fechar esse modo) e disponivel como acao manual geral
@@ -384,6 +398,7 @@ async def close_alert(
 async def delete_alert(
     alert_id: UUID,
     repository: Annotated[AlertsRepository, Depends(get_alerts_repository)],
+    _: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> None:
     """Remove um alerta (registro completo, nao so o estado) — diferente de `close`, que so
     muda `state` mantendo o historico. Usado para limpar alertas indesejados (ex.: gerados
@@ -397,6 +412,7 @@ async def delete_alert(
 async def create_alert_silence(
     payload: AlertSilenceCreateRequest,
     repository: Annotated[AlertsRepository, Depends(get_alerts_repository)],
+    _: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> AlertSilenceResponse:
     """Cria um silenciamento pontual — `alert_rule_id=None` silencia todas as regras do alvo."""
     silence = await repository.create_alert_silence(AlertSilence(**payload.model_dump()))
@@ -406,6 +422,7 @@ async def create_alert_silence(
 @router.get("/silences", response_model=list[AlertSilenceResponse])
 async def list_alert_silences(
     repository: Annotated[AlertsRepository, Depends(get_alerts_repository)],
+    _: Annotated[CurrentUser, Depends(get_current_user)],
     target_id: UUID | None = None,
 ) -> list[AlertSilenceResponse]:
     """Lista silenciamentos, opcionalmente filtrados por alvo."""
@@ -417,6 +434,7 @@ async def list_alert_silences(
 async def delete_alert_silence(
     silence_id: UUID,
     repository: Annotated[AlertsRepository, Depends(get_alerts_repository)],
+    _: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> None:
     """Remove um silenciamento."""
     deleted = await repository.delete_alert_silence(silence_id)

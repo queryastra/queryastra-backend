@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db_session
+from app.api.deps import check_instance_access, get_db_session
 from app.repositories.backup_status_repository import BackupStatusRepository
 
 router = APIRouter()
@@ -46,6 +46,7 @@ def get_backup_status_repository(
 @router.get("/{instance_id}", response_model=list[BackupStatusResponse])
 async def list_backup_status(
     instance_id: UUID,
+    _access: Annotated[None, Depends(check_instance_access)],
     repository: Annotated[BackupStatusRepository, Depends(get_backup_status_repository)],
 ) -> list[BackupStatusResponse]:
     """Estado de backup/archiving de uma instancia — estado mais recente, nao historico bruto."""

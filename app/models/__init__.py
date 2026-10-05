@@ -13,10 +13,12 @@ from app.models.blocking_incident import BlockingIncident
 from app.models.deadlock_event import DeadlockEvent
 from app.models.instance import Instance, InstanceMaintenanceWindow
 from app.models.missing_index_suggestion import MissingIndexSuggestion
+from app.models.password_reset_token import PasswordResetToken
 from app.models.query_plan_snapshot import QueryPlanSnapshot
 from app.models.server import InstanceServer, Server
 from app.models.system_settings import SystemSettings
 from app.models.transaction_event import TransactionEvent
+from app.models.user import User
 
 __all__ = [
     "Instance",
@@ -34,4 +36,6 @@ __all__ = [
     "DeadlockEvent",
     "QueryPlanSnapshot",
     "SystemSettings",
+    "User",
+    "PasswordResetToken",
 ]

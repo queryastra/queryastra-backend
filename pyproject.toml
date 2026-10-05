@@ -23,6 +23,15 @@ dependencies = [
     # Cliente HTTP usado pelo AlertingWorker para notificacao via webhook
     # (app/workers/alerting_worker.py) — dependencia de runtime, nao so de teste.
     "httpx>=0.27",
+    # PDF para relatorios agendados (Item 4) e parsing de expressao cron para agendamento.
+    "reportlab>=4.2",
+    "croniter>=3.0",
+    # Autenticacao JWT + hashing de senha (RBAC — app/services/auth_service.py).
+    # bcrypt: passlib 1.7 nao e compativel com bcrypt>=4 (API __about__ removida e limite de
+    # 72 bytes de senha que causa falha no detect_wrap_bug interno do passlib). Pinado em <4.
+    "passlib[bcrypt]>=1.7",
+    "bcrypt>=3.2,<4.0",
+    "python-jose[cryptography]>=3.3",
 ]
 
 [dependency-groups]

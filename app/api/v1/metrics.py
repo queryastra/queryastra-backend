@@ -1,22 +1,17 @@
 """Endpoints de leitura de metricas de recurso.
 
-Destino de dados: hypertable bruta `metric_samples` (`Docs/database-schema.md` §2), consultada
-diretamente — os continuous aggregates (`metric_samples_hourly`/`daily`) foram criados
-`WITH NO DATA` e sem policy de refresh, estao vazios e nunca atualizados, portanto nunca sao
-usados aqui. Cobre metricas de SO (node_exporter/windows_exporter) e metricas numericas simples
-de banco.
-
-Quebra de contrato intencional: o endpoint `GET /{target_type}/{target_id}` deixa de devolver
-uma unica serie (`metric_name` obrigatorio, um objeto de resposta) e passa a devolver
-`list[MetricSeriesResponse]` — uma serie por `metric_name` presente no periodo, com o parametro
-de query `metric_name` agora repetivel e opcional (omitido = todas as metricas do alvo no
-periodo).
+Inclui:
+* `GET /{target_type}/{target_id}` — serie bruta (hypertable ou aggregate conforme janela).
+* `GET /trends/{instance_id}` — tendencia horaria/diaria (Item 1 long-term trends) a partir
+  de `metric_samples_hourly` / `metric_samples_daily`.
+* `GET /available-metrics/{instance_id}` — nomes de metricas distintos nos ultimos 7 dias,
+  para popular o seletor de metrica no frontend.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -24,7 +19,12 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db_session, resolve_time_window
+from app.api.deps import (
+    check_instance_access,
+    get_current_user,
+    get_db_session,
+    resolve_time_window,
+)
 from app.core.config import get_settings
 from app.repositories.metric_samples_repository import MetricSamplesRepository
 
@@ -48,6 +48,31 @@ class MetricSeriesResponse(BaseModel):
     points: list[MetricPointResponse]
 
 
+class TrendPointResponse(BaseModel):
+    """Um bucket de tendencia horaria ou diaria (continuous aggregate)."""
+
+    bucket: datetime
+    avg_value: float
+    min_value: float
+    max_value: float
+
+
+class MetricTrendResponse(BaseModel):
+    """Resposta de `/trends/{instance_id}` — serie de buckets agregados."""
+
+    instance_id: UUID
+    metric_name: str
+    granularity: str
+    points: list[TrendPointResponse]
+
+
+class AvailableMetricsResponse(BaseModel):
+    """Nomes de metricas disponiveis para uma instancia nos ultimos 7 dias."""
+
+    instance_id: UUID
+    metric_names: list[str]
+
+
 # --- Dependency providers -------------------------------------------------------------------
 
 
@@ -58,6 +83,80 @@ def get_metric_samples_repository(
 
 
 # --- Endpoints -------------------------------------------------------------------------------
+
+_MAX_TREND_DAYS = 365
+
+
+@router.get("/trends/{instance_id}", response_model=MetricTrendResponse)
+async def get_metric_trend(
+    instance_id: UUID,
+    _: Annotated[object, Depends(get_current_user)],
+    _access: Annotated[None, Depends(check_instance_access)],
+    repository: Annotated[MetricSamplesRepository, Depends(get_metric_samples_repository)],
+    metric_name: Annotated[str, Query()],
+    granularity: Annotated[Literal["hourly", "daily"], Query()] = "daily",
+    days: Annotated[int, Query(ge=1, le=_MAX_TREND_DAYS)] = 30,
+) -> MetricTrendResponse:
+    """Tendencia de uma metrica ao longo do tempo usando continuous aggregates.
+
+    `granularity=hourly` le `metric_samples_hourly` (retencao 90 dias, recomendado para janelas
+    ate 45 dias). `granularity=daily` le `metric_samples_daily` (retencao 5 anos, ate 365 dias).
+    `days` define a janela retroativa a partir de agora.
+    """
+    now = datetime.now(tz=UTC)
+    since = now - timedelta(days=days)
+
+    if granularity == "hourly":
+        raw_points = await repository.get_metric_trend_hourly(
+            instance_id=instance_id,
+            metric_name=metric_name,
+            since=since,
+            until=now,
+        )
+    else:
+        raw_points = await repository.get_metric_trend_daily(
+            instance_id=instance_id,
+            metric_name=metric_name,
+            since=since,
+            until=now,
+        )
+
+    points = [
+        TrendPointResponse(
+            bucket=p["bucket"],
+            avg_value=p["avg_value"],
+            min_value=p["min_value"],
+            max_value=p["max_value"],
+        )
+        for p in raw_points
+    ]
+    return MetricTrendResponse(
+        instance_id=instance_id,
+        metric_name=metric_name,
+        granularity=granularity,
+        points=points,
+    )
+
+
+@router.get("/available-metrics/{instance_id}", response_model=AvailableMetricsResponse)
+async def get_available_metrics(
+    instance_id: UUID,
+    _: Annotated[object, Depends(get_current_user)],
+    _access: Annotated[None, Depends(check_instance_access)],
+    repository: Annotated[MetricSamplesRepository, Depends(get_metric_samples_repository)],
+) -> AvailableMetricsResponse:
+    """Nomes de metricas distintos coletados para a instancia nos ultimos 7 dias.
+
+    Lido da hypertable bruta para garantir visibilidade de metricas recentes. Usado pelo
+    frontend para popular o seletor de metrica no painel de tendencias.
+    """
+    since = datetime.now(tz=UTC) - timedelta(days=7)
+    metric_names = await repository.get_distinct_metric_names(
+        target_type="instance",
+        target_id=instance_id,
+        since=since,
+    )
+    return AvailableMetricsResponse(instance_id=instance_id, metric_names=metric_names)
 
 
 @router.get("/{target_type}/{target_id}", response_model=list[MetricSeriesResponse])

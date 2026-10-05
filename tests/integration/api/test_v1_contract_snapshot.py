@@ -18,6 +18,12 @@ from app.main import app
 
 EXPECTED_REST_PATHS = {
     "/api/v1/health",
+    "/api/v1/auth/login",
+    "/api/v1/auth/me",
+    "/api/v1/auth/users",
+    "/api/v1/auth/users/{user_id}",
+    "/api/v1/auth/users/{user_id}/instances",
+    "/api/v1/auth/users/{user_id}/instances/{instance_id}",
     "/api/v1/instances",
     "/api/v1/instances/{instance_id}",
     "/api/v1/instances/{instance_id}/active",
@@ -56,6 +62,12 @@ EXPECTED_REST_PATHS = {
     "/api/v1/queries/users/{instance_id}",
     "/api/v1/queries/users-by-day/{instance_id}",
     "/api/v1/queries/users-by-hour/{instance_id}",
+    "/api/v1/queries/programs/{instance_id}",
+    "/api/v1/queries/programs-by-day/{instance_id}",
+    "/api/v1/queries/programs-by-hour/{instance_id}",
+    "/api/v1/queries/machines/{instance_id}",
+    "/api/v1/queries/machines-by-day/{instance_id}",
+    "/api/v1/queries/machines-by-hour/{instance_id}",
     "/api/v1/queries/timeslice/{instance_id}",
     "/api/v1/waits-blocking/blocking/{instance_id}",
     "/api/v1/waits-blocking/blocking/{instance_id}/incidents",
@@ -78,6 +90,11 @@ EXPECTED_REST_PATHS = {
     "/api/v1/deadlocks/{instance_id}/{deadlock_id}",
     "/api/v1/settings",
     "/api/v1/topology",
+    "/api/v1/capacity/forecast/{instance_id}",
+    "/api/v1/reports",
+    "/api/v1/reports/{report_id}",
+    "/api/v1/reports/{report_id}/toggle",
+    "/api/v1/reports/{report_id}/download",
 }
 
 EXPECTED_WEBSOCKET_PATH = "/api/v1/ws/live"

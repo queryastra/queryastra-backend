@@ -204,6 +204,16 @@ class Settings(BaseSettings):
         default=30.0, alias="TRANSACTION_ERROR_QUERY_TIMEOUT_SECONDS"
     )
 
+    # Autenticacao JWT (RBAC — app/services/auth_service.py).
+    jwt_secret_key: str = Field(
+        default="change-me-in-production-use-a-long-random-string", alias="JWT_SECRET_KEY"
+    )
+    jwt_algorithm: str = Field(default="HS256", alias="JWT_ALGORITHM")
+    jwt_expire_hours: int = Field(default=8, alias="JWT_EXPIRE_HOURS")
+    # Credenciais do usuario administrador criado automaticamente no startup.
+    admin_username: str = Field(default="admin", alias="ADMIN_USERNAME")
+    admin_password: str = Field(default="admin", alias="ADMIN_PASSWORD")
+
     # Canal de e-mail de notificacao de alerta (`app.workers.alerting_worker`). Todos vazios por
     # padrao = canal desabilitado (nenhum envio real, mesmo default seguro do webhook). So
     # `alert_smtp_host` habilita o envio; `alert_email_to` (lista separada por virgula) precisa
@@ -264,6 +274,22 @@ class Settings(BaseSettings):
     plan_history_check_interval_seconds: int = Field(
         default=86400, alias="PLAN_HISTORY_CHECK_INTERVAL_SECONDS"
     )
+
+    # Item 4 — Relatorios agendados (ReportWorker). Default false — mesmo padrao de seguranca
+    # dos demais workers: nunca liga coleta/geracao automatica sem configuracao explicita.
+    report_worker_enabled: bool = Field(default=False, alias="REPORT_WORKER_ENABLED")
+    # Intervalo (segundos) com que o worker checa relatorios vencidos. Default 60s (1 min) para
+    # nao atrasar demais uma execucao agendada para uma hora exata.
+    report_worker_check_interval_seconds: int = Field(
+        default=60, alias="REPORT_WORKER_CHECK_INTERVAL_SECONDS"
+    )
+
+    # Defaults gravados no banco na primeira inicializacao (system_settings seed no lifespan de
+    # app/main.py). Altere os valores em producao pelo app (tela Configuracoes -> Geral) — o
+    # seed so e aplicado uma vez (INSERT ON CONFLICT DO NOTHING), entao uma linha ja existente
+    # (usuario ja configurou) nunca e sobrescrita por um restart do backend.
+    blocking_min_duration_ms: int = Field(default=0, alias="BLOCKING_MIN_DURATION_MS")
+    sleeping_min_duration_ms: int = Field(default=0, alias="SLEEPING_MIN_DURATION_MS")
 
 
 @lru_cache

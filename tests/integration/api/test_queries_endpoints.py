@@ -1137,7 +1137,7 @@ async def test_get_query_plan_history_returns_snapshots_most_recent_first(
 async def test_timeslice_ten_minutes_by_database(
     client: AsyncClient, db_session: AsyncSession, test_instance: Instance
 ) -> None:
-    """"Fatia de Tempo" — dimensao "database", bucket sub-hora "ten_minutes"."""
+    """ "Fatia de Tempo" — dimensao "database", bucket sub-hora "ten_minutes"."""
     repo = QuerySamplesRepository(db_session)
     hour_start = datetime(2026, 9, 1, 10, 0, 0, tzinfo=UTC)
     await repo.insert_batch(
@@ -1182,9 +1182,7 @@ async def test_timeslice_ten_minutes_by_database(
     assert by_label["db_a"]["bucket_start"] != by_label["db_b"]["bucket_start"]
 
 
-async def test_timeslice_requires_from_and_to(
-    client: AsyncClient, test_instance: Instance
-) -> None:
+async def test_timeslice_requires_from_and_to(client: AsyncClient, test_instance: Instance) -> None:
     response = await client.get(f"/api/v1/queries/timeslice/{test_instance.id}")
     assert response.status_code == 422
 

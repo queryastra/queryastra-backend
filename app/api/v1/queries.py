@@ -52,7 +52,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db_session, resolve_time_window
+from app.api.deps import check_instance_access, get_db_session, resolve_time_window
 from app.core.config import get_settings
 from app.repositories.instances_repository import InstancesRepository
 from app.repositories.query_plan_snapshots_repository import QueryPlanSnapshotsRepository
@@ -124,6 +124,22 @@ class DbUserSummaryResponse(BaseModel):
     mesmo jeito que "Bancos de dados"."""
 
     db_user: str
+    execution_count: int
+    total_wait_time_ms: int
+    avg_wait_time_ms: float
+    wait_breakdown: list[WaitBreakdownEntryResponse]
+
+
+class ProgramSummaryResponse(BaseModel):
+    program: str
+    execution_count: int
+    total_wait_time_ms: int
+    avg_wait_time_ms: float
+    wait_breakdown: list[WaitBreakdownEntryResponse]
+
+
+class MachineSummaryResponse(BaseModel):
+    machine: str
     execution_count: int
     total_wait_time_ms: int
     avg_wait_time_ms: float
@@ -293,6 +309,7 @@ def get_query_plan_snapshots_repository(
 @router.get("/active/{instance_id}", response_model=list[QuerySampleResponse])
 async def list_active_queries(
     instance_id: UUID,
+    _access: Annotated[None, Depends(check_instance_access)],
     repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
     since: Annotated[datetime | None, Query(alias="from")] = None,
     until: Annotated[datetime | None, Query(alias="to")] = None,
@@ -314,11 +331,14 @@ async def list_active_queries(
 @router.get("/top-sql/{instance_id}", response_model=list[TopSqlEntryResponse])
 async def top_sql(
     instance_id: UUID,
+    _access: Annotated[None, Depends(check_instance_access)],
     repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
     since: Annotated[datetime | None, Query(alias="from")] = None,
     until: Annotated[datetime | None, Query(alias="to")] = None,
     database_name: Annotated[str | None, Query()] = None,
     db_user: Annotated[str | None, Query()] = None,
+    program: Annotated[str | None, Query()] = None,
+    machine: Annotated[str | None, Query()] = None,
 ) -> list[TopSqlEntryResponse]:
     """Top SQL agregado de uma instancia, calculado em tempo real sobre `query_samples`
     (GROUP BY sql_hash). PostgreSQL: nao depende de `pg_stat_statements` (agrega o que o
@@ -340,6 +360,8 @@ async def top_sql(
         settings.api_read_max_rows,
         database_name=database_name,
         db_user=db_user,
+        program=program,
+        machine=machine,
     )
     breakdown_rows = await repository.wait_breakdown_by_sql_hash(
         instance_id,
@@ -348,6 +370,8 @@ async def top_sql(
         settings.api_read_max_rows,
         database_name=database_name,
         db_user=db_user,
+        program=program,
+        machine=machine,
     )
     breakdown_by_hash: dict[str, list[WaitBreakdownEntryResponse]] = {}
     for row in breakdown_rows:
@@ -371,6 +395,7 @@ async def top_sql(
 @router.get("/top-sql-by-wait-type/{instance_id}", response_model=list[TopSqlEntryResponse])
 async def top_sql_by_wait_type(
     instance_id: UUID,
+    _access: Annotated[None, Depends(check_instance_access)],
     repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
     wait_event_native: Annotated[str, Query()],
     since: Annotated[datetime | None, Query(alias="from")] = None,
@@ -418,6 +443,7 @@ async def top_sql_by_wait_type(
 @router.get("/database-names/{instance_id}", response_model=list[str])
 async def list_database_names(
     instance_id: UUID,
+    _access: Annotated[None, Depends(check_instance_access)],
     repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
     since: Annotated[datetime | None, Query(alias="from")] = None,
 ) -> list[str]:
@@ -441,6 +467,7 @@ async def list_database_names(
 @router.get("/databases/{instance_id}", response_model=list[DatabaseSummaryResponse])
 async def list_databases(
     instance_id: UUID,
+    _access: Annotated[None, Depends(check_instance_access)],
     repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
     since: Annotated[datetime | None, Query(alias="from")] = None,
     until: Annotated[datetime | None, Query(alias="to")] = None,
@@ -481,6 +508,7 @@ async def list_databases(
 @router.get("/databases-by-day/{instance_id}", response_model=list[BucketEntryResponse])
 async def list_databases_by_day(
     instance_id: UUID,
+    _access: Annotated[None, Depends(check_instance_access)],
     repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
     since: Annotated[datetime | None, Query(alias="from")] = None,
     until: Annotated[datetime | None, Query(alias="to")] = None,
@@ -508,11 +536,14 @@ async def list_databases_by_day(
 @router.get("/top-sql-by-day/{instance_id}", response_model=list[BucketEntryResponse])
 async def list_top_sql_by_day(
     instance_id: UUID,
+    _access: Annotated[None, Depends(check_instance_access)],
     repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
     since: Annotated[datetime | None, Query(alias="from")] = None,
     until: Annotated[datetime | None, Query(alias="to")] = None,
     database_name: Annotated[str | None, Query()] = None,
     db_user: Annotated[str | None, Query()] = None,
+    program: Annotated[str | None, Query()] = None,
+    machine: Annotated[str | None, Query()] = None,
 ) -> list[BucketEntryResponse]:
     """Visao historica "Tudo" do nivel 2 (Instancia -> Banco -> Query, ou da dimensao
     "Usuarios"): um dia por barra, empilhada por query — mesmos `database_name`/`db_user`
@@ -530,6 +561,8 @@ async def list_top_sql_by_day(
         settings.api_read_max_rows,
         database_name=database_name,
         db_user=db_user,
+        program=program,
+        machine=machine,
         bucket="day",
     )
     return [
@@ -545,6 +578,7 @@ async def list_top_sql_by_day(
 @router.get("/databases-by-hour/{instance_id}", response_model=list[BucketEntryResponse])
 async def list_databases_by_hour(
     instance_id: UUID,
+    _access: Annotated[None, Depends(check_instance_access)],
     repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
     since: Annotated[datetime | None, Query(alias="from")] = None,
     until: Annotated[datetime | None, Query(alias="to")] = None,
@@ -573,11 +607,14 @@ async def list_databases_by_hour(
 @router.get("/top-sql-by-hour/{instance_id}", response_model=list[BucketEntryResponse])
 async def list_top_sql_by_hour(
     instance_id: UUID,
+    _access: Annotated[None, Depends(check_instance_access)],
     repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
     since: Annotated[datetime | None, Query(alias="from")] = None,
     until: Annotated[datetime | None, Query(alias="to")] = None,
     database_name: Annotated[str | None, Query()] = None,
     db_user: Annotated[str | None, Query()] = None,
+    program: Annotated[str | None, Query()] = None,
+    machine: Annotated[str | None, Query()] = None,
 ) -> list[BucketEntryResponse]:
     """Detalhamento por hora do nivel 2, dentro de um dia especifico — mesma ideia de
     `list_databases_by_hour`, empilhado por query em vez de banco (ou por usuario, quando
@@ -593,6 +630,8 @@ async def list_top_sql_by_hour(
         settings.api_read_max_rows,
         database_name=database_name,
         db_user=db_user,
+        program=program,
+        machine=machine,
         bucket="hour",
     )
     return [
@@ -608,6 +647,7 @@ async def list_top_sql_by_hour(
 @router.get("/wait-types/{instance_id}", response_model=list[WaitTypeSummaryResponse])
 async def list_wait_types(
     instance_id: UUID,
+    _access: Annotated[None, Depends(check_instance_access)],
     repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
     since: Annotated[datetime | None, Query(alias="from")] = None,
     until: Annotated[datetime | None, Query(alias="to")] = None,
@@ -628,6 +668,7 @@ async def list_wait_types(
 @router.get("/wait-types-by-day/{instance_id}", response_model=list[BucketEntryResponse])
 async def list_wait_types_by_day(
     instance_id: UUID,
+    _access: Annotated[None, Depends(check_instance_access)],
     repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
     since: Annotated[datetime | None, Query(alias="from")] = None,
     until: Annotated[datetime | None, Query(alias="to")] = None,
@@ -654,6 +695,7 @@ async def list_wait_types_by_day(
 @router.get("/wait-types-by-hour/{instance_id}", response_model=list[BucketEntryResponse])
 async def list_wait_types_by_hour(
     instance_id: UUID,
+    _access: Annotated[None, Depends(check_instance_access)],
     repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
     since: Annotated[datetime | None, Query(alias="from")] = None,
     until: Annotated[datetime | None, Query(alias="to")] = None,
@@ -680,6 +722,7 @@ async def list_wait_types_by_hour(
 @router.get("/users/{instance_id}", response_model=list[DbUserSummaryResponse])
 async def list_db_users(
     instance_id: UUID,
+    _access: Annotated[None, Depends(check_instance_access)],
     repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
     since: Annotated[datetime | None, Query(alias="from")] = None,
     until: Annotated[datetime | None, Query(alias="to")] = None,
@@ -717,6 +760,7 @@ async def list_db_users(
 @router.get("/users-by-day/{instance_id}", response_model=list[BucketEntryResponse])
 async def list_db_users_by_day(
     instance_id: UUID,
+    _access: Annotated[None, Depends(check_instance_access)],
     repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
     since: Annotated[datetime | None, Query(alias="from")] = None,
     until: Annotated[datetime | None, Query(alias="to")] = None,
@@ -743,6 +787,7 @@ async def list_db_users_by_day(
 @router.get("/users-by-hour/{instance_id}", response_model=list[BucketEntryResponse])
 async def list_db_users_by_hour(
     instance_id: UUID,
+    _access: Annotated[None, Depends(check_instance_access)],
     repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
     since: Annotated[datetime | None, Query(alias="from")] = None,
     until: Annotated[datetime | None, Query(alias="to")] = None,
@@ -766,29 +811,212 @@ async def list_db_users_by_hour(
     ]
 
 
+@router.get("/programs/{instance_id}", response_model=list[ProgramSummaryResponse])
+async def list_programs(
+    instance_id: UUID,
+    _access: Annotated[None, Depends(check_instance_access)],
+    repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
+    since: Annotated[datetime | None, Query(alias="from")] = None,
+    until: Annotated[datetime | None, Query(alias="to")] = None,
+) -> list[ProgramSummaryResponse]:
+    """Dimensao "Programs" do drill-down: agrega `query_samples` por `program`, com decomposicao
+    por wait nativo — mesmo padrao de `list_databases`."""
+    settings = get_settings()
+    resolved_since, resolved_until = resolve_time_window(
+        since, until, timedelta(seconds=settings.api_read_default_lookback_seconds)
+    )
+    rows = await repository.top_programs(
+        instance_id, resolved_since, resolved_until, settings.api_read_max_rows
+    )
+    breakdown_rows = await repository.wait_breakdown_by_program(
+        instance_id, resolved_since, resolved_until, settings.api_read_max_rows
+    )
+    breakdown_by_program: dict[str, list[WaitBreakdownEntryResponse]] = {}
+    for row in breakdown_rows:
+        breakdown_by_program.setdefault(row.program, []).append(
+            WaitBreakdownEntryResponse(
+                wait_event_native=row.wait_event_native,
+                total_wait_time_ms=row.total_wait_time_ms,
+            )
+        )
+    return [
+        ProgramSummaryResponse(
+            **row._mapping, wait_breakdown=breakdown_by_program.get(row.program, [])
+        )
+        for row in rows
+    ]
+
+
+@router.get("/programs-by-day/{instance_id}", response_model=list[BucketEntryResponse])
+async def list_programs_by_day(
+    instance_id: UUID,
+    _access: Annotated[None, Depends(check_instance_access)],
+    repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
+    since: Annotated[datetime | None, Query(alias="from")] = None,
+    until: Annotated[datetime | None, Query(alias="to")] = None,
+) -> list[BucketEntryResponse]:
+    """Visao historica "Tudo" da dimensao "Programs": um dia por barra, empilhada por programa.
+    `label` e `program`."""
+    settings = get_settings()
+    resolved_since, resolved_until = resolve_time_window(
+        since, until, timedelta(seconds=settings.api_read_default_lookback_seconds)
+    )
+    rows = await repository.wait_time_by_bucket_and_program(
+        instance_id, resolved_since, resolved_until, settings.api_read_max_rows, bucket="day"
+    )
+    return [
+        BucketEntryResponse(
+            bucket_start=row.bucket_start,
+            label=row.program,
+            total_wait_time_ms=row.total_wait_time_ms,
+        )
+        for row in rows
+    ]
+
+
+@router.get("/programs-by-hour/{instance_id}", response_model=list[BucketEntryResponse])
+async def list_programs_by_hour(
+    instance_id: UUID,
+    _access: Annotated[None, Depends(check_instance_access)],
+    repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
+    since: Annotated[datetime | None, Query(alias="from")] = None,
+    until: Annotated[datetime | None, Query(alias="to")] = None,
+) -> list[BucketEntryResponse]:
+    """Detalhamento por hora da dimensao "Programs", dentro de um dia especifico."""
+    settings = get_settings()
+    resolved_since, resolved_until = resolve_time_window(
+        since, until, timedelta(seconds=settings.api_read_default_lookback_seconds)
+    )
+    rows = await repository.wait_time_by_bucket_and_program(
+        instance_id, resolved_since, resolved_until, settings.api_read_max_rows, bucket="hour"
+    )
+    return [
+        BucketEntryResponse(
+            bucket_start=row.bucket_start,
+            label=row.program,
+            total_wait_time_ms=row.total_wait_time_ms,
+        )
+        for row in rows
+    ]
+
+
+@router.get("/machines/{instance_id}", response_model=list[MachineSummaryResponse])
+async def list_machines(
+    instance_id: UUID,
+    _access: Annotated[None, Depends(check_instance_access)],
+    repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
+    since: Annotated[datetime | None, Query(alias="from")] = None,
+    until: Annotated[datetime | None, Query(alias="to")] = None,
+) -> list[MachineSummaryResponse]:
+    """Dimensao "Machines" do drill-down: agrega `query_samples` por `machine`, com decomposicao
+    por wait nativo — mesmo padrao de `list_databases`."""
+    settings = get_settings()
+    resolved_since, resolved_until = resolve_time_window(
+        since, until, timedelta(seconds=settings.api_read_default_lookback_seconds)
+    )
+    rows = await repository.top_machines(
+        instance_id, resolved_since, resolved_until, settings.api_read_max_rows
+    )
+    breakdown_rows = await repository.wait_breakdown_by_machine(
+        instance_id, resolved_since, resolved_until, settings.api_read_max_rows
+    )
+    breakdown_by_machine: dict[str, list[WaitBreakdownEntryResponse]] = {}
+    for row in breakdown_rows:
+        breakdown_by_machine.setdefault(row.machine, []).append(
+            WaitBreakdownEntryResponse(
+                wait_event_native=row.wait_event_native,
+                total_wait_time_ms=row.total_wait_time_ms,
+            )
+        )
+    return [
+        MachineSummaryResponse(
+            **row._mapping, wait_breakdown=breakdown_by_machine.get(row.machine, [])
+        )
+        for row in rows
+    ]
+
+
+@router.get("/machines-by-day/{instance_id}", response_model=list[BucketEntryResponse])
+async def list_machines_by_day(
+    instance_id: UUID,
+    _access: Annotated[None, Depends(check_instance_access)],
+    repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
+    since: Annotated[datetime | None, Query(alias="from")] = None,
+    until: Annotated[datetime | None, Query(alias="to")] = None,
+) -> list[BucketEntryResponse]:
+    """Visao historica "Tudo" da dimensao "Machines": um dia por barra, empilhada por maquina.
+    `label` e `machine`."""
+    settings = get_settings()
+    resolved_since, resolved_until = resolve_time_window(
+        since, until, timedelta(seconds=settings.api_read_default_lookback_seconds)
+    )
+    rows = await repository.wait_time_by_bucket_and_machine(
+        instance_id, resolved_since, resolved_until, settings.api_read_max_rows, bucket="day"
+    )
+    return [
+        BucketEntryResponse(
+            bucket_start=row.bucket_start,
+            label=row.machine,
+            total_wait_time_ms=row.total_wait_time_ms,
+        )
+        for row in rows
+    ]
+
+
+@router.get("/machines-by-hour/{instance_id}", response_model=list[BucketEntryResponse])
+async def list_machines_by_hour(
+    instance_id: UUID,
+    _access: Annotated[None, Depends(check_instance_access)],
+    repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
+    since: Annotated[datetime | None, Query(alias="from")] = None,
+    until: Annotated[datetime | None, Query(alias="to")] = None,
+) -> list[BucketEntryResponse]:
+    """Detalhamento por hora da dimensao "Machines", dentro de um dia especifico."""
+    settings = get_settings()
+    resolved_since, resolved_until = resolve_time_window(
+        since, until, timedelta(seconds=settings.api_read_default_lookback_seconds)
+    )
+    rows = await repository.wait_time_by_bucket_and_machine(
+        instance_id, resolved_since, resolved_until, settings.api_read_max_rows, bucket="hour"
+    )
+    return [
+        BucketEntryResponse(
+            bucket_start=row.bucket_start,
+            label=row.machine,
+            total_wait_time_ms=row.total_wait_time_ms,
+        )
+        for row in rows
+    ]
+
+
 _TIMESLICE_DIMENSIONS = {
     "database": ("wait_time_by_bucket_and_database", "database_name"),
     "sql": ("wait_time_by_bucket_and_sql_hash", "sql_hash"),
     "wait_type": ("wait_time_by_bucket_and_wait_type", "wait_event_native"),
     "db_user": ("wait_time_by_bucket_and_db_user", "db_user"),
+    "program": ("wait_time_by_bucket_and_program", "program"),
+    "machine": ("wait_time_by_bucket_and_machine", "machine"),
 }
 
 
 @router.get("/timeslice/{instance_id}", response_model=list[BucketEntryResponse])
 async def list_timeslice(
     instance_id: UUID,
+    _access: Annotated[None, Depends(check_instance_access)],
     repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
     since: Annotated[datetime, Query(alias="from")],
     until: Annotated[datetime, Query(alias="to")],
-    dimension: Annotated[Literal["database", "sql", "wait_type", "db_user"], Query()] = (
-        "database"
-    ),
+    dimension: Annotated[
+        Literal["database", "sql", "wait_type", "db_user", "program", "machine"], Query()
+    ] = "database",
     bucket: Annotated[
         Literal["ten_minutes", "minute", "ten_seconds", "second"], Query()
     ] = "ten_minutes",
     database_name: Annotated[str | None, Query()] = None,
     db_user: Annotated[str | None, Query()] = None,
     wait_event_native: Annotated[str | None, Query()] = None,
+    program: Annotated[str | None, Query()] = None,
+    machine: Annotated[str | None, Query()] = None,
 ) -> list[BucketEntryResponse]:
     """ "Fatia de Tempo" — drill-down temporal fino DENTRO de uma janela já estreita (uma hora, um
     intervalo de 10min, etc.), pedido explícito do usuário com o "Timeslice" do SolarWinds DPA
@@ -808,15 +1036,19 @@ async def list_timeslice(
     repository_method_name, label_column = _TIMESLICE_DIMENSIONS[dimension]
     repository_method = getattr(repository, repository_method_name)
     settings = get_settings()
-    extra_kwargs = (
-        {
+    extra_kwargs: dict = {}
+    if dimension == "sql":
+        extra_kwargs = {
             "database_name": database_name,
             "db_user": db_user,
             "wait_event_native": wait_event_native,
+            "program": program,
+            "machine": machine,
         }
-        if dimension == "sql"
-        else {}
-    )
+    elif dimension == "program":
+        extra_kwargs = {}
+    elif dimension == "machine":
+        extra_kwargs = {}
     rows = await repository_method(
         instance_id, since, until, settings.api_read_max_rows, bucket=bucket, **extra_kwargs
     )
@@ -834,6 +1066,7 @@ async def list_timeslice(
 async def get_query_detail(
     instance_id: UUID,
     sql_hash: str,
+    _access: Annotated[None, Depends(check_instance_access)],
     repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
     since: Annotated[datetime | None, Query(alias="from")] = None,
     until: Annotated[datetime | None, Query(alias="to")] = None,
@@ -891,6 +1124,7 @@ async def get_query_detail(
 async def get_query_stats_by_bucket(
     instance_id: UUID,
     sql_hash: str,
+    _access: Annotated[None, Depends(check_instance_access)],
     repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
     since: Annotated[datetime | None, Query(alias="from")] = None,
     until: Annotated[datetime | None, Query(alias="to")] = None,
@@ -941,6 +1175,7 @@ async def get_query_stats_by_bucket(
 async def get_query_sql_insight_analysis(
     instance_id: UUID,
     sql_hash: str,
+    _access: Annotated[None, Depends(check_instance_access)],
     repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
     sql_insight_client: Annotated[SqlInsightClient, Depends(get_sql_insight_client)],
     since: Annotated[datetime | None, Query(alias="from")] = None,
@@ -977,18 +1212,22 @@ async def get_query_sql_insight_analysis(
 async def get_query_execution_plan(
     instance_id: UUID,
     sql_hash: str,
+    _access: Annotated[None, Depends(check_instance_access)],
     instances_repository: Annotated[InstancesRepository, Depends(get_instances_repository)],
+    repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
     credential_resolver: Annotated[CredentialResolver, Depends(get_credential_resolver)],
 ) -> ExecutionPlanResponse:
     """Busca sob demanda (nao parte do ciclo de coleta) do plano de execucao do SQL Server que
-    corresponde a este `sql_hash` — tenta o plano REAL primeiro, cai pro cacheado/estimado
-    (Etapa 11) se a sessao original ja nao estiver mais rodando. PostgreSQL: `available=False`
-    direto, sem tentar conectar (sem caminho SQL-acessivel para planos, ver
-    `app.services.execution_plan_service`)."""
+    corresponde a este `sql_hash`. Fluxo: plano REAL (sessao ativa) → cache de plano → Query
+    Store (Item 10, bancos onde o hash foi visto nos ultimos 30 dias). PostgreSQL: `available=False`
+    direto, sem tentar conectar."""
     instance = await instances_repository.get_by_id(instance_id)
     if instance is None:
         raise HTTPException(status_code=404, detail="Instancia nao encontrada.")
-    result = await fetch_execution_plan(instance, sql_hash, credential_resolver)
+    settings = get_settings()
+    since = datetime.now(UTC) - timedelta(seconds=settings.api_read_default_lookback_seconds)
+    database_names = await repository.list_databases_for_hash(instance_id, sql_hash, since)
+    result = await fetch_execution_plan(instance, sql_hash, credential_resolver, database_names)
     return ExecutionPlanResponse(
         available=result.available,
         plan_xml=result.plan_xml,
@@ -1003,6 +1242,7 @@ async def get_query_execution_plan(
 async def get_query_plan_history(
     instance_id: UUID,
     sql_hash: str,
+    _access: Annotated[None, Depends(check_instance_access)],
     repository: Annotated[
         QueryPlanSnapshotsRepository, Depends(get_query_plan_snapshots_repository)
     ],

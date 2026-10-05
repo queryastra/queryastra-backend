@@ -18,7 +18,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import DateTime, ForeignKey
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -36,3 +36,9 @@ class MissingIndexCollectionRun(Base):
     collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     # `None` quando o motor nao devolveu um valor (erro pontual de coleta) - nunca inventado.
     stats_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Quando o monitoramento comecou para esta instancia — definido no primeiro upsert e NUNCA
+    # sobrescrito em coletas subsequentes (COALESCE no upsert). Cobre o caso em que a instancia
+    # nao tem sugestoes (min(first_seen_at) seria NULL, mas first_collected_at fica definido).
+    first_collected_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )

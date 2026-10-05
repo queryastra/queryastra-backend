@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import datetime, timedelta
+from typing import Any
 from uuid import UUID
 
 import sqlalchemy as sa
@@ -173,6 +174,45 @@ class MetricSamplesRepository(BaseRepository):
         )
         return (await self._session.execute(stmt)).first()
 
+    async def get_daily_averages_for_forecast(
+        self,
+        target_type: str,
+        target_id: UUID,
+        metric_name: str,
+        since: datetime,
+        aggregate_fn: str = "AVG",
+    ) -> list[tuple[str, float]]:
+        """Médias (ou mínimos) diárias de uma métrica para regressão de capacidade.
+
+        Lê de `metric_samples_daily` (continuous aggregate, retenção 5 anos). Quando
+        `aggregate_fn="MIN"` (ex.: disco livre — queremos o pior volume), devolve o mínimo
+        entre todos os labels naquele dia em vez da média. Retorna lista de (date_str, value).
+        """
+        # aggregate_fn é constante interna (nunca input do usuário) — seguro usar em f-string.
+        agg = "MIN" if aggregate_fn == "MIN" else "AVG"
+        stmt = sa.text(f"""
+            SELECT
+                DATE(bucket AT TIME ZONE 'UTC')::text AS date_str,
+                {agg}(avg_value) AS value
+            FROM metric_samples_daily
+            WHERE target_type = :target_type
+              AND target_id = :target_id
+              AND metric_name = :metric_name
+              AND bucket >= :since
+            GROUP BY DATE(bucket AT TIME ZONE 'UTC')
+            ORDER BY DATE(bucket AT TIME ZONE 'UTC')
+        """)
+        result = await self._session.execute(
+            stmt,
+            {
+                "target_type": target_type,
+                "target_id": str(target_id),
+                "metric_name": metric_name,
+                "since": since,
+            },
+        )
+        return [(row.date_str, float(row.value)) for row in result.fetchall()]
+
     async def count_distinct_metrics_since(
         self,
         target_type: str,
@@ -189,3 +229,121 @@ class MetricSamplesRepository(BaseRepository):
             metric_samples_table.c.metric_name.notin_(exclude_metric_names),
         )
         return (await self._session.execute(stmt)).scalar_one()
+
+    async def get_metric_trend_hourly(
+        self,
+        instance_id: UUID,
+        metric_name: str,
+        since: datetime,
+        until: datetime,
+    ) -> list[dict[str, Any]]:
+        """Medias horarias de uma metrica de instancia a partir de `metric_samples_hourly`.
+
+        Agrega todos os `labels` por bucket (AVG de avg_value, MIN de min_value, MAX de
+        max_value) — metricas com multiplos labels (ex.: freespace por volume) sao colapsadas
+        numa unica linha por hora, adequado para exibicao de tendencia agregada.
+
+        Retorna lista de dicts `{bucket, avg_value, min_value, max_value}`.
+        """
+        stmt = sa.text("""
+            SELECT
+                bucket,
+                AVG(avg_value) AS avg_value,
+                MIN(min_value) AS min_value,
+                MAX(max_value) AS max_value
+            FROM metric_samples_hourly
+            WHERE target_type = 'instance'
+              AND target_id   = :target_id
+              AND metric_name = :metric_name
+              AND bucket >= :since
+              AND bucket <  :until
+            GROUP BY bucket
+            ORDER BY bucket
+        """)
+        result = await self._session.execute(
+            stmt,
+            {
+                "target_id": str(instance_id),
+                "metric_name": metric_name,
+                "since": since,
+                "until": until,
+            },
+        )
+        return [
+            {
+                "bucket": row.bucket,
+                "avg_value": float(row.avg_value),
+                "min_value": float(row.min_value),
+                "max_value": float(row.max_value),
+            }
+            for row in result.fetchall()
+        ]
+
+    async def get_metric_trend_daily(
+        self,
+        instance_id: UUID,
+        metric_name: str,
+        since: datetime,
+        until: datetime,
+    ) -> list[dict[str, Any]]:
+        """Medias diarias de uma metrica de instancia a partir de `metric_samples_daily`.
+
+        Mesma logica de agregacao de `get_metric_trend_hourly` mas usando a view diaria
+        (retencao de 5 anos — adequada para janelas longas ate 365 dias).
+        """
+        stmt = sa.text("""
+            SELECT
+                bucket,
+                AVG(avg_value) AS avg_value,
+                MIN(min_value) AS min_value,
+                MAX(max_value) AS max_value
+            FROM metric_samples_daily
+            WHERE target_type = 'instance'
+              AND target_id   = :target_id
+              AND metric_name = :metric_name
+              AND bucket >= :since
+              AND bucket <  :until
+            GROUP BY bucket
+            ORDER BY bucket
+        """)
+        result = await self._session.execute(
+            stmt,
+            {
+                "target_id": str(instance_id),
+                "metric_name": metric_name,
+                "since": since,
+                "until": until,
+            },
+        )
+        return [
+            {
+                "bucket": row.bucket,
+                "avg_value": float(row.avg_value),
+                "min_value": float(row.min_value),
+                "max_value": float(row.max_value),
+            }
+            for row in result.fetchall()
+        ]
+
+    async def get_distinct_metric_names(
+        self,
+        target_type: str,
+        target_id: UUID,
+        since: datetime,
+    ) -> list[str]:
+        """Nomes de metricas distintos coletados para o alvo desde `since`.
+
+        Lido da hypertable bruta (`metric_samples`) — garante visibilidade de metricas
+        recentes mesmo quando os continuous aggregates ainda nao materializaram o ultimo bucket.
+        """
+        stmt = (
+            sa.select(sa.distinct(metric_samples_table.c.metric_name))
+            .where(
+                metric_samples_table.c.target_type == target_type,
+                metric_samples_table.c.target_id == target_id,
+                metric_samples_table.c.time >= since,
+            )
+            .order_by(metric_samples_table.c.metric_name)
+        )
+        result = await self._session.execute(stmt)
+        return [row[0] for row in result.fetchall()]

@@ -115,7 +115,7 @@ class QuerySamplesRepository(BaseRepository):
     _EFFECTIVE_WAIT_SELECT = """
         SELECT
             time, session_id, sql_hash, sql_name, sql_text_masked, database_name, db_user,
-            wait_type, wait_event_native, wait_time_ms,
+            program, machine, wait_type, wait_event_native, wait_time_ms,
             CASE
                 WHEN wait_event_native = ANY(:benign_wait_types) THEN 0
                 WHEN session_id IS NOT NULL
@@ -298,12 +298,32 @@ class QuerySamplesRepository(BaseRepository):
         dados da tela de Configurações usava `top_sql_by_database`, que roda a CTE de
         `effective_wait_ms`/`effective_cpu_ms` — window function `LAG()` por sessão sobre TODO o
         histórico — só pra listar nomes; numa instância com muito volume, isso deixava o select
-        "travado" por vários segundos, ou nem abrir de fato antes do usuário desistir). Um simples
+        "travado" por vários segundos, ou nem abrir de fora antes do usuário desistir). Um simples
         `SELECT DISTINCT database_name` não precisa de nenhuma dessas contas."""
         stmt = (
             sa.select(query_samples_table.c.database_name)
             .where(
                 query_samples_table.c.instance_id == instance_id,
+                query_samples_table.c.time >= since,
+                query_samples_table.c.database_name.is_not(None),
+            )
+            .distinct()
+            .order_by(query_samples_table.c.database_name)
+        )
+        result = await self._session.execute(stmt)
+        return [row[0] for row in result.fetchall()]
+
+    async def list_databases_for_hash(
+        self, instance_id: UUID, sql_hash: str, since: datetime
+    ) -> list[str]:
+        """Nomes de banco onde `sql_hash` foi visto desde `since` — usado pelo endpoint de plano
+        de execucao para restringir a busca no Query Store aos bancos relevantes, evitando varrer
+        todos os bancos da instancia."""
+        stmt = (
+            sa.select(query_samples_table.c.database_name)
+            .where(
+                query_samples_table.c.instance_id == instance_id,
+                query_samples_table.c.sql_hash == sql_hash,
                 query_samples_table.c.time >= since,
                 query_samples_table.c.database_name.is_not(None),
             )
@@ -321,6 +341,8 @@ class QuerySamplesRepository(BaseRepository):
         limit: int,
         database_name: str | None = None,
         db_user: str | None = None,
+        program: str | None = None,
+        machine: str | None = None,
     ) -> list[sa.Row]:
         """Agrega `query_samples` bruto por `sql_hash`: execution_count/total/avg via GROUP BY;
         sql_name/sql_text_masked/database_name da linha mais recente por hash (DISTINCT ON); wait
@@ -346,6 +368,8 @@ class QuerySamplesRepository(BaseRepository):
                 SELECT * FROM effective
                 WHERE (CAST(:database_name AS text) IS NULL OR database_name = :database_name)
                   AND (CAST(:db_user AS text) IS NULL OR db_user = :db_user)
+                  AND (CAST(:program AS text) IS NULL OR program = :program)
+                  AND (CAST(:machine AS text) IS NULL OR machine = :machine)
             ),
             agg AS (
                 SELECT sql_hash, count(*) AS execution_count,
@@ -391,6 +415,8 @@ class QuerySamplesRepository(BaseRepository):
                 "limit": limit,
                 "database_name": database_name,
                 "db_user": db_user,
+                "program": program,
+                "machine": machine,
                 "benign_wait_types": list(self._BENIGN_WAIT_EVENT_NATIVE),
             },
         )
@@ -698,6 +724,224 @@ class QuerySamplesRepository(BaseRepository):
         )
         return list(result.fetchall())
 
+    async def top_programs(
+        self, instance_id: UUID, since: datetime, until: datetime, limit: int
+    ) -> list[sa.Row]:
+        stmt = sa.text(
+            f"""
+            WITH effective AS ({self._EFFECTIVE_WAIT_SELECT})
+            SELECT
+                COALESCE(program, 'desconhecido') AS program,
+                count(*) AS execution_count,
+                coalesce(sum(coalesce(effective_wait_ms, 0) + effective_cpu_ms), 0)
+                    AS total_wait_time_ms,
+                coalesce(avg(coalesce(effective_wait_ms, 0) + effective_cpu_ms), 0)
+                    AS avg_wait_time_ms
+            FROM effective
+            GROUP BY COALESCE(program, 'desconhecido')
+            ORDER BY total_wait_time_ms DESC
+            LIMIT :limit
+        """
+        )
+        result = await self._session.execute(
+            stmt,
+            {
+                "instance_id": instance_id,
+                "since": since,
+                "until": until,
+                "limit": limit,
+                "benign_wait_types": list(self._BENIGN_WAIT_EVENT_NATIVE),
+            },
+        )
+        return list(result.fetchall())
+
+    async def wait_breakdown_by_program(
+        self, instance_id: UUID, since: datetime, until: datetime, limit: int
+    ) -> list[sa.Row]:
+        stmt = sa.text(
+            f"""
+            WITH effective AS ({self._EFFECTIVE_WAIT_SELECT}),
+            combined AS (
+                SELECT COALESCE(program, 'desconhecido') AS program,
+                       COALESCE(wait_event_native, 'desconhecido') AS wait_event_native,
+                       effective_wait_ms AS ms
+                FROM effective
+                WHERE {self._NOT_BENIGN_WAIT_FILTER} AND {self._NOT_CPU_ONLY_FILTER}
+                UNION ALL
+                SELECT COALESCE(program, 'desconhecido') AS program,
+                       'Memory/CPU' AS wait_event_native,
+                       effective_cpu_ms AS ms
+                FROM effective
+                WHERE wait_event_native IS NULL AND coalesce(wait_time_ms, 0) = 0
+            )
+            SELECT
+                program,
+                wait_event_native,
+                coalesce(sum(ms), 0) AS total_wait_time_ms
+            FROM combined
+            GROUP BY program, wait_event_native
+            ORDER BY program, total_wait_time_ms DESC
+            LIMIT :limit
+        """
+        )
+        result = await self._session.execute(
+            stmt,
+            {
+                "instance_id": instance_id,
+                "since": since,
+                "until": until,
+                "limit": limit,
+                "benign_wait_types": list(self._BENIGN_WAIT_EVENT_NATIVE),
+            },
+        )
+        return list(result.fetchall())
+
+    async def wait_time_by_bucket_and_program(
+        self,
+        instance_id: UUID,
+        since: datetime,
+        until: datetime,
+        limit: int,
+        bucket: TimeBucket = "day",
+    ) -> list[sa.Row]:
+        bucket_start_sql, group_by_sql = self._bucket_sql(bucket)
+        stmt = sa.text(
+            f"""
+            WITH effective AS ({self._EFFECTIVE_WAIT_SELECT})
+            SELECT
+                {bucket_start_sql} AS bucket_start,
+                COALESCE(program, 'desconhecido') AS program,
+                coalesce(sum(effective_wait_ms), 0) AS total_wait_time_ms
+            FROM effective
+            GROUP BY
+                {group_by_sql},
+                COALESCE(program, 'desconhecido')
+            ORDER BY bucket_start, total_wait_time_ms DESC
+            LIMIT :limit
+        """
+        )
+        result = await self._session.execute(
+            stmt,
+            {
+                "instance_id": instance_id,
+                "since": since,
+                "until": until,
+                "limit": limit,
+                "bucket": bucket,
+                "benign_wait_types": list(self._BENIGN_WAIT_EVENT_NATIVE),
+            },
+        )
+        return list(result.fetchall())
+
+    async def top_machines(
+        self, instance_id: UUID, since: datetime, until: datetime, limit: int
+    ) -> list[sa.Row]:
+        stmt = sa.text(
+            f"""
+            WITH effective AS ({self._EFFECTIVE_WAIT_SELECT})
+            SELECT
+                COALESCE(machine, 'desconhecido') AS machine,
+                count(*) AS execution_count,
+                coalesce(sum(coalesce(effective_wait_ms, 0) + effective_cpu_ms), 0)
+                    AS total_wait_time_ms,
+                coalesce(avg(coalesce(effective_wait_ms, 0) + effective_cpu_ms), 0)
+                    AS avg_wait_time_ms
+            FROM effective
+            GROUP BY COALESCE(machine, 'desconhecido')
+            ORDER BY total_wait_time_ms DESC
+            LIMIT :limit
+        """
+        )
+        result = await self._session.execute(
+            stmt,
+            {
+                "instance_id": instance_id,
+                "since": since,
+                "until": until,
+                "limit": limit,
+                "benign_wait_types": list(self._BENIGN_WAIT_EVENT_NATIVE),
+            },
+        )
+        return list(result.fetchall())
+
+    async def wait_breakdown_by_machine(
+        self, instance_id: UUID, since: datetime, until: datetime, limit: int
+    ) -> list[sa.Row]:
+        stmt = sa.text(
+            f"""
+            WITH effective AS ({self._EFFECTIVE_WAIT_SELECT}),
+            combined AS (
+                SELECT COALESCE(machine, 'desconhecido') AS machine,
+                       COALESCE(wait_event_native, 'desconhecido') AS wait_event_native,
+                       effective_wait_ms AS ms
+                FROM effective
+                WHERE {self._NOT_BENIGN_WAIT_FILTER} AND {self._NOT_CPU_ONLY_FILTER}
+                UNION ALL
+                SELECT COALESCE(machine, 'desconhecido') AS machine,
+                       'Memory/CPU' AS wait_event_native,
+                       effective_cpu_ms AS ms
+                FROM effective
+                WHERE wait_event_native IS NULL AND coalesce(wait_time_ms, 0) = 0
+            )
+            SELECT
+                machine,
+                wait_event_native,
+                coalesce(sum(ms), 0) AS total_wait_time_ms
+            FROM combined
+            GROUP BY machine, wait_event_native
+            ORDER BY machine, total_wait_time_ms DESC
+            LIMIT :limit
+        """
+        )
+        result = await self._session.execute(
+            stmt,
+            {
+                "instance_id": instance_id,
+                "since": since,
+                "until": until,
+                "limit": limit,
+                "benign_wait_types": list(self._BENIGN_WAIT_EVENT_NATIVE),
+            },
+        )
+        return list(result.fetchall())
+
+    async def wait_time_by_bucket_and_machine(
+        self,
+        instance_id: UUID,
+        since: datetime,
+        until: datetime,
+        limit: int,
+        bucket: TimeBucket = "day",
+    ) -> list[sa.Row]:
+        bucket_start_sql, group_by_sql = self._bucket_sql(bucket)
+        stmt = sa.text(
+            f"""
+            WITH effective AS ({self._EFFECTIVE_WAIT_SELECT})
+            SELECT
+                {bucket_start_sql} AS bucket_start,
+                COALESCE(machine, 'desconhecido') AS machine,
+                coalesce(sum(effective_wait_ms), 0) AS total_wait_time_ms
+            FROM effective
+            GROUP BY
+                {group_by_sql},
+                COALESCE(machine, 'desconhecido')
+            ORDER BY bucket_start, total_wait_time_ms DESC
+            LIMIT :limit
+        """
+        )
+        result = await self._session.execute(
+            stmt,
+            {
+                "instance_id": instance_id,
+                "since": since,
+                "until": until,
+                "limit": limit,
+                "bucket": bucket,
+                "benign_wait_types": list(self._BENIGN_WAIT_EVENT_NATIVE),
+            },
+        )
+        return list(result.fetchall())
+
     async def wait_breakdown_by_sql_hash(
         self,
         instance_id: UUID,
@@ -707,6 +951,8 @@ class QuerySamplesRepository(BaseRepository):
         database_name: str | None = None,
         db_user: str | None = None,
         sql_hash: str | None = None,
+        program: str | None = None,
+        machine: str | None = None,
     ) -> list[sa.Row]:
         """Agrega `query_samples` por (`sql_hash`, `wait_event_native`) — decomposicao do wait
         time de cada query (nivel 2 do drill-down) pelo tipo de espera NATIVO do engine. Mesma
@@ -731,6 +977,8 @@ class QuerySamplesRepository(BaseRepository):
                 WHERE (CAST(:database_name AS text) IS NULL OR database_name = :database_name)
                     AND (CAST(:db_user AS text) IS NULL OR db_user = :db_user)
                     AND (CAST(:sql_hash AS text) IS NULL OR sql_hash = :sql_hash)
+                    AND (CAST(:program AS text) IS NULL OR program = :program)
+                    AND (CAST(:machine AS text) IS NULL OR machine = :machine)
                     AND {self._NOT_BENIGN_WAIT_FILTER} AND {self._NOT_CPU_ONLY_FILTER}
                 UNION ALL
                 SELECT sql_hash, 'Memory/CPU' AS wait_event_native, effective_cpu_ms AS ms
@@ -738,6 +986,8 @@ class QuerySamplesRepository(BaseRepository):
                 WHERE (CAST(:database_name AS text) IS NULL OR database_name = :database_name)
                     AND (CAST(:db_user AS text) IS NULL OR db_user = :db_user)
                     AND (CAST(:sql_hash AS text) IS NULL OR sql_hash = :sql_hash)
+                    AND (CAST(:program AS text) IS NULL OR program = :program)
+                    AND (CAST(:machine AS text) IS NULL OR machine = :machine)
                     AND wait_event_native IS NULL AND coalesce(wait_time_ms, 0) = 0
             )
             SELECT
@@ -760,6 +1010,8 @@ class QuerySamplesRepository(BaseRepository):
                 "database_name": database_name,
                 "db_user": db_user,
                 "sql_hash": sql_hash,
+                "program": program,
+                "machine": machine,
                 "benign_wait_types": list(self._BENIGN_WAIT_EVENT_NATIVE),
             },
         )
@@ -932,6 +1184,8 @@ class QuerySamplesRepository(BaseRepository):
         database_name: str | None = None,
         db_user: str | None = None,
         wait_event_native: str | None = None,
+        program: str | None = None,
+        machine: str | None = None,
         bucket: TimeBucket = "day",
     ) -> list[sa.Row]:
         """Agrega `query_samples` por (`bucket` de tempo, `sql_hash`) — visao historica "Tudo" do
@@ -958,6 +1212,8 @@ class QuerySamplesRepository(BaseRepository):
               AND (
                 CAST(:wait_event_native AS text) IS NULL OR wait_event_native = :wait_event_native
               )
+              AND (CAST(:program AS text) IS NULL OR program = :program)
+              AND (CAST(:machine AS text) IS NULL OR machine = :machine)
             GROUP BY {group_by_sql}, sql_hash
             ORDER BY bucket_start, total_wait_time_ms DESC
             LIMIT :limit
@@ -973,6 +1229,8 @@ class QuerySamplesRepository(BaseRepository):
                 "database_name": database_name,
                 "db_user": db_user,
                 "wait_event_native": wait_event_native,
+                "program": program,
+                "machine": machine,
                 "bucket": bucket,
                 "benign_wait_types": list(self._BENIGN_WAIT_EVENT_NATIVE),
             },

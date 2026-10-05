@@ -168,7 +168,22 @@ class MissingIndexSupervisor:
                     # "coletou e nao achou nada". `stats_since` (reinicio do motor) responde uma
                     # pergunta DIFERENTE de `collected_at` (quando o worker rodou) - ver docstring
                     # do modelo.
-                    stats_since = await collector.get_engine_start_time()
+                    #
+                    # `get_engine_start_time()` abre uma conexao PROPRIA (sys.dm_os_sys_info) e
+                    # pode falhar por motivo independente da coleta principal ja bem-sucedida
+                    # acima (ex.: credencial sem VIEW SERVER STATE, timeout pontual). Sem este
+                    # isolamento, essa falha secundaria propagava pro except externo e pulava o
+                    # upsert do collection_run inteiro - fazendo a UI mostrar "nunca coletou" pra
+                    # sempre mesmo com sugestoes reais sendo atualizadas a cada ciclo.
+                    try:
+                        stats_since = await collector.get_engine_start_time()
+                    except Exception:  # noqa: BLE001 - ver comentario acima
+                        logger.exception(
+                            "Falha ao obter engine_start_time de instance_id=%s - "
+                            "collected_at sera registrado mesmo assim",
+                            instance_id,
+                        )
+                        stats_since = None
                     collection_runs_repository = (
                         self._missing_index_collection_runs_repository_factory(session)
                     )
