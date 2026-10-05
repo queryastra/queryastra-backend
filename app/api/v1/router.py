@@ -11,14 +11,18 @@ from fastapi import APIRouter
 
 from app.api.v1 import (
     alerts,
+    auth,
     backup_status,
+    capacity,
     deadlocks,
     hosts,
     instances,
     metrics,
     missing_index,
     queries,
+    reports,
     settings,
+    status,
     topology,
     transactions,
     waits_blocking,
@@ -27,6 +31,7 @@ from app.api.v1 import (
 
 api_v1_router = APIRouter()
 
+api_v1_router.include_router(auth.router, prefix="/auth", tags=["auth"])
 api_v1_router.include_router(instances.router, prefix="/instances", tags=["instances"])
 api_v1_router.include_router(hosts.router, prefix="/hosts", tags=["hosts"])
 api_v1_router.include_router(metrics.router, prefix="/metrics", tags=["metrics"])
@@ -43,6 +48,9 @@ api_v1_router.include_router(transactions.router, prefix="/transactions", tags=[
 api_v1_router.include_router(deadlocks.router, prefix="/deadlocks", tags=["deadlocks"])
 api_v1_router.include_router(settings.router, prefix="/settings", tags=["settings"])
 api_v1_router.include_router(topology.router, prefix="/topology", tags=["topology"])
+api_v1_router.include_router(capacity.router, prefix="/capacity", tags=["capacity"])
+api_v1_router.include_router(reports.router, prefix="/reports", tags=["reports"])
+api_v1_router.include_router(status.router, prefix="/status", tags=["status"])
 api_v1_router.include_router(websocket.router, tags=["websocket"])
 
 # Endpoint de health-check do backend em si (nao confundir com health-check de instancia

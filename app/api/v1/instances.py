@@ -13,7 +13,13 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db_session
+from app.api.deps import (
+    CurrentUser,
+    check_instance_access,
+    get_current_user,
+    get_db_session,
+    require_admin,
+)
 from app.collectors.base import CapabilityResult
 from app.collectors.capabilities import has_missing_mandatory_capability
 from app.models.instance_database_lock_override import InstanceDatabaseLockOverride
@@ -27,6 +33,7 @@ from app.repositories.instance_database_sleeping_overrides_repository import (
 )
 from app.repositories.instances_repository import InstancesRepository
 from app.repositories.metric_samples_repository import MetricSamplesRepository
+from app.repositories.user_instance_access_repository import UserInstanceAccessRepository
 from app.security.credential_reference import CredentialResolver
 from app.services.exceptions import InstanceNotFoundError
 from app.services.health_check_service import HealthCheckService
@@ -146,6 +153,7 @@ class InstanceSummaryResponse(BaseModel):
     open_alert_count: (
         int  # alertas com state != 'closed' (AlertsRepository.count_open_alerts_by_target)
     )
+    worst_alert_severity: str | None  # 'critical' | 'warning' | None (sem alerta aberto)
     last_collected_at: datetime | None
 
 
@@ -260,6 +268,7 @@ def get_instance_database_sleeping_overrides_repository(
 async def create_instance(
     payload: InstanceCreateRequest,
     service: Annotated[InstanceService, Depends(get_instance_service)],
+    _: Annotated[CurrentUser, Depends(require_admin)],
 ) -> InstanceDetailResponse:
     """Testa a conexao e, se as capacidades mandatorias estiverem OK, cadastra a instancia."""
     password = payload.password.get_secret_value() if payload.password is not None else None
@@ -306,6 +315,8 @@ async def list_instances(
     status_service: Annotated[
         InstanceDerivedStatusService, Depends(get_instance_derived_status_service)
     ],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> list[InstanceSummaryResponse]:
     """Lista todas as instancias cadastradas (ativas e pausadas), com status derivado da
     telemetria de ciclo.
@@ -317,11 +328,20 @@ async def list_instances(
     N+1 aceitavel no MVP (poucas instancias esperadas) — uma consulta de status derivado por
     instancia da lista, em vez de uma unica query agregada. `open_alert_count` ja e uma unica
     query agregada pra todas as instancias (`count_open_alerts_by_target`), sem N+1.
+
+    Filtro RBAC por recurso: admins enxergam todas as instancias; operator/viewer so enxergam
+    as instancias explicitamente concedidas via `user_instance_access`.
     """
     instances = await repository.list_all()
-    open_alert_counts = await alerts_repository.count_open_alerts_by_target(
-        [instance.id for instance in instances]
-    )
+
+    if not current_user.is_admin:
+        access_repo = UserInstanceAccessRepository(session)
+        accessible_ids = await access_repo.get_instance_ids_for_user(current_user.user_id)
+        instances = [i for i in instances if i.id in accessible_ids]
+
+    instance_ids = [instance.id for instance in instances]
+    open_alert_counts = await alerts_repository.count_open_alerts_by_target(instance_ids)
+    worst_severities = await alerts_repository.get_worst_severity_by_instance_ids(instance_ids)
     summaries = []
     for instance in instances:
         derived = await status_service.compute(instance.id)
@@ -342,6 +362,7 @@ async def list_instances(
                 collection_coverage=derived.collection_coverage,
                 active=instance.active,
                 open_alert_count=open_alert_counts.get(instance.id, 0),
+                worst_alert_severity=worst_severities.get(instance.id),
                 last_collected_at=derived.last_collected_at,
             )
         )
@@ -352,6 +373,7 @@ async def list_instances(
 async def delete_instance(
     instance_id: UUID,
     repository: Annotated[InstancesRepository, Depends(get_instances_repository)],
+    _: Annotated[CurrentUser, Depends(require_admin)],
 ) -> None:
     """Exclui o cadastro da instância e seus dados dependentes."""
     deleted = await repository.delete(instance_id)
@@ -368,6 +390,8 @@ async def get_instance(
     status_service: Annotated[
         InstanceDerivedStatusService, Depends(get_instance_derived_status_service)
     ],
+    _: Annotated[CurrentUser, Depends(get_current_user)],
+    _access: Annotated[None, Depends(check_instance_access)],
 ) -> InstanceDetailResponse:
     """Detalhe de uma instancia cadastrada, com status derivado da telemetria de ciclo."""
     instance = await repository.get_by_id(instance_id)
@@ -393,6 +417,7 @@ async def set_instance_active(
     status_service: Annotated[
         InstanceDerivedStatusService, Depends(get_instance_derived_status_service)
     ],
+    _: Annotated[CurrentUser, Depends(require_admin)],
 ) -> InstanceDetailResponse:
     """Liga/desliga o monitoramento de uma instancia (equivalente ao botao ON/OFF do SolarWinds)
     sem apagar o cadastro. Efeito real: `PollingSupervisor`/`MissingIndexSupervisor`/
@@ -422,6 +447,7 @@ async def update_instance_settings(
     status_service: Annotated[
         InstanceDerivedStatusService, Depends(get_instance_derived_status_service)
     ],
+    _: Annotated[CurrentUser, Depends(require_admin)],
 ) -> InstanceDetailResponse:
     """Tela de Configurações — atualiza qualquer combinação dos campos informados, sem
     restrição de acesso hoje (será limitada por RBAC quando essa feature existir, Fase 2).
@@ -469,6 +495,7 @@ async def update_instance_min_lock_time(
     status_service: Annotated[
         InstanceDerivedStatusService, Depends(get_instance_derived_status_service)
     ],
+    _: Annotated[CurrentUser, Depends(require_admin)],
 ) -> InstanceDetailResponse:
     """`min_lock_time_ms=null` limpa o override (volta a usar o valor global de
     `system_settings.blocking_min_duration_ms`); um número define o override ad-hoc. Lido a cada
@@ -527,6 +554,7 @@ async def list_instance_database_lock_overrides(
         InstanceDatabaseLockOverridesRepository,
         Depends(get_instance_database_lock_overrides_repository),
     ],
+    _: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> list[InstanceDatabaseLockOverrideResponse]:
     overrides = await repository.list_for_instance(instance_id)
     return [InstanceDatabaseLockOverrideResponse.model_validate(o) for o in overrides]
@@ -543,6 +571,7 @@ async def set_instance_database_lock_override(
         InstanceDatabaseLockOverridesRepository,
         Depends(get_instance_database_lock_overrides_repository),
     ],
+    _: Annotated[CurrentUser, Depends(require_admin)],
 ) -> InstanceDatabaseLockOverrideResponse:
     """Cria ou atualiza o override ad-hoc de um banco específico — lido a cada ciclo por
     `PollingWorker` (não cacheado), vale a partir do próximo ciclo de poll dessa instância, sem
@@ -567,6 +596,7 @@ async def clear_instance_database_lock_override(
         InstanceDatabaseLockOverridesRepository,
         Depends(get_instance_database_lock_overrides_repository),
     ],
+    _: Annotated[CurrentUser, Depends(require_admin)],
 ) -> None:
     cleared = await repository.clear(instance_id, database_name)
     if not cleared:
@@ -583,6 +613,7 @@ async def reset_all_lock_time_overrides(
         InstanceDatabaseLockOverridesRepository,
         Depends(get_instance_database_lock_overrides_repository),
     ],
+    _: Annotated[CurrentUser, Depends(require_admin)],
 ) -> LockTimeOverridesResetResponse:
     """Reset em massa — usado quando o usuário desmarca "Limites ad hoc" na UI (Configurações →
     Geral): apaga TODO override ad-hoc (por instância E por banco de dados) de TODAS as
@@ -610,6 +641,7 @@ async def update_instance_min_sleeping_time(
     status_service: Annotated[
         InstanceDerivedStatusService, Depends(get_instance_derived_status_service)
     ],
+    _: Annotated[CurrentUser, Depends(require_admin)],
 ) -> InstanceDetailResponse:
     instance = await repository.set_min_sleeping_time_ms(instance_id, payload.min_sleeping_time_ms)
     if instance is None:
@@ -655,6 +687,7 @@ async def list_instance_database_sleeping_overrides(
         InstanceDatabaseSleepingOverridesRepository,
         Depends(get_instance_database_sleeping_overrides_repository),
     ],
+    _: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> list[InstanceDatabaseSleepingOverrideResponse]:
     overrides = await repository.list_for_instance(instance_id)
     return [InstanceDatabaseSleepingOverrideResponse.model_validate(o) for o in overrides]
@@ -671,6 +704,7 @@ async def set_instance_database_sleeping_override(
         InstanceDatabaseSleepingOverridesRepository,
         Depends(get_instance_database_sleeping_overrides_repository),
     ],
+    _: Annotated[CurrentUser, Depends(require_admin)],
 ) -> InstanceDatabaseSleepingOverrideResponse:
     override: InstanceDatabaseSleepingOverride = await repository.set(
         instance_id, payload.database_name, payload.min_sleeping_time_ms
@@ -689,6 +723,7 @@ async def clear_instance_database_sleeping_override(
         InstanceDatabaseSleepingOverridesRepository,
         Depends(get_instance_database_sleeping_overrides_repository),
     ],
+    _: Annotated[CurrentUser, Depends(require_admin)],
 ) -> None:
     cleared = await repository.clear(instance_id, database_name)
     if not cleared:
@@ -705,6 +740,7 @@ async def reset_all_sleeping_time_overrides(
         InstanceDatabaseSleepingOverridesRepository,
         Depends(get_instance_database_sleeping_overrides_repository),
     ],
+    _: Annotated[CurrentUser, Depends(require_admin)],
 ) -> SleepingTimeOverridesResetResponse:
     instances_cleared = await instances_repository.clear_all_min_sleeping_time_overrides()
     database_overrides_cleared = await database_overrides_repository.clear_all()
@@ -758,6 +794,7 @@ async def get_ad_hoc_overrides_summary(
         InstanceDatabaseSleepingOverridesRepository,
         Depends(get_instance_database_sleeping_overrides_repository),
     ],
+    _: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> AdHocOverridesSummaryResponse:
     instances = await instances_repository.list_all()
     instance_name_by_id = {instance.id: instance.name for instance in instances}
@@ -814,6 +851,7 @@ async def get_ad_hoc_overrides_summary(
 async def test_connection(
     payload: InstanceCreateRequest,
     service: Annotated[InstanceService, Depends(get_instance_service)],
+    _: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> ConnectionTestResponse:
     """Testa a conexao com uma instancia antes de cadastrar — nao persiste nada."""
     password = payload.password.get_secret_value() if payload.password is not None else None
@@ -837,6 +875,8 @@ async def test_connection(
 async def health_check_instance(
     instance_id: UUID,
     health_check_service: Annotated[HealthCheckService, Depends(get_health_check_service)],
+    _: Annotated[CurrentUser, Depends(get_current_user)],
+    _access: Annotated[None, Depends(check_instance_access)],
 ) -> InstanceHealthCheckResponse:
     """Health-check de capacidade de uma instancia ja cadastrada.
 

@@ -147,6 +147,43 @@ class AlertsRepository(BaseRepository):
         result = await self._session.execute(stmt)
         return {row.target_id: row.open_count for row in result.all()}
 
+    async def get_worst_severity_by_instance_ids(
+        self, instance_ids: list[UUID]
+    ) -> dict[UUID, str | None]:
+        """Pior severidade de alerta aberto por instancia — 'critical' > 'warning' > None.
+
+        Uma unica query agregada para todos os alvos da lista (sem N+1). Usa `MAX()` sobre
+        uma expressao CASE que mapeia 'critical' -> 2, 'warning' -> 1, nulo -> 0, de modo que
+        `MAX()` nativo do Postgres retorna a pior severidade sem subconsulta. Instancias sem
+        alerta aberto nao aparecem no dict (implicitamente None)."""
+        if not instance_ids:
+            return {}
+        worst_expr = sa.case(
+            (Alert.severity == "critical", 2),
+            (Alert.severity == "warning", 1),
+            else_=0,
+        )
+        stmt = (
+            select(
+                Alert.target_id,
+                sa.func.max(worst_expr).label("worst_level"),
+            )
+            .where(
+                Alert.target_id.in_(instance_ids),
+                Alert.target_type == "instance",
+                Alert.state != "closed",
+            )
+            .group_by(Alert.target_id)
+        )
+        result = await self._session.execute(stmt)
+        mapping: dict[UUID, str | None] = {}
+        for row in result.all():
+            if row.worst_level == 2:
+                mapping[row.target_id] = "critical"
+            elif row.worst_level == 1:
+                mapping[row.target_id] = "warning"
+        return mapping
+
     async def create_alert(self, alert: Alert) -> Alert:
         self._session.add(alert)
         await self._session.commit()
