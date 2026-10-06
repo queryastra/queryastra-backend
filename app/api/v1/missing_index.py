@@ -7,22 +7,33 @@ instancia/banco/tabela/sugestao, atualizado pelo `MissingIndexSupervisor` de bai
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import check_instance_access, get_db_session
+from app.api.deps import check_instance_access, get_db_session, require_operator
+from app.collectors.connection import ConnectionParams
+from app.collectors.factory import create_collector
 from app.core.config import get_settings
+from app.core.logging import get_logger
+from app.repositories.instances_repository import InstancesRepository
 from app.repositories.missing_index_collection_runs_repository import (
     MissingIndexCollectionRunsRepository,
 )
 from app.repositories.missing_index_suggestions_repository import (
     MissingIndexSuggestionsRepository,
 )
+from app.security.credential_reference import (
+    CredentialReference,
+    CredentialResolutionError,
+    CredentialResolver,
+)
+
+logger = get_logger(__name__)
 
 router = APIRouter()
 
@@ -91,6 +102,94 @@ async def get_missing_index_collection_info(
         last_collected_at=row.collected_at,
         stats_since=row.stats_since,
         first_collected_at=row.first_collected_at,
+    )
+
+
+@router.post(
+    "/{instance_id}/collect",
+    response_model=MissingIndexCollectionInfoResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def trigger_missing_index_collection(
+    instance_id: UUID,
+    _access: Annotated[None, Depends(check_instance_access)],
+    _op: Annotated[None, Depends(require_operator)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    credential_resolver: CredentialResolver = Depends(CredentialResolver),  # noqa: B008
+) -> MissingIndexCollectionInfoResponse:
+    """Dispara uma coleta sob demanda para a instancia e aguarda o resultado.
+
+    Requer papel operator ou admin. Bloqueia ate a coleta terminar (pode levar alguns segundos).
+    Retorna o estado atualizado de `collection-info` apos a coleta."""
+    instance = await InstancesRepository(session).get_by_id(instance_id)
+    if instance is None or not instance.active:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Instancia nao encontrada ou inativa.",
+        )
+
+    username: str | None = None
+    secret_value: str | None = None
+    if instance.auth_method == "encrypted_fallback":
+        if instance.encrypted_credential_ref is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Referencia de credencial ausente na instancia.",
+            )
+        try:
+            resolved = await credential_resolver.resolve(
+                CredentialReference(instance.encrypted_credential_ref)
+            )
+            username, secret_value = resolved.username, resolved.secret_value
+        except CredentialResolutionError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Falha ao resolver credencial da instancia.",
+            ) from exc
+
+    connection = ConnectionParams(
+        host=instance.host,
+        port=instance.port,
+        auth_method=instance.auth_method,
+        username=username,
+        secret_value=secret_value,
+    )
+    collector = create_collector(instance.db_type, connection=connection, instance_id=instance.id)
+    try:
+        suggestions = await collector.collect_missing_index_suggestions()
+        now = datetime.now(UTC)
+        if suggestions:
+            await MissingIndexSuggestionsRepository(session).upsert_batch(suggestions, now)
+
+        try:
+            stats_since = await collector.get_engine_start_time()
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "Falha ao obter engine_start_time de instance_id=%s na coleta sob demanda",
+                instance_id,
+            )
+            stats_since = None
+
+        runs_repo = MissingIndexCollectionRunsRepository(session)
+        await runs_repo.upsert(instance_id, now, stats_since)
+        row = await runs_repo.get_for_instance(instance_id)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(
+            "Falha na coleta sob demanda de missing indexes para instance_id=%s", instance_id
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Falha na coleta: {exc}",
+        ) from exc
+    finally:
+        await collector.close()
+
+    return MissingIndexCollectionInfoResponse(
+        last_collected_at=row.collected_at if row else now,
+        stats_since=row.stats_since if row else stats_since,
+        first_collected_at=row.first_collected_at if row else now,
     )
 
 
