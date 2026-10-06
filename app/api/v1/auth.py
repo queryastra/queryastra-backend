@@ -213,6 +213,9 @@ async def patch_user(
     if payload.is_active is False:
         user = await repository.deactivate(user_id)
         assert user is not None
+    elif payload.is_active is True:
+        user = await repository.reactivate(user_id)
+        assert user is not None
     await session.commit()
     return UserResponse(
         id=user.id,
@@ -221,6 +224,25 @@ async def patch_user(
         is_active=user.is_active,
         created_at=user.created_at,
     )
+
+
+@router.delete("/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_user(
+    user_id: int,
+    current_admin: Annotated[CurrentUser, Depends(require_admin)],
+    repository: Annotated[UsersRepository, Depends(get_users_repository)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> None:
+    """Remove permanentemente um usuario. Requer papel admin. Admin nao pode excluir a si mesmo."""
+    if user_id == current_admin.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Nao e possivel excluir o proprio usuario.",
+        )
+    found = await repository.delete(user_id)
+    if not found:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario nao encontrado.")
+    await session.commit()
 
 
 class InstanceAccessResponse(BaseModel):

@@ -56,3 +56,22 @@ class UsersRepository(BaseRepository):
         await self._session.flush()
         await self._session.refresh(user)
         return user
+
+    async def reactivate(self, user_id: int) -> User | None:
+        """Reativa um usuario (`is_active=True`). Retorna o usuario ou `None` se nao existe."""
+        user = await self.get_by_id(user_id)
+        if user is None:
+            return None
+        user.is_active = True
+        await self._session.flush()
+        await self._session.refresh(user)
+        return user
+
+    async def delete(self, user_id: int) -> bool:
+        """Remove permanentemente um usuario. Retorna `True` se removido, `False` se nao existe."""
+        user = await self.get_by_id(user_id)
+        if user is None:
+            return False
+        await self._session.delete(user)
+        await self._session.flush()
+        return True
