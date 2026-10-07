@@ -7,8 +7,8 @@ Create Date: 2026-09-11 15:31:26.186905
 `sql_text_masked` passa a guardar so o STATEMENT em execucao (nao o batch/procedure inteiro que o
 SQL Server as vezes devolve via `sys.dm_exec_sql_text` - ver `Docs/collector-queries.md` §1,
 nuance de texto). Esta coluna nova guarda o contexto completo mascarado, usado so na tela de
-detalhe da query para destacar o statement dentro do texto inteiro (equivalente ao "negrito" do
-SolarWinds DPA). Nullable e sem backfill: amostras antigas simplesmente nao tem contexto completo
+detalhe da query para destacar o statement dentro do texto inteiro. Nullable e sem backfill:
+amostras antigas simplesmente nao tem contexto completo
 (a tela de detalhe cai de volta pro `sql_text_masked` sozinho quando `None` - ver frontend).
 """
 

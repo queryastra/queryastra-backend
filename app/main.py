@@ -139,7 +139,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 port=settings.alert_smtp_port,
                 username=settings.alert_smtp_username,
                 password=settings.alert_smtp_password,
-                sender=settings.alert_smtp_from or "alerts@ab-xql-pm.local",
+                sender=settings.alert_smtp_from or "alerts@queryastra.local",
                 recipients=[
                     address.strip()
                     for address in (settings.alert_email_to or "").split(",")
@@ -330,7 +330,7 @@ def create_app() -> FastAPI:
     settings = get_settings()
 
     app = FastAPI(
-        title="AB-XQL-PM Backend",
+        title="QueryAstra Backend",
         version="0.1.0",
         lifespan=lifespan,
     )

@@ -65,6 +65,7 @@ class TransactionEvent(Base):
     begin_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     state: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_error_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    machine: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Etapa 10, item 3 — captura confiavel via Extended Events dedicada (`sqlserver.
     # error_reported`, severidade >= 16, `TransactionErrorSupervisor`), diferente de
     # `last_error_code` (prev_error, melhor esforco, desaparece quando a sessao fica idle): este

@@ -53,6 +53,7 @@ from app.collectors.base import CapabilityResult, CapabilityStatus, CollectionRe
 from app.collectors.capabilities import (
     CONNECTIVITY,
     POSTGRESQL_CONFIGURATION_VISIBILITY,
+    POSTGRESQL_QUALSTATS,
     POSTGRESQL_SESSION_ACTIVITY,
     POSTGRESQL_SESSION_TERMINATION,
     POSTGRESQL_TOP_SQL,
@@ -187,6 +188,20 @@ _MISSING_INDEX_HEURISTIC_QUERY = """
       AND pg_relation_size(relid) > $1
       AND seq_scan > $2
     ORDER BY seq_scan - COALESCE(idx_scan, 0) DESC
+"""
+
+# pg_qualstats_index_advisor() retorna sugestoes de indice com indicacao de coluna.
+# Requer a extensao `pg_qualstats` instalada (shared_preload_libraries) no servidor monitorado.
+# A funcao aceita parametros opcionais (min_filter, min_selectivity) — chamada sem argumentos usa
+# os defaults do pg_qualstats (min_filter=1000, min_selectivity=0.1 em versoes recentes).
+_QUALSTATS_INDEX_ADVISOR_QUERY = """
+    SELECT
+        nspname || '.' || relname AS table_name,
+        attnames,
+        ddl
+    FROM pg_qualstats_index_advisor() AS t(relid oid, nspname text, relname text, attnames text[], indexes text[], ddl text)
+    WHERE ddl IS NOT NULL
+    ORDER BY nspname, relname
 """
 
 # `pg_stat_archiver` sempre devolve exatamente 1 linha (cluster-wide, nao por banco) — mesmo com
@@ -334,7 +349,22 @@ class PostgreSQLCollector:
         )
 
         results.append(await self._check_top_sql(conn))
+        results.append(await self._check_qualstats(conn))
         return results
+
+    async def _check_qualstats(self, conn: asyncpg.Connection) -> CapabilityResult:
+        has_extension = await conn.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname='pg_qualstats')"
+        )
+        if has_extension:
+            return CapabilityResult(
+                capability=POSTGRESQL_QUALSTATS, status=CapabilityStatus.FULL
+            )
+        return CapabilityResult(
+            capability=POSTGRESQL_QUALSTATS,
+            status=CapabilityStatus.DEGRADED,
+            reason="extensao pg_qualstats nao instalada (requer shared_preload_libraries)",
+        )
 
     async def _check_top_sql(self, conn: asyncpg.Connection) -> CapabilityResult:
         has_extension = await conn.fetchval(
@@ -718,6 +748,7 @@ class PostgreSQLCollector:
             )
             if flag_reason is None:
                 continue
+            client_addr = row["client_addr"]
             events.append(
                 NormalizedTransactionEvent(
                     instance_id=instance_id,
@@ -730,6 +761,7 @@ class PostgreSQLCollector:
                     state=row["state"],
                     last_error_code=None,
                     flag_reason=flag_reason,
+                    machine=str(client_addr) if client_addr is not None else None,
                 )
             )
         return events
@@ -805,10 +837,12 @@ class PostgreSQLCollector:
         return [c for c in candidates if c is not None]
 
     async def collect_missing_index_suggestions(self) -> list[NormalizedMissingIndexSuggestion]:
-        """Heuristica de indice ausente (Docs/collector-queries.md §10) — itera por banco do
-        cluster (`pg_stat_user_tables` e escopada ao banco conectado), nao so o banco de
-        manutencao usado por `collect()`. Erro num banco especifico (permissao, timeout) e
-        logado e pulado — nunca aborta a checagem dos demais bancos."""
+        """Heuristica de indice ausente + sugestoes pg_qualstats quando disponivel.
+
+        Heuristica (sempre): itera `pg_stat_user_tables` por banco do cluster.
+        pg_qualstats (opcional): se a extensao estiver instalada, chama
+        `pg_qualstats_index_advisor()` no banco de manutencao para obter sugestoes com
+        indicacao de coluna especifica. As duas fontes sao mescladas na lista retornada."""
         if self._instance_id is None:
             raise ValueError(
                 "PostgreSQLCollector.collect_missing_index_suggestions requer instance_id de "
@@ -884,6 +918,42 @@ class PostgreSQLCollector:
                         },
                     )
                 )
+        # pg_qualstats — coleta adicional com indicacao de coluna especifica.
+        # Roda em banco separado (banco de manutencao); erros sao logados e ignorados.
+        qualstats_conn = await asyncio.wait_for(
+            self._connect(), timeout=self._connection_params.connect_timeout_seconds
+        )
+        try:
+            has_qualstats = await qualstats_conn.fetchval(
+                "SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname='pg_qualstats')"
+            )
+            if has_qualstats:
+                try:
+                    qualstats_rows = await asyncio.wait_for(
+                        qualstats_conn.fetch(_QUALSTATS_INDEX_ADVISOR_QUERY),
+                        timeout=settings.collection_query_timeout_seconds,
+                    )
+                    for row in qualstats_rows[: settings.collection_max_rows]:
+                        attnames: list[str] = list(row["attnames"] or [])
+                        ddl: str = row["ddl"]
+                        suggestions.append(
+                            NormalizedMissingIndexSuggestion(
+                                instance_id=instance_id,
+                                database_name=None,
+                                table_name=row["table_name"],
+                                suggestion=f"pg_qualstats: {ddl}",
+                                impact_score=None,
+                                detail={"source": "pg_qualstats", "columns": attnames, "ddl": ddl},
+                            )
+                        )
+                except (asyncpg.PostgresError, TimeoutError):
+                    logger.warning(
+                        "Falha ao rodar pg_qualstats_index_advisor() (instance_id=%s) - pulando",
+                        instance_id,
+                    )
+        finally:
+            await qualstats_conn.close()
+
         return suggestions
 
     async def get_engine_start_time(self) -> datetime | None:

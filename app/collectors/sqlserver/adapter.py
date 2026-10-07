@@ -124,8 +124,7 @@ _BLOCKING_SESSION_REAL_BLOCK_MIN = 1
 # (batch/procedure inteiro) vira `sql_text_full_masked`, so pra tela de detalhe.
 # `r.cpu_time` (ms cumulativos consumidos pela request atual, zera numa request nova) vira
 # `cpu_time_ms` em `NormalizedQuerySample` — antes so era buscado (como `cpu_seconds`) e
-# descartado sem uso; agora fecha o gap real confirmado comparando com o SolarWinds DPA
-# (categoria "Memory/CPU" alem das esperas nomeadas).
+# descartado sem uso; agora fecha o gap de CPU nao coberto por esperas nomeadas.
 _SESSION_ACTIVITY_QUERY = """
     SELECT r.session_id, r.status, r.command, r.start_time,
            r.total_elapsed_time / 1000.00 AS elapsed_seconds,
@@ -903,6 +902,7 @@ def _connect_and_collect(
         transaction_rows,
         transaction_database_rows,
         session_rows,
+        all_session_rows,
         blocking_events,
         instance_id,
         collected_at,
@@ -2003,6 +2003,7 @@ def _build_transaction_events(
     transaction_rows: list[dict],
     transaction_database_rows: list[dict],
     session_rows: list[dict],
+    all_session_rows: list[dict],
     blocking_events: list[NormalizedBlockingEvent],
     instance_id: UUID,
     collected_at: datetime,
@@ -2048,6 +2049,11 @@ def _build_transaction_events(
     }
     prev_error_by_session_id = {str(row["session_id"]): row["prev_error"] for row in session_rows}
     active_session_ids = {str(row["session_id"]) for row in session_rows}
+    machine_by_session_id = {
+        str(row["session_id"]): row["host_name"]
+        for row in all_session_rows
+        if row["host_name"]
+    }
     blocking_involved_transaction_ids = {
         tx_id
         for e in blocking_events
@@ -2103,6 +2109,7 @@ def _build_transaction_events(
                 ),
                 last_error_code=last_error_code,
                 flag_reason=flag_reason,
+                machine=machine_by_session_id.get(session_id),
             )
         )
     return events

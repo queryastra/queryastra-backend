@@ -430,14 +430,14 @@ async def test_top_wait_types_includes_synthetic_cpu_bucket_when_wait_time_is_ze
     )
 
     by_type = {row.wait_event_native: row for row in rows}
-    assert set(by_type) == {"Memory/CPU"}
-    assert by_type["Memory/CPU"].total_wait_time_ms == 700
+    assert set(by_type) == {"CPU"}
+    assert by_type["CPU"].total_wait_time_ms == 700
 
 
 async def test_top_wait_types_includes_synthetic_cpu_bucket(
     db_session: AsyncSession, test_instance: Instance
 ) -> None:
-    """Fecha um gap real confirmado comparando com o SolarWinds DPA (categoria "Memory/CPU"):
+    """Fecha o gap de CPU nao coberto por esperas nomeadas:
     amostras sem NENHUMA espera ativa (`wait_event_native`/`wait_time_ms` ambos None) agora
     aparecem como um bucket sintetico 'CPU', usando `cpu_time_ms`."""
     repo = QuerySamplesRepository(db_session)
@@ -474,8 +474,8 @@ async def test_top_wait_types_includes_synthetic_cpu_bucket(
     )
 
     by_type = {row.wait_event_native: row for row in rows}
-    assert set(by_type) == {"Memory/CPU", "LCK_M_S"}
-    assert by_type["Memory/CPU"].total_wait_time_ms == 500
+    assert set(by_type) == {"CPU", "LCK_M_S"}
+    assert by_type["CPU"].total_wait_time_ms == 500
     assert by_type["LCK_M_S"].total_wait_time_ms == 200
 
 
@@ -524,7 +524,7 @@ async def test_top_wait_types_cpu_bucket_sums_effective_delta_not_raw_cpu_time(
 
     by_type = {row.wait_event_native: row for row in rows}
     # 100 (primeira amostra, valor cheio) + (250 - 100) = 250, nao 100 + 250 = 350
-    assert by_type["Memory/CPU"].total_wait_time_ms == 250
+    assert by_type["CPU"].total_wait_time_ms == 250
 
 
 async def test_wait_time_by_bucket_and_wait_type_groups_by_utc_day(
@@ -1752,10 +1752,10 @@ async def test_wait_breakdown_by_db_user_groups_by_native_wait_type(
     by_wait = {
         row.wait_event_native: row.total_wait_time_ms for row in rows if row.db_user == "app_erp"
     }
-    assert set(by_wait) == {"PAGEIOLATCH_SH", "ASYNC_NETWORK_IO", "Memory/CPU"}
+    assert set(by_wait) == {"PAGEIOLATCH_SH", "ASYNC_NETWORK_IO", "CPU"}
     assert by_wait["PAGEIOLATCH_SH"] == 100
     assert by_wait["ASYNC_NETWORK_IO"] == 30
-    assert by_wait["Memory/CPU"] == 500
+    assert by_wait["CPU"] == 500
 
 
 async def test_wait_time_by_bucket_and_db_user_groups_by_utc_day(

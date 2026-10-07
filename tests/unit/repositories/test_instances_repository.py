@@ -32,7 +32,7 @@ async def test_update_engine_version_persists_detected_version(
 async def test_set_active_toggles_flag_and_persists(
     db_session: AsyncSession, test_instance: Instance
 ) -> None:
-    """Equivalente ao botao ON/OFF do SolarWinds — pausa/retoma monitoramento sem apagar o
+    """Pausa/retoma monitoramento sem apagar o
     cadastro. `PollingSupervisor`/`MissingIndexSupervisor`/`BackupStatusSupervisor`/
     `AlertingWorker` ja re-leem `instances.active` via `list_active()`, entao so persistir o
     flag e suficiente pra eles pararem/retomarem na proxima reconciliacao."""

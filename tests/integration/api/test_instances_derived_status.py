@@ -185,7 +185,7 @@ async def test_list_instances_open_alert_count_reflects_real_alerts(
 async def test_set_instance_active_pauses_and_resumes_monitoring(
     client: AsyncClient, test_instance: Instance
 ) -> None:
-    """Equivalente ao botao ON/OFF do SolarWinds — `PATCH .../active` liga/desliga sem apagar
+    """Liga/desliga o monitoramento — `PATCH .../active` pausa/retoma sem apagar
     o cadastro, e a instancia continua listada (pausada) em `GET /instances`."""
     assert test_instance.active is True
 

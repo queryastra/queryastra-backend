@@ -164,7 +164,7 @@ class ReportWorker:
         port = db_settings.smtp_port or env.alert_smtp_port
         username = db_settings.smtp_username or env.alert_smtp_username
         password = settings_repo.get_smtp_password_plain(db_settings) or env.alert_smtp_password
-        sender = db_settings.smtp_from_address or env.alert_smtp_from or "reports@ab-xql-pm.local"
+        sender = db_settings.smtp_from_address or env.alert_smtp_from or "reports@queryastra.local"
 
         try:
             filename = f"relatorio-{report.report_type}-{datetime.now(UTC).strftime('%Y%m%d')}.pdf"
@@ -176,7 +176,7 @@ class ReportWorker:
                 password=password,
                 sender=sender,
                 recipients=report.email_recipients,
-                subject=f"[AB-XQL-PM] {report.title}",
+                subject=f"[QueryAstra] {report.title}",
                 body=(
                     f"Relatório gerado automaticamente: {report.title}"
                     f"\nInstância: {report.instance_id}"

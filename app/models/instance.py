@@ -1,8 +1,8 @@
 """Modelos `Instance` e `InstanceMaintenanceWindow`.
 
 Campos e constraints conforme `Docs/database-schema.md` §1. NUNCA adicionar coluna de senha
-inline aqui (ver nota no schema — armadilha confirmada no schema real do Ignite,
-`COND.PASSWORD`). Credencial vive so como referencia em `encrypted_credential_ref`
+inline aqui (ver nota no schema — credencial nao deve ficar em coluna de cadastro).
+Credencial vive so como referencia em `encrypted_credential_ref`
 (`app/security/credential_reference.py`), nunca em texto puro.
 """
 
@@ -32,7 +32,10 @@ class Instance(Base):
 
     __tablename__ = "instances"
     __table_args__ = (
-        CheckConstraint("db_type IN ('postgresql', 'sqlserver')", name="ck_instances_db_type"),
+        CheckConstraint(
+            "db_type IN ('postgresql', 'sqlserver', 'mysql', 'cockroachdb', 'aurora_postgresql', 'aurora_mysql')",
+            name="ck_instances_db_type",
+        ),
         CheckConstraint(
             "cloud_provider IN ('aws_rds', 'azure', 'gcp') OR cloud_provider IS NULL",
             name="ck_instances_cloud_provider",
@@ -99,7 +102,7 @@ class Instance(Base):
 class InstanceMaintenanceWindow(Base):
     """Janela de manutencao/blackout recorrente por instancia.
 
-    Inspirado em `CONBLACKOUT` do Ignite — permite pausar coleta/alerta num horario recorrente
+    Permite pausar coleta/alerta num horario recorrente
     sem desativar a instancia inteira (`instances.active`).
     """
 

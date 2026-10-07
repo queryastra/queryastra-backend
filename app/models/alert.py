@@ -2,7 +2,7 @@
 
 Conforme `Docs/database-schema.md` §4 — implementa a supressao por estado e o lembrete por
 tempo (ARCHITECTURE_SPEC.md Q8) e o silenciamento proativo independente de estado
-(`alert_silences`, inspirado em `CON_PROBLEM_SILENCE` do Ignite).
+(`alert_silences`, silenciamento proativo por periodo).
 
 Nota de correcao: todas as colunas `datetime` aqui usam `DateTime(timezone=True)` explicito -
 `migrations/versions/9cec68412ba8_baseline_schema.py` ja criou as 4 tabelas com
@@ -78,7 +78,7 @@ class AlertRule(Base):
     # Item 2 (custom_sql): query validada por `app.services.custom_sql_guard` antes de rodar -
     # nunca persistida sem passar por essa checagem (ver `create_alert_rule` na API).
     custom_sql: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Item 3: modo de reset (4 dos 5 modos do SAM/Orion - "condicao customizada" fora de escopo).
+    # Item 3: modo de reset (4 dos 5 modos suportados - "condicao customizada" fora de escopo).
     reset_mode: Mapped[str] = mapped_column(
         String, nullable=False, server_default="auto_when_false"
     )
@@ -144,8 +144,7 @@ class AlertNotification(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     # Deve incluir a lista de destinatarios resolvida no momento do envio (nao so o canal), para
-    # o historico continuar correto mesmo se a configuracao de notificacao mudar depois — padrao
-    # observado em CON_ALERT_HISTORY.CONTACTEES do Ignite.
+    # o historico continuar correto mesmo se a configuracao de notificacao mudar depois.
     payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
 

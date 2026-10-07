@@ -46,12 +46,10 @@ class QuerySamplesRepository(BaseRepository):
     consecutivas da mesma sessao/wait mostrando `wait_time_ms` crescendo 40162 -> 50241 -> ... ->
     173425 — a soma ingenua das 14 amostras (~1.496.529 ms) superestima em ~8,6x a duracao real da
     espera (173.425 ms), e chega a exceder o proprio tempo de parede decorrido entre a 1a e a
-    ultima amostra (~133s). Comparado com a metodologia documentada do SolarWinds DPA (credito
-    fixo de 1s de wait por poll a cada dimensao ativa, por amostragem a 1Hz), esse era o principal
-    ponto de divergencia visto ao comparar o mesmo instante/instancia nas duas ferramentas.
+    ultima amostra (~133s).
 
-    Correcao (opcao B, escolhida explicitamente pelo usuario em vez de replicar o credito fixo por
-    poll do DPA): toda query de agregacao abaixo usa uma CTE `effective` que calcula, por amostra,
+    Correcao (opcao B, escolhida explicitamente pelo usuario): toda query de agregacao abaixo usa
+    uma CTE `effective` que calcula, por amostra,
     `effective_wait_ms` = incremento real desde a amostra anterior da MESMA sessao, quando essa
     amostra anterior tinha o mesmo `wait_event_native` e um `wait_time_ms` menor ou igual (== a
     mesma espera continuando); caso contrario (espera mudou, zerou, ou e a primeira amostra da
@@ -69,21 +67,16 @@ class QuerySamplesRepository(BaseRepository):
 
     ## `_BENIGN_WAIT_EVENT_NATIVE` — filtro de waits benignos/de background (2026-09-11)
 
-    Mesmo com `effective_wait_ms`, comparando lado a lado com o SolarWinds DPA na mesma
-    instancia/janela (`Autklinux20`, 16h-17h) o `WAITFOR` de um job do SQL Agent em loop
-    (`AB_DEBITOPARCELAS`/etc.) ainda dominava o total (1.363s de 3.600s na janela, ~38% do
-    tempo) — e o DPA nem mostra `WAITFOR` no grafico de Top Waits. Confirmado via pesquisa que a
-    DPA exclui um conjunto de wait types "benignos"/de infraestrutura por padrao do calculo de
-    wait time (BROKER_EVENTHANDLER, CLR_MANUAL_EVENT, SLEEP_BPOOL_FLUSH, SLEEP_TASK, WAITFOR —
-    THWACK, forum oficial da SolarWinds); a mesma logica documentada por Paul Randal
-    (sqlskills.com, referencia amplamente citada na comunidade de DBAs de SQL Server, cuja lista
-    completa e bem maior — inclui coisas como LAZYWRITER_SLEEP, CHECKPOINT_QUEUE etc.). **NAO
-    usamos a lista completa do Randal**: ela inclui `PREEMPTIVE_OS_FLUSHFILEBUFFERS`, que e
-    justamente o wait tipo #1 no grafico real do DPA (~2.200s na mesma janela) — a DPA claramente
-    NAO ignora esse (nem `WRITELOG`/`PAGEIOLATCH_EX`/`PAGEIOLATCH_SH`, tambem mostrados). Por
-    isso `_BENIGN_WAIT_EVENT_NATIVE` fica restrito ao subconjunto confirmado para a DPA
-    especificamente, mais `BROKER_RECEIVE_WAITFOR` (variante Service Broker do mesmo padrao de
-    job em loop, mesmo mecanismo do `WAITFOR`).
+    Mesmo com `effective_wait_ms`, o `WAITFOR` de um job do SQL Agent em loop
+    (`AB_DEBITOPARCELAS`/etc.) ainda dominava o total em testes reais — waits benignos/de
+    infraestrutura distorcem a visualizacao de Top Waits. A mesma logica de exclusao e
+    documentada por Paul Randal (sqlskills.com, referencia amplamente citada na comunidade de
+    DBAs de SQL Server, cuja lista completa e bem maior — inclui coisas como LAZYWRITER_SLEEP,
+    CHECKPOINT_QUEUE etc.). **NAO usamos a lista completa do Randal**: ela inclui
+    `PREEMPTIVE_OS_FLUSHFILEBUFFERS`, que e um wait de I/O real relevante para monitoramento.
+    Por isso `_BENIGN_WAIT_EVENT_NATIVE` fica restrito ao subconjunto de waits de background
+    que genuinamente nao representam carga de trabalho do usuario, mais `BROKER_RECEIVE_WAITFOR`
+    (variante Service Broker do mesmo padrao de job em loop, mesmo mecanismo do `WAITFOR`).
 
     Zerado (nao removido) dentro de `effective_wait_ms` — uma amostra com wait benigno ainda
     conta em `execution_count` (a query realmente executou), so nao contribui pro total de wait
@@ -94,10 +87,10 @@ class QuerySamplesRepository(BaseRepository):
 
     **Limitacao que este filtro NAO resolve** (documentada, nao corrigida): mesmo depois deste
     filtro, esperas de I/O curtas e frequentes (`PAGEIOLATCH_EX`/`_SH`, `WRITELOG`,
-    `PREEMPTIVE_OS_FLUSHFILEBUFFERS`) ainda aparecem com magnitude bem menor aqui do que no DPA —
-    o DPA amostra a 1Hz (1x/segundo), enquanto o intervalo de poll padrao aqui e ~10s; esperas
-    breves (poucos ms a poucos segundos) tem uma chance proporcionalmente menor de serem
-    capturadas por um poll a cada 10s do que por um a cada 1s. E uma limitacao estrutural de
+    `PREEMPTIVE_OS_FLUSHFILEBUFFERS`) ainda aparecem com magnitude menor com intervalos de poll
+    maiores — o intervalo de poll padrao aqui e ~10s; esperas breves (poucos ms a poucos
+    segundos) tem uma chance proporcionalmente menor de serem capturadas por um poll a cada 10s
+    do que por um poll mais frequente. E uma limitacao estrutural de
     resolucao de amostragem, nao um bug de agregacao — reduzir `polling_interval_seconds` da
     instancia (ja configuravel) aproximaria mais os numeros, ao custo de mais overhead na
     instancia monitorada (ARCHITECTURE_SPEC.md Q3).
@@ -150,8 +143,8 @@ class QuerySamplesRepository(BaseRepository):
     banco. Todo metodo que usa esta CTE deve incluir
     `"benign_wait_types": list(self._BENIGN_WAIT_EVENT_NATIVE)` no dict de params.
 
-    `effective_cpu_ms` — fecha um gap real confirmado comparando com o SolarWinds DPA (que tem
-    uma categoria "Memory/CPU" alem das esperas nomeadas): `sys.dm_exec_requests.cpu_time`
+    `effective_cpu_ms` — fecha o gap de CPU nao coberto por esperas nomeadas:
+    `sys.dm_exec_requests.cpu_time`
     (SQL Server) e cumulativo por REQUEST (zera quando uma nova consulta comeca, nao quando o
     wait_event_native muda dentro da mesma consulta — ao contrario do wait, que reseta por
     mudanca de tipo de espera) — por isso o delta aqui usa so `cpu_time_ms >= LAG(...)` como sinal
@@ -178,8 +171,7 @@ class QuerySamplesRepository(BaseRepository):
     `NULL <> ALL(array)` avalia pra `NULL` (nao `TRUE`), o que um `WHERE` trataria como exclusao —
     sem essa clausula extra, toda amostra sem wait ativo desapareceria da lista."""
 
-    # "Fatia de Tempo" (drill-down temporal fino dentro de uma unica hora, pedido explicito do
-    # usuario com o SolarWinds DPA "Timeslice" como referencia): granularidades sub-hora, em
+    # "Fatia de Tempo" (drill-down temporal fino dentro de uma unica hora): granularidades sub-hora, em
     # segundos de largura do bucket. O Postgres nao tem unidade nativa de `date_trunc` pra
     # 10min/1min/10s/1s (so segundo/minuto/hora/dia/...), entao usamos aritmetica de epoch
     # (`floor(epoch/N)*N`) pra essas — mesmo padrao ja usado em `query_stats_by_bucket` pro caso
@@ -446,7 +438,7 @@ class QuerySamplesRepository(BaseRepository):
         por igualdade literal nunca acharia nada. Filtra por `wait_event_native IS NULL` (a mesma
         condicao usada pra gerar o bucket 'Memory/CPU') e soma `effective_cpu_ms` em vez de
         `effective_wait_ms`."""
-        is_cpu_bucket = wait_event_native == "Memory/CPU"
+        is_cpu_bucket = wait_event_native == "CPU"
         wait_filter = (
             "wait_event_native IS NULL AND coalesce(wait_time_ms, 0) = 0"
             if is_cpu_bucket
@@ -543,9 +535,8 @@ class QuerySamplesRepository(BaseRepository):
         `effective_wait_ms` (delta real por amostra) — ver docstring da classe. Waits benignos/de
         background (`_BENIGN_WAIT_EVENT_NATIVE`) sao excluidos do `GROUP BY` inteiramente (nao
         aparecem como "WAITFOR: 0ms"). Inclui um bucket sintetico 'Memory/CPU' (`effective_cpu_ms`,
-        amostras sem nenhuma espera ativa) via UNION ALL — fecha um gap real confirmado
-        comparando com o SolarWinds DPA (categoria "Memory/CPU" alem das esperas nomeadas, ver
-        docstring de `_EFFECTIVE_WAIT_SELECT`)."""
+        amostras sem nenhuma espera ativa) via UNION ALL — fecha o gap de CPU nao coberto por
+        esperas nomeadas (ver docstring de `_EFFECTIVE_WAIT_SELECT`)."""
         stmt = sa.text(
             f"""
             WITH effective AS ({self._EFFECTIVE_WAIT_SELECT}),
@@ -555,7 +546,7 @@ class QuerySamplesRepository(BaseRepository):
                 FROM effective
                 WHERE {self._NOT_BENIGN_WAIT_FILTER} AND {self._NOT_CPU_ONLY_FILTER}
                 UNION ALL
-                SELECT 'Memory/CPU' AS wait_event_native, effective_cpu_ms AS ms
+                SELECT 'CPU' AS wait_event_native, effective_cpu_ms AS ms
                 FROM effective
                 WHERE wait_event_native IS NULL AND coalesce(wait_time_ms, 0) = 0
             )
@@ -607,7 +598,7 @@ class QuerySamplesRepository(BaseRepository):
                 WHERE {self._NOT_BENIGN_WAIT_FILTER} AND {self._NOT_CPU_ONLY_FILTER}
                 UNION ALL
                 SELECT COALESCE(database_name, 'desconhecido') AS database_name,
-                       'Memory/CPU' AS wait_event_native,
+                       'CPU' AS wait_event_native,
                        effective_cpu_ms AS ms
                 FROM effective
                 WHERE wait_event_native IS NULL AND coalesce(wait_time_ms, 0) = 0
@@ -697,7 +688,7 @@ class QuerySamplesRepository(BaseRepository):
                 WHERE {self._NOT_BENIGN_WAIT_FILTER} AND {self._NOT_CPU_ONLY_FILTER}
                 UNION ALL
                 SELECT COALESCE(db_user, 'desconhecido') AS db_user,
-                       'Memory/CPU' AS wait_event_native,
+                       'CPU' AS wait_event_native,
                        effective_cpu_ms AS ms
                 FROM effective
                 WHERE wait_event_native IS NULL AND coalesce(wait_time_ms, 0) = 0
@@ -769,7 +760,7 @@ class QuerySamplesRepository(BaseRepository):
                 WHERE {self._NOT_BENIGN_WAIT_FILTER} AND {self._NOT_CPU_ONLY_FILTER}
                 UNION ALL
                 SELECT COALESCE(program, 'desconhecido') AS program,
-                       'Memory/CPU' AS wait_event_native,
+                       'CPU' AS wait_event_native,
                        effective_cpu_ms AS ms
                 FROM effective
                 WHERE wait_event_native IS NULL AND coalesce(wait_time_ms, 0) = 0
@@ -878,7 +869,7 @@ class QuerySamplesRepository(BaseRepository):
                 WHERE {self._NOT_BENIGN_WAIT_FILTER} AND {self._NOT_CPU_ONLY_FILTER}
                 UNION ALL
                 SELECT COALESCE(machine, 'desconhecido') AS machine,
-                       'Memory/CPU' AS wait_event_native,
+                       'CPU' AS wait_event_native,
                        effective_cpu_ms AS ms
                 FROM effective
                 WHERE wait_event_native IS NULL AND coalesce(wait_time_ms, 0) = 0
@@ -981,7 +972,7 @@ class QuerySamplesRepository(BaseRepository):
                     AND (CAST(:machine AS text) IS NULL OR machine = :machine)
                     AND {self._NOT_BENIGN_WAIT_FILTER} AND {self._NOT_CPU_ONLY_FILTER}
                 UNION ALL
-                SELECT sql_hash, 'Memory/CPU' AS wait_event_native, effective_cpu_ms AS ms
+                SELECT sql_hash, 'CPU' AS wait_event_native, effective_cpu_ms AS ms
                 FROM effective
                 WHERE (CAST(:database_name AS text) IS NULL OR database_name = :database_name)
                     AND (CAST(:db_user AS text) IS NULL OR db_user = :db_user)
@@ -1087,8 +1078,8 @@ class QuerySamplesRepository(BaseRepository):
     ) -> list[sa.Row]:
         """Agrega `query_samples` por (`bucket` de tempo, `database_name`) — visao historica
         "Tudo" do nivel 1 do drill-down quando `bucket="day"` (um dia calendario por barra,
-        equivalente ao grafico multi-dia do "Top SQL" de ferramentas de referencia como o
-        SolarWinds DPA), o detalhamento por hora DENTRO de um dia especifico quando
+        equivalente ao grafico multi-dia do "Top SQL"), o detalhamento por hora DENTRO de um dia
+        especifico quando
         `bucket="hour"`, ou uma granularidade sub-hora da "Fatia de Tempo"
         (`ten_minutes`/`minute`/`ten_seconds`/`second`, ver `_bucket_sql`). `bucket` sempre em UTC
         (`time AT TIME ZONE 'UTC'`), independente do timezone de sessao do Postgres. O `AT TIME

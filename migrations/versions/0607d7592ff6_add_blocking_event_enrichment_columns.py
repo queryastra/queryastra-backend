@@ -4,8 +4,8 @@ Revision ID: 0607d7592ff6
 Revises: de1abfb93174
 Create Date: 2026-09-14 15:43:36.377425
 
-Fecha o gap real da arvore de bloqueio de nivel unico (Etapa 9 - arvore completa de bloqueio
-estilo SolarWinds DPA): ate aqui `blocking_events` so guardava sql_hash de cada lado, obrigando
+Fecha o gap real da arvore de bloqueio de nivel unico (Etapa 9 - arvore completa de bloqueio):
+ate aqui `blocking_events` so guardava sql_hash de cada lado, obrigando
 a tela principal a fazer join de leitura contra `query_samples` (que nem sempre tem amostra
 fresca pro bloqueador, especialmente um bloqueador ocioso segurando lock sem request ativa).
 Todas as colunas sao aditivas/nullable, sem backfill (eventos antigos simplesmente ficam sem

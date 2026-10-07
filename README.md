@@ -1,9 +1,9 @@
-# ab-xql-pm-backend
+# queryastra-backend
 
-Backend FastAPI do **AB-XQL-PM** — observabilidade agentless de PostgreSQL e SQL Server.
+Backend FastAPI do **QueryAstra** — observabilidade agentless de PostgreSQL e SQL Server.
 
 Este repositorio contem apenas o **codigo**. As decisoes de arquitetura, contratos de API/coleta,
-schema de dados e regras de negocio vivem no repositorio separado `ab-xql-pm-documentos` (fonte de
+schema de dados e regras de negocio vivem no repositorio separado `queryastra-documentos` (fonte de
 verdade externa) — consulte sempre antes de alterar comportamento:
 
 - `ARCHITECTURE_SPEC.md`
@@ -27,7 +27,7 @@ repositorio de documentos para o roadmap completo.
 - PostgreSQL/TimescaleDB acessivel via `DATABASE_URL` (ver `.env.example`) para rodar migrations e
   a aplicacao de verdade — os testes automatizados nao dependem de banco real.
 
-O backend espera que o repositorio `ab-xql-pm-documentos` esteja disponivel
+O backend espera que o repositorio `queryastra-documentos` esteja disponivel
 localmente para consulta. Os links para `ARCHITECTURE_SPEC.md` e `Docs/` neste
 README sao referencias ao repositorio de documentacao, nao arquivos deste repo.
 

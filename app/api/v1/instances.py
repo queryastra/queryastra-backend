@@ -61,7 +61,7 @@ class InstanceCreateRequest(BaseModel):
     """
 
     name: str
-    db_type: str = Field(pattern="^(postgresql|sqlserver)$")
+    db_type: str = Field(pattern="^(postgresql|sqlserver|mysql|cockroachdb|aurora_postgresql|aurora_mysql)$")
     host: str
     port: int
     cloud_provider: str | None = Field(default=None, pattern="^(aws_rds|azure|gcp)$")
@@ -419,7 +419,7 @@ async def set_instance_active(
     ],
     _: Annotated[CurrentUser, Depends(require_admin)],
 ) -> InstanceDetailResponse:
-    """Liga/desliga o monitoramento de uma instancia (equivalente ao botao ON/OFF do SolarWinds)
+    """Liga/desliga o monitoramento de uma instancia (equivalente ao botao ON/OFF de monitoramento)
     sem apagar o cadastro. Efeito real: `PollingSupervisor`/`MissingIndexSupervisor`/
     `BackupStatusSupervisor`/`AlertingWorker` re-leem `instances.active` a cada reconciliacao
     (ver `Docs/collector-queries.md`/supervisors) — a instancia pausada para de ser coletada e

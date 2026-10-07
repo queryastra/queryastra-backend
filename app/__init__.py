@@ -1,1 +1,1 @@
-"""AB-XQL-PM backend package."""
+"""QueryAstra backend package."""

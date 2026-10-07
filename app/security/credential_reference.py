@@ -50,7 +50,7 @@ class CredentialResolver:
 
     Stub do MVP: a Fase 1 usa `encrypted_fallback` (criptografia simetrica simples, chave fora do
     banco) como caminho principal; um cofre corporativo (Vault/Key Vault/Secrets Manager) fica
-    pendente (Q5 do ARCHITECTURE_SPEC.md) até o padrão interno do Autbank ser confirmado.
+    pendente (Q5 do ARCHITECTURE_SPEC.md) até o padrão interno ser confirmado.
     """
 
     async def resolve(self, reference: CredentialReference) -> ResolvedCredential:

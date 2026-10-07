@@ -42,10 +42,10 @@ class InstancesRepository(BaseRepository):
         return list(result.scalars().all())
 
     async def set_active(self, instance_id: UUID, active: bool) -> Instance | None:
-        """Liga/desliga o monitoramento de uma instancia (equivalente ao botao ON/OFF da coluna
-        Monitor do SolarWinds) sem apagar o cadastro. `PollingSupervisor`/`MissingIndexSupervisor`/
-        `BackupStatusSupervisor`/`AlertingWorker` ja respeitam `instances.active` via
-        `list_active()` — nenhuma mudanca de worker necessaria, so persistir o flag."""
+        """Liga/desliga o monitoramento de uma instancia sem apagar o cadastro.
+        `PollingSupervisor`/`MissingIndexSupervisor`/`BackupStatusSupervisor`/`AlertingWorker` ja
+        respeitam `instances.active` via `list_active()` — nenhuma mudanca de worker necessaria,
+        so persistir o flag."""
         instance = await self.get_by_id(instance_id)
         if instance is None:
             return None
@@ -148,6 +148,17 @@ class InstancesRepository(BaseRepository):
         await self._session.commit()
         await self._session.refresh(instance)
         return instance
+
+    async def get_names_by_ids(self, ids: list[UUID]) -> dict[UUID, str]:
+        """Devolve {id: name} para os ids pedidos — usado pelos endpoints de transacoes e
+        bloqueios para resolver nomes de instancias parceiras (linked server / MSDTC) sem
+        precisar de um join completo."""
+        if not ids:
+            return {}
+        result = await self._session.execute(
+            select(Instance.id, Instance.name).where(Instance.id.in_(ids))
+        )
+        return {row.id: row.name for row in result.all()}
 
     async def update_engine_version(
         self, instance_id: UUID, engine_version: str, engine_version_major: int

@@ -22,12 +22,12 @@ class Settings(BaseSettings):
     # Conexao com o TimescaleDB de persistencia da aplicacao (nao confundir com as instancias
     # PostgreSQL/SQL Server monitoradas, que sao cadastradas em `instances`).
     database_url: str = Field(
-        default="postgresql+asyncpg://ab_xql_pm:changeme@localhost:5432/ab_xql_pm",
+        default="postgresql+asyncpg://queryastra:changeme@localhost:5432/queryastra",
         alias="DATABASE_URL",
     )
 
     api_v1_prefix: str = Field(default="/api/v1", alias="API_V1_PREFIX")
-    cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:3000"])
+    cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:3001"])
 
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
@@ -116,7 +116,7 @@ class Settings(BaseSettings):
         default=False, alias="MISSING_INDEX_SUPERVISOR_ENABLED"
     )
     # Intervalo (segundos) entre checagens de indice ausente por instancia ativa. Default 1 dia -
-    # o proprio Monitoramento Autbank (Docs/monitoramento-autbank-analysis.md §1) ja roda essa
+    # o monitoramento legado (Docs/monitoramento-autbank-analysis.md §1) ja roda essa
     # familia de checagem 1x/dia ou 1x/semana, nao a cada poucos segundos.
     missing_index_check_interval_seconds: int = Field(
         default=86400, alias="MISSING_INDEX_CHECK_INTERVAL_SECONDS"

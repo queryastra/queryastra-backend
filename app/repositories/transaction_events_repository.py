@@ -73,6 +73,7 @@ class TransactionEventsRepository(BaseRepository):
                     "begin_time": e.begin_time,
                     "state": e.state,
                     "last_error_code": e.last_error_code,
+                    "machine": e.machine,
                     "flag_reason": _merge_tags(
                         existing_flag_reason.get(e.transaction_identifier), e.flag_reason
                     ),
@@ -92,6 +93,7 @@ class TransactionEventsRepository(BaseRepository):
                     "begin_time": stmt.excluded.begin_time,
                     "state": stmt.excluded.state,
                     "last_error_code": stmt.excluded.last_error_code,
+                    "machine": sa.func.coalesce(stmt.excluded.machine, TransactionEvent.machine),
                     "flag_reason": stmt.excluded.flag_reason,
                     "last_seen_at": stmt.excluded.last_seen_at,
                     # Reabre defensivamente: se o identificador foi reciclado pelo motor depois
@@ -233,6 +235,20 @@ class TransactionEventsRepository(BaseRepository):
             row.flag_reason = _merge_tags(row.flag_reason, "erro")
         await self._session.commit()
         return len(rows)
+
+    async def find_by_uow_batch(
+        self, transaction_uows: list[str], exclude_instance_id: UUID
+    ) -> list[TransactionEvent]:
+        """Encontra transacoes de OUTRAS instancias que compartilham o mesmo `transaction_uow`
+        (GUID MSDTC — transacao distribuida promovida pelo DTC). Usado para correlacao
+        cross-instancia no detalhe/lista de transacoes."""
+        if not transaction_uows:
+            return []
+        stmt = sa.select(TransactionEvent).where(
+            TransactionEvent.transaction_uow.in_(transaction_uows),
+            TransactionEvent.instance_id != exclude_instance_id,
+        )
+        return list((await self._session.execute(stmt)).scalars().all())
 
     async def purge_closed_before(self, cutoff: datetime) -> int:
         """Expurgo por idade (`app/workers/problem_events_retention_worker.py`) — so linhas JA

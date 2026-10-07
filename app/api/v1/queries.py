@@ -34,7 +34,7 @@ decomposta por wait nativo — mesmo padrao de "Bancos de dados", nao de "Waits"
 /users/{instance_id}`, `GET /users-by-day/{instance_id}`, `GET /users-by-hour/{instance_id}`.
 
 "Fatia de Tempo" (drill-down temporal fino DENTRO de uma janela ja estreita, equivalente ao
-"Timeslice" do SolarWinds DPA): `GET /timeslice/{instance_id}?dimension=X&bucket=Y` — um unico
+"Timeslice" de ferramentas de monitoramento): `GET /timeslice/{instance_id}?dimension=X&bucket=Y` — um unico
 endpoint parametrizado (`dimension`: database/sql/wait_type/db_user; `bucket`: ten_minutes/
 minute/ten_seconds/second), generalizando os `wait_time_by_bucket_and_*` ja existentes em vez de
 multiplicar rotas. O nivel folha (lista de queries num segundo especifico) reusa `GET /top-sql/
@@ -515,7 +515,7 @@ async def list_databases_by_day(
 ) -> list[BucketEntryResponse]:
     """Visao historica "Tudo" do nivel 1 (Instancia -> Banco -> Query): um dia por barra,
     empilhada por banco de dados — equivalente ao grafico multi-dia de ferramentas de
-    referencia (ex.: SolarWinds DPA "Top SQL" por periodo). `label` e `database_name`."""
+    referencia. `label` e `database_name`."""
     settings = get_settings()
     resolved_since, resolved_until = resolve_time_window(
         since, until, timedelta(seconds=settings.api_read_default_lookback_seconds)
@@ -585,8 +585,7 @@ async def list_databases_by_hour(
 ) -> list[BucketEntryResponse]:
     """Detalhamento por hora do nivel 1, dentro de um dia especifico (`from`/`to` = o dia inteiro
     escolhido pelo filtro de um unico dia) — passo intermediario entre a visao "Tudo" (um dia por
-    barra) e o grafico por banco de um dia inteiro, equivalente ao "Interval: 1 hour" de
-    ferramentas de referencia (ex.: SolarWinds DPA "Top SQL"). `label` e `database_name`."""
+    barra) e o grafico por banco de um dia inteiro. `label` e `database_name`."""
     settings = get_settings()
     resolved_since, resolved_until = resolve_time_window(
         since, until, timedelta(seconds=settings.api_read_default_lookback_seconds)
@@ -1019,8 +1018,7 @@ async def list_timeslice(
     machine: Annotated[str | None, Query()] = None,
 ) -> list[BucketEntryResponse]:
     """ "Fatia de Tempo" — drill-down temporal fino DENTRO de uma janela já estreita (uma hora, um
-    intervalo de 10min, etc.), pedido explícito do usuário com o "Timeslice" do SolarWinds DPA
-    como referência. Generaliza os 4 `wait_time_by_bucket_and_*` já existentes (que hoje só
+    intervalo de 10min, etc.). Generaliza os 4 `wait_time_by_bucket_and_*` já existentes (que hoje só
     aceitavam `bucket="day"/"hour"`) pras 4 granularidades sub-hora — um único endpoint com
     `dimension`/`bucket` como parâmetro, em vez de 16 rotas (`4 dimensões × 4 granularidades`).
 

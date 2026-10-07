@@ -77,6 +77,22 @@ _SQLSERVER_WAIT_TYPE_PREFIX_MAP: dict[str, WaitCategory] = {
     "LATCH_": WaitCategory.LATCH,
 }
 
+# MySQL: EVENT_NAME de performance_schema.events_waits_current
+# Formato: "wait/<category>/<subcategory>/..." ou "idle"
+_MYSQL_WAIT_EVENT_PREFIX_MAP: dict[str, WaitCategory] = {
+    "wait/io/file/": WaitCategory.IO,
+    "wait/io/table/": WaitCategory.IO,
+    "wait/io/global_index/": WaitCategory.IO,
+    "wait/io/net/": WaitCategory.NETWORK,
+    "wait/io/socket/": WaitCategory.NETWORK,
+    "wait/lock/table/": WaitCategory.LOCK,
+    "wait/lock/metadata/": WaitCategory.LOCK,
+    "wait/synch/mutex/": WaitCategory.LATCH,
+    "wait/synch/rwlock/": WaitCategory.LATCH,
+    "wait/synch/cond/": WaitCategory.LATCH,
+    "wait/synch/sxlock/": WaitCategory.LATCH,
+}
+
 
 def map_wait_event(engine: str, native_value: str | None) -> WaitCategory:
     """Classifica um `wait_event`/`wait_type` nativo na categoria canonica cross-engine.
@@ -92,7 +108,7 @@ def map_wait_event(engine: str, native_value: str | None) -> WaitCategory:
         implementacao #3 de `Docs/wait-taxonomy.md`); quem chamar deve registrar essa ocorrencia
         (log/metrica interna) para revisao periodica da tabela.
     """
-    if engine == "postgresql":
+    if engine in ("postgresql", "cockroachdb", "aurora_postgresql"):
         if not native_value:
             return WaitCategory.CPU
         return _POSTGRESQL_WAIT_EVENT_TYPE_MAP.get(native_value, WaitCategory.OTHER)
@@ -103,6 +119,14 @@ def map_wait_event(engine: str, native_value: str | None) -> WaitCategory:
         if native_value in _SQLSERVER_WAIT_TYPE_EXACT_MAP:
             return _SQLSERVER_WAIT_TYPE_EXACT_MAP[native_value]
         for prefix, category in _SQLSERVER_WAIT_TYPE_PREFIX_MAP.items():
+            if native_value.startswith(prefix):
+                return category
+        return WaitCategory.OTHER
+
+    if engine in ("mysql", "aurora_mysql"):
+        if not native_value or native_value == "idle":
+            return WaitCategory.IDLE
+        for prefix, category in _MYSQL_WAIT_EVENT_PREFIX_MAP.items():
             if native_value.startswith(prefix):
                 return category
         return WaitCategory.OTHER

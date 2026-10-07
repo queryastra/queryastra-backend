@@ -19,7 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.normalizers.wait_taxonomy import WaitCategory
 
-EngineType = Literal["postgresql", "sqlserver"]
+EngineType = Literal["postgresql", "sqlserver", "mysql", "cockroachdb", "aurora_postgresql", "aurora_mysql"]
 TargetType = Literal["server", "instance"]
 
 
@@ -76,7 +76,7 @@ class NormalizedQuerySample(BaseModel):
     # cpu_time` no SQL Server — cumulativo por request, zera numa request nova). So SQL Server
     # por enquanto (`Docs/collector-queries.md` §1) — PostgreSQL nao expoe um equivalente direto
     # em `pg_stat_activity`, fica sempre None la. Usado pra fechar o gap real confirmado
-    # comparando com o SolarWinds DPA (categoria "Memory/CPU"): sem isso, tempo gasto rodando na
+    # para fechar o gap de CPU nao coberto por esperas nomeadas: sem isso, tempo gasto rodando na
     # CPU sem nenhuma espera ativa (`wait_type IS NULL`) nao contava em lugar nenhum.
     cpu_time_ms: int | None = None
     duration_ms: int | None = None
@@ -193,6 +193,7 @@ class NormalizedTransactionEvent(BaseModel):
     state: str | None = None
     last_error_code: int | None = None
     flag_reason: str | None = None
+    machine: str | None = None
 
 
 class NormalizedConfirmedTransactionError(BaseModel):

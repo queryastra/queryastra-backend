@@ -44,6 +44,7 @@ from app.api.deps import check_instance_access, get_db_session, resolve_time_win
 from app.core.config import get_settings
 from app.models.blocking_incident import BlockingIncident
 from app.repositories.blocking_incidents_repository import BlockingIncidentsRepository
+from app.repositories.instances_repository import InstancesRepository
 from app.repositories.query_samples_repository import QuerySamplesRepository
 
 router = APIRouter()
@@ -54,11 +55,10 @@ class BlockingTreeNodeResponse(BaseModel):
     diretos aninhados em `children`.
 
     `waited_ms` e o tempo que ESSA sessao esperou (None quando ela nunca aparece como bloqueada —
-    um bloqueador puro, incluindo o caso "ocioso" do print do SolarWinds DPA que inspirou esta
-    tela). `caused_ms` e a soma recursiva de `waited_ms` de toda a subarvore de descendentes —
-    quanto tempo, no total, essa sessao e responsavel por travar por baixo dela (mesma semantica
-    de "Blocking Time Caused/Waited" do DPA).
-    """
+    um bloqueador puro, incluindo o caso "ocioso" sem request ativa). `caused_ms` e a soma
+    recursiva de `waited_ms` de toda a subarvore de descendentes — quanto tempo, no total, essa
+    sessao e responsavel por travar por baixo dela.
+"""
 
     session_id: str
     sql_hash: str | None
@@ -83,6 +83,8 @@ class BlockingTreeNodeResponse(BaseModel):
     started_at: datetime | None
     waited_ms: int | None
     caused_ms: int
+    linked_instance_id: UUID | None = None
+    linked_instance_name: str | None = None
     children: list[BlockingTreeNodeResponse] = Field(default_factory=list)
 
 
@@ -164,6 +166,10 @@ class BlockingIncidentResponse(BaseModel):
     # do model (`BlockingIncident` só guarda o hash).
     blocker_sql_text_masked: str | None = None
     blocked_sql_text_masked: str | None = None
+    blocker_linked_instance_id: UUID | None = None
+    blocker_linked_instance_name: str | None = None
+    blocked_linked_instance_id: UUID | None = None
+    blocked_linked_instance_name: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -188,6 +194,12 @@ def get_query_samples_repository(
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> QuerySamplesRepository:
     return QuerySamplesRepository(session)
+
+
+def get_instances_repository(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> InstancesRepository:
+    return InstancesRepository(session)
 
 
 # --- Montagem da arvore ------------------------------------------------------------------------
@@ -229,6 +241,7 @@ def _collect_session_info(events: list[BlockingIncident]) -> dict[str, _SessionI
         blocker.setdefault("transaction_id", e.blocker_transaction_id)
         blocker.setdefault("database_name", e.blocker_database_name)
         blocker.setdefault("transaction_begin_time", e.blocker_transaction_begin_time)
+        blocker.setdefault("linked_instance_id", e.blocker_linked_instance_id)
 
         blocked = info.setdefault(e.blocked_session_id, {})
         blocked["db_user"] = e.blocked_db_user or blocked.get("db_user")
@@ -244,11 +257,16 @@ def _collect_session_info(events: list[BlockingIncident]) -> dict[str, _SessionI
         blocked["transaction_begin_time"] = e.blocked_transaction_begin_time or blocked.get(
             "transaction_begin_time"
         )
+        blocked["linked_instance_id"] = e.blocked_linked_instance_id or blocked.get(
+            "linked_instance_id"
+        )
     return info
 
 
 def _build_blocking_tree(
-    events: list[BlockingIncident], enrichment: dict[str, Row]
+    events: list[BlockingIncident],
+    enrichment: dict[str, Row],
+    instance_names: dict[UUID, str] | None = None,
 ) -> list[BlockingTreeNodeResponse]:
     """Monta a arvore completa de bloqueio a partir dos incidentes EM ANDAMENTO (uma linha de
     `blocking_incidents` por aresta) — encadeia quantos niveis existirem quando um bloqueador
@@ -264,6 +282,7 @@ def _build_blocking_tree(
         blocker_sql_hash_by_session[e.blocker_session_id] = e.blocker_sql_hash
 
     session_info = _collect_session_info(events)
+    _names = instance_names or {}
 
     def node_for(
         session_id: str,
@@ -279,8 +298,9 @@ def _build_blocking_tree(
         ]
         # "Caused" (impacto total dessa sessao na cadeia): soma, recursivamente, o tempo que
         # cada descendente esperou por causa dela — quanto mais fundo/largo o bloqueio que ela
-        # origina, maior o numero, igual a semantica do DPA.
+        # origina, maior o numero.
         caused_ms = sum((c.waited_ms or 0) + c.caused_ms for c in children)
+        linked_id: UUID | None = info.get("linked_instance_id")
         return BlockingTreeNodeResponse(
             session_id=session_id,
             sql_hash=sql_hash,
@@ -297,12 +317,14 @@ def _build_blocking_tree(
             started_at=started_at,
             waited_ms=waited_ms,
             caused_ms=caused_ms,
+            linked_instance_id=linked_id,
+            linked_instance_name=_names.get(linked_id) if linked_id else None,
             children=children,
         )
 
     roots = [sid for sid in children_by_blocker if sid not in blocked_ids]
     # Raiz nunca aparece como bloqueada (senao nao seria raiz) — `waited_ms=None`, nao `0`: "0ms
-    # de espera" seria enganoso pra quem nunca esperou nada (o "idle blocker" do print do DPA).
+    # de espera" seria enganoso pra quem nunca esperou nada (o "idle blocker", bloqueador ocioso).
     # `started_at` da raiz e o mais antigo entre os incidentes que ela origina (ela mesma nunca
     # tem uma aresta "de entrada" — nao e bloqueada por ninguem, senao nao seria raiz).
     return [
@@ -327,6 +349,7 @@ async def list_blocking_events(
         BlockingIncidentsRepository, Depends(get_blocking_incidents_repository)
     ],
     query_repo: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
+    instances_repo: Annotated[InstancesRepository, Depends(get_instances_repository)],
     since: Annotated[datetime | None, Query(alias="from")] = None,
     until: Annotated[datetime | None, Query(alias="to")] = None,
 ) -> list[BlockingTreeNodeResponse]:
@@ -345,7 +368,14 @@ async def list_blocking_events(
         list(session_ids),
         datetime.now(UTC) - timedelta(seconds=settings.api_read_default_lookback_seconds),
     )
-    return _build_blocking_tree(events, enrichment)
+    linked_ids = {
+        lid
+        for e in events
+        for lid in (e.blocker_linked_instance_id, e.blocked_linked_instance_id)
+        if lid is not None
+    }
+    instance_names = await instances_repo.get_names_by_ids(list(linked_ids))
+    return _build_blocking_tree(events, enrichment, instance_names)
 
 
 @router.get("/blocking/{instance_id}/incidents", response_model=list[BlockingIncidentResponse])
@@ -356,6 +386,7 @@ async def list_blocking_incidents(
         BlockingIncidentsRepository, Depends(get_blocking_incidents_repository)
     ],
     query_repo: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
+    instances_repo: Annotated[InstancesRepository, Depends(get_instances_repository)],
     open_only: Annotated[bool, Query()] = False,
     database_name: Annotated[str | None, Query()] = None,
     since: Annotated[datetime | None, Query(alias="from")] = None,
@@ -383,6 +414,13 @@ async def list_blocking_incidents(
         r.blocked_sql_hash for r in rows if r.blocked_sql_hash
     }
     text_by_hash = await query_repo.latest_text_by_sql_hash(instance_id, list(sql_hashes))
+    linked_ids = {
+        lid
+        for r in rows
+        for lid in (r.blocker_linked_instance_id, r.blocked_linked_instance_id)
+        if lid is not None
+    }
+    instance_names = await instances_repo.get_names_by_ids(list(linked_ids))
     return [
         BlockingIncidentResponse.model_validate(row).model_copy(
             update={
@@ -392,6 +430,12 @@ async def list_blocking_incidents(
                 else None,
                 "blocked_sql_text_masked": text_by_hash.get(row.blocked_sql_hash)
                 if row.blocked_sql_hash
+                else None,
+                "blocker_linked_instance_name": instance_names.get(row.blocker_linked_instance_id)
+                if row.blocker_linked_instance_id
+                else None,
+                "blocked_linked_instance_name": instance_names.get(row.blocked_linked_instance_id)
+                if row.blocked_linked_instance_id
                 else None,
             }
         )

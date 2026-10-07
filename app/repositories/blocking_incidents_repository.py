@@ -20,6 +20,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.models.blocking_incident import BlockingIncident
+from app.models.instance import Instance
 from app.normalizers.models import NormalizedBlockingEvent
 from app.repositories.base import BaseRepository
 
@@ -35,6 +36,30 @@ class BlockingIncidentsRepository(BaseRepository):
         aresta observada (`started_at` so no INSERT, nunca sobrescrito no UPDATE) e fecha
         (`ended_at`, nunca deleta) qualquer par ja rastreado ausente de `events`."""
         open_edge_keys = {(e.blocker_session_id, e.blocked_session_id) for e in events}
+
+        other_instances = (
+            await self._session.execute(
+                sa.select(Instance.id, Instance.host).where(
+                    Instance.active.is_(True), Instance.id != instance_id
+                )
+            )
+        ).all()
+        host_to_instance: dict[str, UUID] = {}
+        for inst in other_instances:
+            full = inst.host.lower()
+            host_to_instance[full] = inst.id
+            short = full.split(".")[0]
+            if short != full:
+                host_to_instance.setdefault(short, inst.id)
+
+        def _detect_linked(machine: str | None) -> UUID | None:
+            if not machine:
+                return None
+            m = machine.lower()
+            found = host_to_instance.get(m)
+            if found is not None:
+                return found
+            return host_to_instance.get(m.split(".")[0])
 
         if events:
             rows = [
@@ -61,6 +86,8 @@ class BlockingIncidentsRepository(BaseRepository):
                     "blocked_database_name": e.blocked_database_name,
                     "blocker_transaction_begin_time": e.blocker_transaction_begin_time,
                     "blocked_transaction_begin_time": e.blocked_transaction_begin_time,
+                    "blocker_linked_instance_id": _detect_linked(e.blocker_machine),
+                    "blocked_linked_instance_id": _detect_linked(e.blocked_machine),
                     "started_at": observed_at,
                     "last_seen_at": observed_at,
                     "ended_at": None,
@@ -103,6 +130,8 @@ class BlockingIncidentsRepository(BaseRepository):
                 "blocked_database_name",
                 "blocker_transaction_begin_time",
                 "blocked_transaction_begin_time",
+                "blocker_linked_instance_id",
+                "blocked_linked_instance_id",
             ]
             stmt = stmt.on_conflict_do_update(
                 constraint="uq_blocking_incidents_identity",

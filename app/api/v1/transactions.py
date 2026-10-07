@@ -30,6 +30,7 @@ from app.core.config import get_settings
 from app.models.blocking_incident import BlockingIncident
 from app.models.transaction_event import TransactionEvent
 from app.repositories.blocking_incidents_repository import BlockingIncidentsRepository
+from app.repositories.instances_repository import InstancesRepository
 from app.repositories.query_samples_repository import QuerySamplesRepository
 from app.repositories.transaction_events_repository import TransactionEventsRepository
 
@@ -58,6 +59,12 @@ class TransactionEventResponse(BaseModel):
     related_blocking_role: str | None
     related_blocking_ended_at: datetime | None
     sql_text_masked: str | None = None
+    machine: str | None = None
+    linked_instance_id: UUID | None = None
+    linked_instance_name: str | None = None
+    partner_instance_id: UUID | None = None
+    partner_instance_name: str | None = None
+    partner_transaction_identifier: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -78,6 +85,12 @@ def get_query_samples_repository(
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> QuerySamplesRepository:
     return QuerySamplesRepository(session)
+
+
+def get_instances_repository(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> InstancesRepository:
+    return InstancesRepository(session)
 
 
 def _is_orphan_candidate(
@@ -108,6 +121,8 @@ def _to_response(
     threshold_minutes: int,
     incidents: list[BlockingIncident],
     text_by_hash: dict[str, str],
+    partner_by_uow: dict[str, TransactionEvent] | None = None,
+    instance_names: dict[UUID, str] | None = None,
 ) -> TransactionEventResponse:
     """`sql_text_masked` resolvido por HASH (`text_by_hash`, ver `QuerySamplesRepository.
     latest_text_by_sql_hash`), não guardado direto em `BlockingIncident` — mesmo padrão já usado
@@ -117,6 +132,8 @@ def _to_response(
     related_role: str | None = None
     related_ended_at: datetime | None = None
     sql_text_masked: str | None = None
+    linked_instance_id: UUID | None = None
+    linked_instance_name: str | None = None
     if row.session_id is not None:
         incident = _most_recent_incident_for_session(row.session_id, incidents)
         if incident is not None:
@@ -125,12 +142,22 @@ def _to_response(
                 related_role = "bloqueadora"
                 if incident.blocker_sql_hash is not None:
                     sql_text_masked = text_by_hash.get(incident.blocker_sql_hash)
+                linked_instance_id = incident.blocker_linked_instance_id
             else:
                 related_session_id = incident.blocker_session_id
                 related_role = "bloqueada"
                 if incident.blocked_sql_hash is not None:
                     sql_text_masked = text_by_hash.get(incident.blocked_sql_hash)
+                linked_instance_id = incident.blocked_linked_instance_id
             related_ended_at = incident.ended_at
+    if linked_instance_id is not None and instance_names:
+        linked_instance_name = instance_names.get(linked_instance_id)
+
+    partner = (
+        partner_by_uow.get(row.transaction_uow)
+        if (partner_by_uow and row.transaction_uow)
+        else None
+    )
 
     return TransactionEventResponse(
         id=row.id,
@@ -154,6 +181,12 @@ def _to_response(
         related_blocking_role=related_role,
         related_blocking_ended_at=related_ended_at,
         sql_text_masked=sql_text_masked,
+        machine=row.machine,
+        linked_instance_id=linked_instance_id,
+        linked_instance_name=linked_instance_name,
+        partner_instance_id=partner.instance_id if partner else None,
+        partner_instance_name=(instance_names or {}).get(partner.instance_id) if partner else None,
+        partner_transaction_identifier=partner.transaction_identifier if partner else None,
     )
 
 
@@ -180,6 +213,7 @@ async def list_transactions(
         BlockingIncidentsRepository, Depends(get_blocking_incidents_repository)
     ],
     query_repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
+    instances_repository: Annotated[InstancesRepository, Depends(get_instances_repository)],
     open_only: Annotated[bool, Query()] = True,
     database_name: Annotated[str | None, Query()] = None,
     since: Annotated[datetime | None, Query(alias="from")] = None,
@@ -203,8 +237,30 @@ async def list_transactions(
         instance_id, session_ids, settings.api_read_max_rows
     )
     text_by_hash = await _resolve_text_by_hash(query_repository, instance_id, incidents)
+
+    uows = [row.transaction_uow for row in rows if row.transaction_uow]
+    partners = await repository.find_by_uow_batch(uows, instance_id) if uows else []
+    partner_by_uow = {p.transaction_uow: p for p in partners if p.transaction_uow}
+
+    linked_ids: set[UUID] = set()
+    for inc in incidents:
+        if inc.blocker_linked_instance_id:
+            linked_ids.add(inc.blocker_linked_instance_id)
+        if inc.blocked_linked_instance_id:
+            linked_ids.add(inc.blocked_linked_instance_id)
+    for p in partners:
+        linked_ids.add(p.instance_id)
+    instance_names = await instances_repository.get_names_by_ids(list(linked_ids))
+
     return [
-        _to_response(row, settings.transaction_orphan_threshold_minutes, incidents, text_by_hash)
+        _to_response(
+            row,
+            settings.transaction_orphan_threshold_minutes,
+            incidents,
+            text_by_hash,
+            partner_by_uow=partner_by_uow,
+            instance_names=instance_names,
+        )
         for row in rows
     ]
 
@@ -219,6 +275,7 @@ async def get_transaction(
         BlockingIncidentsRepository, Depends(get_blocking_incidents_repository)
     ],
     query_repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
+    instances_repository: Annotated[InstancesRepository, Depends(get_instances_repository)],
 ) -> TransactionEventResponse:
     """Detalhe de uma transação específica — continua resolvendo mesmo depois de encerrada
     (`closed_at` preenchido), até a janela de retenção expirar; 404 só quando nunca existiu ou já
@@ -241,4 +298,29 @@ async def get_transaction(
         else []
     )
     text_by_hash = await _resolve_text_by_hash(query_repository, instance_id, incidents)
-    return _to_response(row, settings.transaction_orphan_threshold_minutes, incidents, text_by_hash)
+
+    partners = (
+        await repository.find_by_uow_batch([row.transaction_uow], instance_id)
+        if row.transaction_uow
+        else []
+    )
+    partner_by_uow = {p.transaction_uow: p for p in partners if p.transaction_uow}
+
+    linked_ids: set[UUID] = set()
+    for inc in incidents:
+        if inc.blocker_linked_instance_id:
+            linked_ids.add(inc.blocker_linked_instance_id)
+        if inc.blocked_linked_instance_id:
+            linked_ids.add(inc.blocked_linked_instance_id)
+    for p in partners:
+        linked_ids.add(p.instance_id)
+    instance_names = await instances_repository.get_names_by_ids(list(linked_ids))
+
+    return _to_response(
+        row,
+        settings.transaction_orphan_threshold_minutes,
+        incidents,
+        text_by_hash,
+        partner_by_uow=partner_by_uow,
+        instance_names=instance_names,
+    )

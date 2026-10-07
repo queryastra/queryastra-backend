@@ -2,11 +2,9 @@
 Raiz"), item independente do "status agregado com drill-down" (esse depende do mapa existir
 primeiro, adiado — ver decisão registrada nesta sessão).
 
-Escopo desta primeira versão, deliberadamente honesto sobre suas limitações (mesmo espírito de
-`comparativo-metodologico-solarwinds.md`): **não** é uma sonda de rede contínua medindo
-latência/perda de pacote como o "Application Dependencies" do SolarWinds SAM — não existe nenhum
-agente de rede neste projeto (`ab-xql-pm-agents` só expõe métricas de SO via
-node_exporter/windows_exporter). É, em vez disso, uma correlação 100% agentless sobre dado JÁ
+Escopo desta primeira versão, deliberadamente honesto sobre suas limitações: **não** é uma sonda
+de rede contínua medindo latência/perda de pacote — não existe nenhum agente de rede neste
+projeto. É, em vez disso, uma correlação 100% agentless sobre dado JÁ
 coletado: toda amostra de sessão ativa já grava `machine` (IP/hostname do cliente que abriu
 aquela sessão — `client_addr` no PostgreSQL, `host_name` no SQL Server). Quando essa `machine`
 bate com o `host` de OUTRA instância cadastrada, ou com o `hostname` de um `Server` monitorado, é
