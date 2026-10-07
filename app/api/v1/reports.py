@@ -1,13 +1,14 @@
-"""API de relatorios agendados â€" Item 4.
+"""API de relatorios agendados — Item 4.
 
 Rotas:
-  GET    /reports                       â€" lista todos os relatorios configurados
-  POST   /reports                       â€" cria um novo relatorio agendado
-  GET    /reports/{id}                  â€" detalhe de um relatorio
-  PUT    /reports/{id}                  â€" atualiza titulo/params/agenda/destinatarios
-  DELETE /reports/{id}                  â€" remove a configuracao
-  PATCH  /reports/{id}/toggle           â€" ativa/desativa
-  POST   /reports/{id}/download         â€" gera e baixa o PDF imediatamente (on-demand)
+  GET    /reports                       — lista todos os relatorios configurados
+  POST   /reports                       — cria um novo relatorio agendado
+  GET    /reports/executions            — historico de execucoes com filtros
+  GET    /reports/{id}                  — detalhe de um relatorio
+  PUT    /reports/{id}                  — atualiza titulo/params/agenda/destinatarios
+  DELETE /reports/{id}                  — remove a configuracao
+  PATCH  /reports/{id}/toggle           — ativa/desativa
+  POST   /reports/{id}/download         — gera e baixa o PDF imediatamente (on-demand)
 """
 
 from __future__ import annotations
@@ -17,13 +18,15 @@ from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from croniter import croniter as Croniter
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator
 
 from app.api.deps import get_db_session, require_admin
+from app.models.report_execution_log import ReportExecutionLog
 from app.models.scheduled_report import ScheduledReport
 from app.repositories.instances_repository import InstancesRepository
+from app.repositories.report_execution_logs_repository import ReportExecutionLogsRepository
 from app.repositories.scheduled_reports_repository import ScheduledReportsRepository
 from app.services.report_service import generate_report
 from app.workers.report_worker import _compute_next_run
@@ -31,6 +34,39 @@ from app.workers.report_worker import _compute_next_run
 router = APIRouter()
 
 _VALID_TYPES = {"top_sql", "average_wait", "typical_day"}
+
+
+# ── Schema do log de execuções ────────────────────────────────────────────────
+
+
+class ReportExecutionLogResponse(BaseModel):
+    model_config = {"from_attributes": True}
+
+    id: int
+    report_id: uuid.UUID | None
+    report_title: str
+    report_type: str
+    instance_id: uuid.UUID | None
+    instance_name: str | None
+    executed_at: datetime
+    status: str
+    error: str | None
+    email_recipients: list[str]
+
+    @classmethod
+    def from_orm(cls, r: ReportExecutionLog) -> "ReportExecutionLogResponse":
+        return cls(
+            id=r.id,
+            report_id=r.report_id,
+            report_title=r.report_title,
+            report_type=r.report_type,
+            instance_id=r.instance_id,
+            instance_name=r.instance_name,
+            executed_at=r.executed_at,
+            status=r.status,
+            error=r.error,
+            email_recipients=r.email_recipients or [],
+        )
 
 
 # ── Schemas ──────────────────────────────────────────────────────────────────
@@ -129,6 +165,31 @@ async def list_reports(
     repo = ScheduledReportsRepository(session)
     reports = await repo.list_all()
     return [ScheduledReportResponse.from_orm(r) for r in reports]
+
+
+@router.get("/executions", response_model=list[ReportExecutionLogResponse])
+async def list_executions(
+    _admin: Annotated[None, Depends(require_admin)],
+    session: Annotated[Any, Depends(get_db_session)],
+    title: Annotated[str | None, Query()] = None,
+    report_type: Annotated[str | None, Query()] = None,
+    instance_id: Annotated[uuid.UUID | None, Query()] = None,
+    from_dt: Annotated[datetime | None, Query(alias="from")] = None,
+    to_dt: Annotated[datetime | None, Query(alias="to")] = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 200,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> list[ReportExecutionLogResponse]:
+    repo = ReportExecutionLogsRepository(session)
+    rows = await repo.list_filtered(
+        title=title,
+        report_type=report_type,
+        instance_id=instance_id,
+        from_dt=from_dt,
+        to_dt=to_dt,
+        limit=limit,
+        offset=offset,
+    )
+    return [ReportExecutionLogResponse.from_orm(r) for r in rows]
 
 
 @router.post("", response_model=ScheduledReportResponse, status_code=201)

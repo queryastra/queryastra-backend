@@ -8,6 +8,9 @@ valor a cada ciclo (não cacheado como `app.core.config.Settings`), sem exigir r
 
 from __future__ import annotations
 
+import asyncio
+import smtplib
+from email.message import EmailMessage
 from typing import Annotated
 
 from fastapi import APIRouter, Depends
@@ -15,6 +18,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, get_current_user, get_db_session, require_admin
+from app.core.config import get_settings
 from app.models.system_settings import SystemSettings
 from app.repositories.system_settings_repository import SystemSettingsRepository
 
@@ -70,6 +74,75 @@ async def get_system_settings(
 ) -> SystemSettingsResponse:
     row = await repository.get()
     return _to_response(row)
+
+
+class TestSmtpRequest(BaseModel):
+    to: str
+
+
+class TestSmtpResponse(BaseModel):
+    ok: bool
+    error: str | None = None
+
+
+def _send_test_email_sync(
+    host: str,
+    port: int,
+    username: str | None,
+    password: str | None,
+    sender: str,
+    to: str,
+) -> None:
+    msg = EmailMessage()
+    msg["Subject"] = "[QueryAstra] Teste de configuração SMTP"
+    msg["From"] = sender
+    msg["To"] = to
+    msg.set_content(
+        "Este é um e-mail de teste enviado pelo QueryAstra para verificar as configurações SMTP.\n\n"
+        "Se você recebeu esta mensagem, as configurações estão corretas."
+    )
+    use_ssl = port == 465
+    smtp_class = smtplib.SMTP_SSL if use_ssl else smtplib.SMTP
+    with smtp_class(host, port, timeout=10) as smtp:
+        if not use_ssl:
+            smtp.ehlo()
+            smtp.starttls()
+        if username and password:
+            smtp.login(username, password)
+        smtp.send_message(msg)
+
+
+@router.post("/test-smtp", response_model=TestSmtpResponse)
+async def test_smtp(
+    payload: TestSmtpRequest,
+    repository: Annotated[SystemSettingsRepository, Depends(get_system_settings_repository)],
+    _: Annotated[CurrentUser, Depends(require_admin)],
+) -> TestSmtpResponse:
+    row = await repository.get()
+    env = get_settings()
+
+    host = row.smtp_host or env.alert_smtp_host
+    if not host:
+        return TestSmtpResponse(ok=False, error="SMTP não configurado — defina o servidor (host) primeiro.")
+
+    port = row.smtp_port or env.alert_smtp_port
+    username = row.smtp_username or env.alert_smtp_username
+    password = repository.get_smtp_password_plain(row) or env.alert_smtp_password
+    sender = row.smtp_from_address or env.alert_smtp_from or "noreply@queryastra.local"
+
+    try:
+        await asyncio.to_thread(
+            _send_test_email_sync,
+            host=host,
+            port=port,
+            username=username,
+            password=password,
+            sender=sender,
+            to=payload.to,
+        )
+        return TestSmtpResponse(ok=True)
+    except Exception as exc:
+        return TestSmtpResponse(ok=False, error=str(exc))
 
 
 @router.patch("", response_model=SystemSettingsResponse)

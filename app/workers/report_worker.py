@@ -29,6 +29,7 @@ from app.models.scheduled_report import ScheduledReport
 from app.repositories.instances_repository import (
     InstancesRepository,  # noqa: F401 (used inside method)
 )
+from app.repositories.report_execution_logs_repository import ReportExecutionLogsRepository
 from app.repositories.scheduled_reports_repository import ScheduledReportsRepository
 from app.repositories.system_settings_repository import SystemSettingsRepository
 from app.services.report_service import generate_report
@@ -69,9 +70,13 @@ def _send_email_with_attachment(
     part.add_header("Content-Disposition", f'attachment; filename="{attachment_name}"')
     msg.attach(part)
 
-    with smtplib.SMTP(host, port) as smtp:
-        smtp.ehlo()
-        smtp.starttls()
+    # Porta 465 → SSL implícito (SMTP_SSL); porta 587 e demais → STARTTLS explícito.
+    use_ssl = port == 465
+    smtp_class = smtplib.SMTP_SSL if use_ssl else smtplib.SMTP
+    with smtp_class(host, port) as smtp:
+        if not use_ssl:
+            smtp.ehlo()
+            smtp.starttls()
         if username and password:
             smtp.login(username, password)
         smtp.sendmail(sender, recipients, msg.as_string())
@@ -137,20 +142,48 @@ class ReportWorker:
             next_run = _compute_next_run(report.schedule_cron, now)
             repo = ScheduledReportsRepository(session)
             await repo.update_after_run(report, status, error, next_run)
+            log_repo = ReportExecutionLogsRepository(session)
+            await log_repo.insert(
+                report_id=report.id,
+                report_title=report.title,
+                report_type=report.report_type,
+                instance_id=instance.id,
+                instance_name=instance.name,
+                executed_at=now,
+                status=status,
+                error=error,
+                email_recipients=report.email_recipients or [],
+            )
             return
 
-        # Tenta enviar email se configurado
+        # Tenta enviar email se configurado; falha de envio não cancela a execução mas é registrada.
         if report.email_recipients:
-            await self._try_send_email(session, report, pdf_bytes)
+            email_error = await self._try_send_email(session, report, pdf_bytes)
+            if email_error:
+                error = f"PDF gerado; falha ao enviar email: {email_error}"
 
         next_run = _compute_next_run(report.schedule_cron, now) if report.is_recurring else None
         repo = ScheduledReportsRepository(session)
         await repo.update_after_run(report, status, error, next_run)
+
+        log_repo = ReportExecutionLogsRepository(session)
+        await log_repo.insert(
+            report_id=report.id,
+            report_title=report.title,
+            report_type=report.report_type,
+            instance_id=instance.id,
+            instance_name=instance.name,
+            executed_at=now,
+            status=status,
+            error=error,
+            email_recipients=report.email_recipients or [],
+        )
         logger.info("Relatorio %s gerado com sucesso (proxima execucao: %s)", report.id, next_run)
 
     async def _try_send_email(
         self, session: AsyncSession, report: ScheduledReport, pdf_bytes: bytes
-    ) -> None:
+    ) -> str | None:
+        """Envia o PDF por email. Retorna a mensagem de erro em caso de falha, None se ok."""
         # Lê config SMTP do banco (editável na UI). Fallback para .env se não configurado no banco.
         settings_repo = SystemSettingsRepository(session)
         db_settings = await settings_repo.get()
@@ -159,7 +192,7 @@ class ReportWorker:
         host = db_settings.smtp_host or env.alert_smtp_host
         if not host:
             logger.debug("SMTP nao configurado - email nao enviado para relatorio %s", report.id)
-            return
+            return None
 
         port = db_settings.smtp_port or env.alert_smtp_port
         username = db_settings.smtp_username or env.alert_smtp_username
@@ -185,7 +218,9 @@ class ReportWorker:
                 attachment_name=filename,
             )
             logger.info("Email enviado para relatorio %s -> %s", report.id, report.email_recipients)
-        except Exception:
+            return None
+        except Exception as exc:
             logger.exception(
                 "Falha ao enviar email para relatorio %s (nao bloqueia execucao)", report.id
             )
+            return str(exc)
