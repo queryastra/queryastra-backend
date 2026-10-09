@@ -69,6 +69,25 @@ PG_BACKUP_DAYS_SINCE_LAST = "postgresql_backup_days_since_last"
 COLLECTOR_CYCLE_DURATION_MS = "collector_cycle_duration_ms"
 COLLECTOR_CYCLE_ERROR_COUNT = "collector_cycle_error_count"
 
+# Oracle — V$SESSION / V$SYSSTAT / V$SGAINFO
+ORACLE_ACTIVE_SESSION_COUNT = "oracle_active_session_count"
+ORACLE_CPU_TIME_TOTAL = "oracle_cpu_time_seconds_total"
+ORACLE_SGA_TOTAL_BYTES = "oracle_sga_total_bytes"
+ORACLE_PGA_AGGREGATE_BYTES = "oracle_pga_aggregate_bytes"
+ORACLE_SESSIONS_TOTAL = "oracle_sessions_total"
+ORACLE_DEADLOCKS_TOTAL = "oracle_deadlocks_total"
+
+# IBM DB2 — MON_GET_DATABASE / MON_GET_BUFFERPOOL
+DB2_ACTIVE_SESSION_COUNT = "db2_active_session_count"
+DB2_DEADLOCKS_TOTAL = "db2_deadlocks_total"
+DB2_LOCK_WAITS_TOTAL = "db2_lock_waits_total"
+DB2_BP_HIT_RATIO = "db2_bufferpool_hit_ratio"
+DB2_TOTAL_MEMORY_BYTES = "db2_total_memory_bytes"
+
+# Amazon Redshift — reusa as métricas PG onde aplicável
+REDSHIFT_ACTIVE_SESSION_COUNT = "redshift_active_session_count"
+REDSHIFT_WLM_QUEUE_WAIT_SECONDS = "redshift_wlm_queue_wait_seconds"
+
 SQLSERVER_RAW_COUNTER_TO_METRIC_NAME: dict[str, str] = {
     "Page life expectancy": SQLSERVER_PAGE_LIFE_EXPECTANCY,
     "Processes blocked": SQLSERVER_PROCESSES_BLOCKED,

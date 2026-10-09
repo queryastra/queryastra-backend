@@ -93,6 +93,18 @@ blocking_events_table = sa.Table(
     sa.Column("blocked_transaction_begin_time", sa.DateTime(timezone=True), nullable=True),
 )
 
+query_stats_snapshot_table = sa.Table(
+    "query_stats_snapshot",
+    metadata,
+    sa.Column("time", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("instance_id", UUID(as_uuid=True), nullable=False),
+    sa.Column("queryid", sa.BigInteger(), nullable=False),
+    sa.Column("query_text", sa.Text(), nullable=True),
+    sa.Column("calls", sa.BigInteger(), nullable=False),
+    sa.Column("total_exec_time", sa.Float(), nullable=False),
+    sa.Column("total_rows", sa.BigInteger(), nullable=False),
+)
+
 sql_exclusions_table = sa.Table(
     "sql_exclusions",
     metadata,

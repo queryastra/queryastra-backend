@@ -35,6 +35,7 @@ from app.repositories.instances_repository import InstancesRepository
 from app.repositories.metric_samples_repository import MetricSamplesRepository
 from app.repositories.user_instance_access_repository import UserInstanceAccessRepository
 from app.security.credential_reference import CredentialResolver
+from app.services.audit_service import record_audit
 from app.services.exceptions import InstanceNotFoundError
 from app.services.health_check_service import HealthCheckService
 from app.services.instance_derived_status_service import (
@@ -61,7 +62,7 @@ class InstanceCreateRequest(BaseModel):
     """
 
     name: str
-    db_type: str = Field(pattern="^(postgresql|sqlserver|mysql|cockroachdb|aurora_postgresql|aurora_mysql)$")
+    db_type: str = Field(pattern="^(postgresql|sqlserver|mysql|cockroachdb|aurora_postgresql|aurora_mysql|oracle|db2|redshift)$")
     host: str
     port: int
     cloud_provider: str | None = Field(default=None, pattern="^(aws_rds|azure|gcp)$")
@@ -417,7 +418,8 @@ async def set_instance_active(
     status_service: Annotated[
         InstanceDerivedStatusService, Depends(get_instance_derived_status_service)
     ],
-    _: Annotated[CurrentUser, Depends(require_admin)],
+    current_admin: Annotated[CurrentUser, Depends(require_admin)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> InstanceDetailResponse:
     """Liga/desliga o monitoramento de uma instancia (equivalente ao botao ON/OFF de monitoramento)
     sem apagar o cadastro. Efeito real: `PollingSupervisor`/`MissingIndexSupervisor`/
@@ -429,6 +431,15 @@ async def set_instance_active(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Instancia nao encontrada."
         )
+    await record_audit(
+        session,
+        actor=current_admin.username,
+        action="instance.monitoring_on" if payload.active else "instance.monitoring_off",
+        target_type="instance",
+        target_id=str(instance_id),
+        target_name=instance.name,
+    )
+    await session.commit()
     derived = await status_service.compute(instance_id)
     return InstanceDetailResponse(
         **InstanceResponse.model_validate(instance).model_dump(),

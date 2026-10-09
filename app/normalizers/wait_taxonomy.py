@@ -94,6 +94,37 @@ _MYSQL_WAIT_EVENT_PREFIX_MAP: dict[str, WaitCategory] = {
 }
 
 
+# Oracle: WAIT_CLASS nativo de V$SESSION_WAIT / V$SESSION
+_ORACLE_WAIT_CLASS_MAP: dict[str, WaitCategory] = {
+    "User I/O": WaitCategory.IO,
+    "System I/O": WaitCategory.IO,
+    "Commit": WaitCategory.IO,
+    "Application": WaitCategory.LOCK,
+    "Concurrency": WaitCategory.LATCH,
+    "Network": WaitCategory.NETWORK,
+    "Cluster": WaitCategory.IPC,
+    "Idle": WaitCategory.IDLE,
+    "Other": WaitCategory.OTHER,
+    "Administrative": WaitCategory.OTHER,
+    "Configuration": WaitCategory.OTHER,
+    "Scheduler": WaitCategory.CPU,
+}
+
+# IBM DB2: STATE_CHANGE_REASON / ACTIVITY_TYPE de MON_GET_ACTIVITY
+_DB2_WAIT_CLASS_MAP: dict[str, WaitCategory] = {
+    "LOCK_WAIT": WaitCategory.LOCK,
+    "LATCH_WAIT": WaitCategory.LATCH,
+    "PREFETCH_WAIT": WaitCategory.IO,
+    "PAGE_WRITE": WaitCategory.IO,
+    "PAGE_READ": WaitCategory.IO,
+    "NETWORK_RECEIVE": WaitCategory.NETWORK,
+    "NETWORK_SEND": WaitCategory.NETWORK,
+    "INTERRUPT_WAIT": WaitCategory.IPC,
+    "THREADWAIT": WaitCategory.IDLE,
+    "WAIT_FOR_LOCK_RELEASE": WaitCategory.LOCK,
+}
+
+
 def map_wait_event(engine: str, native_value: str | None) -> WaitCategory:
     """Classifica um `wait_event`/`wait_type` nativo na categoria canonica cross-engine.
 
@@ -108,7 +139,7 @@ def map_wait_event(engine: str, native_value: str | None) -> WaitCategory:
         implementacao #3 de `Docs/wait-taxonomy.md`); quem chamar deve registrar essa ocorrencia
         (log/metrica interna) para revisao periodica da tabela.
     """
-    if engine in ("postgresql", "cockroachdb", "aurora_postgresql"):
+    if engine in ("postgresql", "cockroachdb", "aurora_postgresql", "redshift"):
         if not native_value:
             return WaitCategory.CPU
         return _POSTGRESQL_WAIT_EVENT_TYPE_MAP.get(native_value, WaitCategory.OTHER)
@@ -130,6 +161,16 @@ def map_wait_event(engine: str, native_value: str | None) -> WaitCategory:
             if native_value.startswith(prefix):
                 return category
         return WaitCategory.OTHER
+
+    if engine == "oracle":
+        if not native_value:
+            return WaitCategory.CPU
+        return _ORACLE_WAIT_CLASS_MAP.get(native_value, WaitCategory.OTHER)
+
+    if engine == "db2":
+        if not native_value:
+            return WaitCategory.CPU
+        return _DB2_WAIT_CLASS_MAP.get(native_value, WaitCategory.OTHER)
 
     raise ValueError(f"engine desconhecido: {engine!r}")
 

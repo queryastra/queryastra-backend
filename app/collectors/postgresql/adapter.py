@@ -86,16 +86,27 @@ from app.normalizers.metric_names import (
     PG_XACT_ROLLBACK,
 )
 from app.normalizers.models import (
+    NormalizedAutovacuumWorker,
     NormalizedBackupStatus,
+    NormalizedBgwriterStats,
     NormalizedBlockingEvent,
     NormalizedConfirmedTransactionError,
+    NormalizedConfigComplianceItem,
+    NormalizedConnectionConsumer,
+    NormalizedDbSize,
+    NormalizedQueryStatsSnapshot,
     NormalizedDeadlockEvent,
+    NormalizedIdleInTransactionSession,
+    NormalizedIndexBloatEntry,
     NormalizedMetricSample,
     NormalizedMissingIndexSuggestion,
     NormalizedPlanCompileTimeoutFinding,
     NormalizedPlanSnapshot,
     NormalizedQuerySample,
+    NormalizedReplicationSlot,
     NormalizedTransactionEvent,
+    NormalizedUserFunction,
+    NormalizedVacuumTableStats,
 )
 from app.normalizers.wait_taxonomy import map_wait_event
 
@@ -204,6 +215,225 @@ _QUALSTATS_INDEX_ADVISOR_QUERY = """
     ORDER BY nspname, relname
 """
 
+# Fase 5 T54 — estatisticas de vacuum por tabela. Exclui tabelas < 1MB para reduzir ruido.
+# Ordenadas por dead tuples DESC para destacar candidatos urgentes primeiro.
+_VACUUM_TABLE_STATS_QUERY = """
+    SELECT
+        s.schemaname,
+        s.relname AS table_name,
+        COALESCE(s.n_dead_tup, 0) AS n_dead_tup,
+        COALESCE(s.n_live_tup, 0) AS n_live_tup,
+        CASE
+            WHEN COALESCE(s.n_live_tup, 0) + COALESCE(s.n_dead_tup, 0) > 0
+            THEN round(100.0 * COALESCE(s.n_dead_tup, 0)
+                 / (COALESCE(s.n_live_tup, 0) + COALESCE(s.n_dead_tup, 0)), 2)
+            ELSE 0
+        END AS dead_tup_pct,
+        s.last_vacuum,
+        s.last_autovacuum,
+        s.last_analyze,
+        s.last_autoanalyze,
+        COALESCE(s.vacuum_count, 0) AS vacuum_count,
+        COALESCE(s.autovacuum_count, 0) AS autovacuum_count,
+        pg_relation_size(s.relid) AS table_size_bytes,
+        age(c.relfrozenxid) AS xid_age
+    FROM pg_stat_user_tables s
+    JOIN pg_class c ON c.oid = s.relid
+    WHERE pg_relation_size(s.relid) > 1048576
+    ORDER BY COALESCE(s.n_dead_tup, 0) DESC
+    LIMIT 200
+"""
+
+# Workers de autovacuum atualmente em execucao.
+_AUTOVACUUM_WORKERS_QUERY = """
+    SELECT
+        pid,
+        COALESCE(datname, '') AS datname,
+        COALESCE(query, '') AS query,
+        EXTRACT(EPOCH FROM (now() - query_start))::int AS running_for_seconds
+    FROM pg_stat_activity
+    WHERE application_name = 'autovacuum worker'
+      AND state != 'idle'
+    ORDER BY running_for_seconds DESC
+"""
+
+# Fase 5 T56 — sessoes com transacao aberta mas sem query em execucao.
+_IDLE_IN_TRANSACTION_QUERY = """
+    SELECT
+        pid AS session_id,
+        COALESCE(usename, '') AS username,
+        COALESCE(application_name, '') AS application_name,
+        COALESCE(client_addr::text, '') AS client_info,
+        state,
+        EXTRACT(EPOCH FROM (now() - state_change))::int AS idle_seconds,
+        COALESCE(query, '') AS last_query
+    FROM pg_stat_activity
+    WHERE state IN ('idle in transaction', 'idle in transaction (aborted)')
+      AND state_change IS NOT NULL
+    ORDER BY idle_seconds DESC
+"""
+
+# Fase 5 T55 — bloat de indices. Usa dead_tup% da tabela como proxy de fragmentacao do indice.
+# Apenas indices > 1MB. Ordenado por tamanho DESC para priorizar os que ocupam mais espaco.
+_INDEX_BLOAT_QUERY = """
+    SELECT
+        s.schemaname AS schema_name,
+        s.relname AS table_name,
+        s.indexrelname AS index_name,
+        pg_relation_size(s.indexrelid) AS index_size_bytes,
+        COALESCE(s.idx_scan, 0) AS idx_scan,
+        COALESCE(s.idx_tup_read, 0) AS idx_tup_read,
+        COALESCE(s.idx_tup_fetch, 0) AS idx_tup_fetch,
+        CASE
+            WHEN COALESCE(t.n_live_tup, 0) + COALESCE(t.n_dead_tup, 0) > 0
+            THEN round(100.0 * COALESCE(t.n_dead_tup, 0)
+                 / (COALESCE(t.n_live_tup, 0) + COALESCE(t.n_dead_tup, 0)), 1)::float
+            ELSE 0.0
+        END AS bloat_pct
+    FROM pg_stat_user_indexes s
+    JOIN pg_stat_user_tables t ON t.schemaname = s.schemaname AND t.relname = s.relname
+    WHERE pg_relation_size(s.indexrelid) > 1048576
+    ORDER BY pg_relation_size(s.indexrelid) DESC
+    LIMIT 100
+"""
+
+# Fase 5 T57 — bgwriter + checkpoints. `pg_stat_bgwriter` e cluster-wide, sempre 1 linha.
+_BGWRITER_STATS_QUERY = """
+    SELECT
+        checkpoints_timed,
+        checkpoints_req,
+        checkpoint_write_time,
+        checkpoint_sync_time,
+        buffers_checkpoint,
+        buffers_clean,
+        maxwritten_clean,
+        buffers_backend,
+        buffers_backend_fsync,
+        buffers_alloc,
+        stats_reset
+    FROM pg_stat_bgwriter
+"""
+
+# Fase 5 T58 — funcoes PL/pgSQL por tempo total. So retorna dados se track_functions != 'none'.
+_USER_FUNCTIONS_QUERY = """
+    SELECT
+        schemaname AS schema_name,
+        funcname AS func_name,
+        calls,
+        total_time AS total_time_ms,
+        self_time AS self_time_ms,
+        CASE WHEN calls > 0 THEN round((total_time / calls)::numeric, 3)::float ELSE 0 END AS avg_time_ms
+    FROM pg_stat_user_functions
+    ORDER BY total_time DESC
+    LIMIT 50
+"""
+
+# Fase 5 T59 — slots de replicacao com lag em bytes. Slots inativos com lag > 1GB sao risco critico.
+# wal_status disponivel apenas em PG 13+ — COALESCE cobre versoes anteriores.
+_REPLICATION_SLOTS_QUERY = """
+    SELECT
+        rs.slot_name,
+        rs.plugin,
+        rs.slot_type,
+        COALESCE(d.datname, '') AS database_name,
+        rs.active,
+        rs.active_pid,
+        CASE
+            WHEN rs.restart_lsn IS NOT NULL
+            THEN (pg_current_wal_lsn() - rs.restart_lsn)::bigint
+            ELSE NULL
+        END AS lag_bytes,
+        CAST(NULL AS text) AS wal_status
+    FROM pg_replication_slots rs
+    LEFT JOIN pg_database d ON d.oid = rs.database
+    ORDER BY CASE WHEN rs.restart_lsn IS NOT NULL
+                  THEN (pg_current_wal_lsn() - rs.restart_lsn)::bigint
+                  ELSE 0
+             END DESC
+"""
+
+# Mesma query com wal_status (PG 13+) — fallback dinamico no metodo collect_replication_slots.
+_REPLICATION_SLOTS_QUERY_PG13 = """
+    SELECT
+        rs.slot_name,
+        rs.plugin,
+        rs.slot_type,
+        COALESCE(d.datname, '') AS database_name,
+        rs.active,
+        rs.active_pid,
+        CASE
+            WHEN rs.restart_lsn IS NOT NULL
+            THEN (pg_current_wal_lsn() - rs.restart_lsn)::bigint
+            ELSE NULL
+        END AS lag_bytes,
+        rs.wal_status
+    FROM pg_replication_slots rs
+    LEFT JOIN pg_database d ON d.oid = rs.database
+    ORDER BY CASE WHEN rs.restart_lsn IS NOT NULL
+                  THEN (pg_current_wal_lsn() - rs.restart_lsn)::bigint
+                  ELSE 0
+             END DESC
+"""
+
+# Fase 5 T65 — consumidores de conexao agrupados por (application_name, client_addr, usename).
+_CONNECTION_CONSUMERS_QUERY = """
+    SELECT
+        COALESCE(application_name, '') AS application_name,
+        client_addr::text             AS client_addr,
+        COALESCE(usename, '')         AS username,
+        COUNT(*)                      AS total,
+        COUNT(*) FILTER (WHERE state = 'active')                      AS active,
+        COUNT(*) FILTER (WHERE state = 'idle')                        AS idle,
+        COUNT(*) FILTER (WHERE state = 'idle in transaction')         AS idle_in_transaction,
+        COUNT(*) FILTER (WHERE wait_event_type IS NOT NULL
+                            AND state = 'active')                     AS waiting
+    FROM pg_stat_activity
+    WHERE pid <> pg_backend_pid()
+    GROUP BY application_name, client_addr, usename
+    ORDER BY total DESC, idle_in_transaction DESC
+"""
+
+# Fase 6 T60 — snapshot periodico de pg_stat_statements (top-200 por total_exec_time).
+# Valores acumulativos; deltas calculados via LAG() no repositorio.
+# LEFT(query, 500): textos longos nao agregam valor para identificacao e enchem o banco.
+_QUERY_STATS_SNAPSHOT_QUERY = """
+    SELECT
+        queryid,
+        LEFT(query, 500)   AS query_text,
+        calls,
+        total_exec_time,
+        rows               AS total_rows
+    FROM pg_stat_statements
+    WHERE calls > 0
+    ORDER BY total_exec_time DESC
+    LIMIT 200
+"""
+
+# Fase 5 T63 — tamanho de cada banco de dados (on-demand, nao template).
+_DB_SIZES_QUERY = """
+    SELECT
+        datname AS database_name,
+        pg_database_size(datname) AS size_bytes
+    FROM pg_database
+    WHERE datistemplate = false
+      AND datallowconn = true
+    ORDER BY size_bytes DESC
+"""
+
+# Fase 5 T64 — compliance de configuracao. Apenas parametros com impacto significativo de performance.
+_CONFIG_COMPLIANCE_QUERY = """
+    SELECT name, setting, unit, short_desc AS description
+    FROM pg_settings
+    WHERE name IN (
+        'work_mem', 'max_connections', 'shared_buffers', 'effective_cache_size',
+        'maintenance_work_mem', 'autovacuum_vacuum_scale_factor',
+        'autovacuum_analyze_scale_factor', 'autovacuum_max_workers', 'autovacuum_naptime',
+        'checkpoint_completion_target', 'max_wal_size', 'wal_buffers',
+        'log_min_duration_statement', 'random_page_cost'
+    )
+    ORDER BY name
+"""
+
 # `pg_stat_archiver` sempre devolve exatamente 1 linha (cluster-wide, nao por banco) — mesmo com
 # archiving desabilitado (colunas ficam NULL nesse caso). Docs/collector-queries.md §6.
 _ARCHIVER_STATUS_QUERY = """
@@ -221,6 +451,95 @@ _REPLICATION_LAG_QUERY = """
     FROM pg_stat_replication
     WHERE replay_lag IS NOT NULL
 """
+
+
+def _evaluate_pg_config_param(
+    name: str, setting: str, unit: str | None, description: str
+) -> NormalizedConfigComplianceItem:
+    """Avalia um parametro do pg_settings contra boas praticas e retorna item de compliance."""
+
+    def _to_mb(value: str, u: str | None) -> float | None:
+        try:
+            v = float(value)
+        except (ValueError, TypeError):
+            return None
+        if u == "kB":
+            return v / 1024
+        if u == "8kB":
+            return v * 8 / 1024
+        if u == "MB":
+            return v
+        if u == "GB":
+            return v * 1024
+        return v
+
+    rules: dict[str, tuple[str, str, str]] = {}
+
+    if name == "work_mem":
+        mb = _to_mb(setting, unit)
+        status = "ok" if mb is not None and 4 <= mb <= 512 else "warn"
+        rules[name] = ("4 MB – 512 MB", "Acima de 512 MB pode causar OOM sob carga paralela; abaixo de 4 MB prejudica sorts e hash joins.", status)
+    elif name == "max_connections":
+        try:
+            v = int(setting)
+            status = "error" if v > 500 else ("warn" if v > 200 else "ok")
+        except ValueError:
+            status = "warn"
+        rules[name] = ("≤ 200 (com PgBouncer)", "Muitas conexoes diretas consomem shared memory e context switches; use um pooler acima de 200.", status)
+    elif name == "autovacuum_vacuum_scale_factor":
+        try:
+            v = float(setting)
+            status = "warn" if v > 0.1 else "ok"
+        except ValueError:
+            status = "warn"
+        rules[name] = ("0.01 – 0.05", "O valor padrao (0.2) adia vacuum em tabelas grandes (ex.: 1M linhas * 0.2 = 200k dead tuples antes de vacuum).", status)
+    elif name == "autovacuum_analyze_scale_factor":
+        try:
+            v = float(setting)
+            status = "warn" if v > 0.1 else "ok"
+        except ValueError:
+            status = "warn"
+        rules[name] = ("0.01 – 0.05", "Mesmo problema do vacuum_scale_factor — estatisticas ficam desatualizadas em tabelas grandes.", status)
+    elif name == "checkpoint_completion_target":
+        try:
+            v = float(setting)
+            status = "warn" if v < 0.7 else "ok"
+        except ValueError:
+            status = "warn"
+        rules[name] = ("0.9", "Valores baixos (< 0.7) causam I/O em rajadas ao final do checkpoint; 0.9 distribui o flush uniformemente.", status)
+    elif name == "log_min_duration_statement":
+        try:
+            v = int(setting)
+            status = "error" if v == -1 else ("warn" if v == 0 else "ok")
+        except ValueError:
+            status = "warn"
+        rules[name] = ("500 – 2000 ms", "-1 desabilita completamente o log de queries lentas; 0 loga tudo (ruidoso); 500-2000ms e um bom ponto de partida.", status)
+    elif name == "random_page_cost":
+        try:
+            v = float(setting)
+            status = "warn" if v >= 4.0 else "ok"
+        except ValueError:
+            status = "warn"
+        rules[name] = ("1.1 – 2.0 (SSD)", "O padrao (4.0) assume disco rotativo; em SSD o planner subestima index scans e escolhe seq scans desnecessarios.", status)
+    elif name == "autovacuum_max_workers":
+        try:
+            v = int(setting)
+            status = "warn" if v < 3 else "ok"
+        except ValueError:
+            status = "warn"
+        rules[name] = ("3 – 6", "O padrao (3) pode ser insuficiente em bancos com muitas tabelas de alta escrita.", status)
+
+    rec_val, recommendation, status_val = rules.get(name, (None, None, "ok"))
+
+    return NormalizedConfigComplianceItem(
+        param_name=name,
+        current_value=setting,
+        recommended_value=rec_val,
+        unit=unit,
+        status=status_val,
+        description=description,
+        recommendation=recommendation,
+    )
 
 
 def _reduce_to_direct_edges(blocked_by_map: dict[int, set[int]]) -> dict[int, set[int]]:
@@ -1106,6 +1425,296 @@ class PostgreSQLCollector:
             return float(value)
         except (TypeError, ValueError):
             return None
+
+    async def collect_vacuum_stats(
+        self,
+    ) -> tuple[list[NormalizedVacuumTableStats], list[NormalizedAutovacuumWorker]]:
+        """Fase 5 T54 — vacuum/autovacuum por tabela + workers em execucao (on-demand)."""
+        settings = get_settings()
+        conn = await asyncio.wait_for(
+            self._connect(), timeout=self._connection_params.connect_timeout_seconds
+        )
+        try:
+            table_rows, worker_rows = await asyncio.gather(
+                asyncio.wait_for(
+                    conn.fetch(_VACUUM_TABLE_STATS_QUERY),
+                    timeout=settings.collection_query_timeout_seconds,
+                ),
+                asyncio.wait_for(
+                    conn.fetch(_AUTOVACUUM_WORKERS_QUERY),
+                    timeout=settings.collection_query_timeout_seconds,
+                ),
+            )
+        finally:
+            await conn.close()
+
+        tables = [
+            NormalizedVacuumTableStats(
+                schema_name=str(row["schemaname"]),
+                table_name=str(row["table_name"]),
+                n_dead_tup=int(row["n_dead_tup"]),
+                n_live_tup=int(row["n_live_tup"]),
+                dead_tup_pct=float(row["dead_tup_pct"]),
+                last_vacuum=row["last_vacuum"],
+                last_autovacuum=row["last_autovacuum"],
+                last_analyze=row["last_analyze"],
+                last_autoanalyze=row["last_autoanalyze"],
+                vacuum_count=int(row["vacuum_count"]),
+                autovacuum_count=int(row["autovacuum_count"]),
+                table_size_bytes=int(row["table_size_bytes"]),
+                xid_age=int(row["xid_age"]),
+            )
+            for row in table_rows
+        ]
+        workers = [
+            NormalizedAutovacuumWorker(
+                pid=int(row["pid"]),
+                datname=str(row["datname"]),
+                query=str(row["query"]),
+                running_for_seconds=int(row["running_for_seconds"] or 0),
+            )
+            for row in worker_rows
+        ]
+        return tables, workers
+
+    async def collect_idle_in_transaction(self) -> list[NormalizedIdleInTransactionSession]:
+        """Fase 5 T56 — sessoes idle in transaction (on-demand)."""
+        settings = get_settings()
+        conn = await asyncio.wait_for(
+            self._connect(), timeout=self._connection_params.connect_timeout_seconds
+        )
+        try:
+            rows = await asyncio.wait_for(
+                conn.fetch(_IDLE_IN_TRANSACTION_QUERY),
+                timeout=settings.collection_query_timeout_seconds,
+            )
+        finally:
+            await conn.close()
+
+        return [
+            NormalizedIdleInTransactionSession(
+                session_id=int(row["session_id"]),
+                username=str(row["username"]) or None,
+                application_name=str(row["application_name"]) or None,
+                client_info=str(row["client_info"]) or None,
+                idle_seconds=int(row["idle_seconds"] or 0),
+                last_query=str(row["last_query"]) or None,
+                state=str(row["state"]),
+            )
+            for row in rows
+        ]
+
+    async def collect_index_bloat(self) -> list[NormalizedIndexBloatEntry]:
+        """Fase 5 T55 — indices com estimativa de bloat (on-demand)."""
+        settings = get_settings()
+        conn = await asyncio.wait_for(
+            self._connect(), timeout=self._connection_params.connect_timeout_seconds
+        )
+        try:
+            rows = await asyncio.wait_for(
+                conn.fetch(_INDEX_BLOAT_QUERY),
+                timeout=settings.collection_query_timeout_seconds,
+            )
+        finally:
+            await conn.close()
+
+        return [
+            NormalizedIndexBloatEntry(
+                schema_name=str(row["schema_name"]),
+                table_name=str(row["table_name"]),
+                index_name=str(row["index_name"]),
+                index_size_bytes=int(row["index_size_bytes"] or 0),
+                idx_scan=int(row["idx_scan"] or 0),
+                idx_tup_read=int(row["idx_tup_read"] or 0),
+                idx_tup_fetch=int(row["idx_tup_fetch"] or 0),
+                bloat_pct=float(row["bloat_pct"] or 0.0),
+            )
+            for row in rows
+        ]
+
+    async def collect_bgwriter_stats(self) -> NormalizedBgwriterStats | None:
+        """Fase 5 T57 — bgwriter + checkpoints (on-demand)."""
+        settings = get_settings()
+        conn = await asyncio.wait_for(
+            self._connect(), timeout=self._connection_params.connect_timeout_seconds
+        )
+        try:
+            row = await asyncio.wait_for(
+                conn.fetchrow(_BGWRITER_STATS_QUERY),
+                timeout=settings.collection_query_timeout_seconds,
+            )
+        finally:
+            await conn.close()
+
+        if row is None:
+            return None
+        return NormalizedBgwriterStats(
+            checkpoints_timed=int(row["checkpoints_timed"] or 0),
+            checkpoints_req=int(row["checkpoints_req"] or 0),
+            checkpoint_write_time=float(row["checkpoint_write_time"] or 0),
+            checkpoint_sync_time=float(row["checkpoint_sync_time"] or 0),
+            buffers_checkpoint=int(row["buffers_checkpoint"] or 0),
+            buffers_clean=int(row["buffers_clean"] or 0),
+            maxwritten_clean=int(row["maxwritten_clean"] or 0),
+            buffers_backend=int(row["buffers_backend"] or 0),
+            buffers_backend_fsync=int(row["buffers_backend_fsync"] or 0),
+            buffers_alloc=int(row["buffers_alloc"] or 0),
+            stats_reset=row["stats_reset"],
+        )
+
+    async def collect_user_functions(self) -> list[NormalizedUserFunction]:
+        """Fase 5 T58 — funcoes PL/pgSQL por tempo total (on-demand)."""
+        settings = get_settings()
+        conn = await asyncio.wait_for(
+            self._connect(), timeout=self._connection_params.connect_timeout_seconds
+        )
+        try:
+            rows = await asyncio.wait_for(
+                conn.fetch(_USER_FUNCTIONS_QUERY),
+                timeout=settings.collection_query_timeout_seconds,
+            )
+        finally:
+            await conn.close()
+
+        return [
+            NormalizedUserFunction(
+                schema_name=str(row["schema_name"]),
+                func_name=str(row["func_name"]),
+                calls=int(row["calls"] or 0),
+                total_time_ms=float(row["total_time_ms"] or 0),
+                self_time_ms=float(row["self_time_ms"] or 0),
+                avg_time_ms=float(row["avg_time_ms"] or 0),
+            )
+            for row in rows
+        ]
+
+    async def collect_replication_slots(self) -> list[NormalizedReplicationSlot]:
+        """Fase 5 T59 — slots de replicacao com lag (on-demand).
+
+        Tenta a query com `wal_status` (PG 13+) primeiro; em caso de erro de coluna
+        (asyncpg.UndefinedColumnError) cai na query sem `wal_status`."""
+        settings = get_settings()
+        conn = await asyncio.wait_for(
+            self._connect(), timeout=self._connection_params.connect_timeout_seconds
+        )
+        try:
+            try:
+                rows = await asyncio.wait_for(
+                    conn.fetch(_REPLICATION_SLOTS_QUERY_PG13),
+                    timeout=settings.collection_query_timeout_seconds,
+                )
+            except Exception:
+                rows = await asyncio.wait_for(
+                    conn.fetch(_REPLICATION_SLOTS_QUERY),
+                    timeout=settings.collection_query_timeout_seconds,
+                )
+        finally:
+            await conn.close()
+
+        return [
+            NormalizedReplicationSlot(
+                slot_name=str(row["slot_name"]),
+                plugin=str(row["plugin"]) if row["plugin"] else None,
+                slot_type=str(row["slot_type"]),
+                database_name=str(row["database_name"]) or None,
+                active=bool(row["active"]),
+                active_pid=int(row["active_pid"]) if row["active_pid"] is not None else None,
+                lag_bytes=int(row["lag_bytes"]) if row["lag_bytes"] is not None else None,
+                wal_status=str(row["wal_status"]) if row.get("wal_status") else None,
+            )
+            for row in rows
+        ]
+
+    async def collect_config_compliance(self) -> list[NormalizedConfigComplianceItem]:
+        """Fase 5 T64 — compliance de configuracao vs boas praticas (on-demand)."""
+        settings = get_settings()
+        conn = await asyncio.wait_for(
+            self._connect(), timeout=self._connection_params.connect_timeout_seconds
+        )
+        try:
+            rows = await asyncio.wait_for(
+                conn.fetch(_CONFIG_COMPLIANCE_QUERY),
+                timeout=settings.collection_query_timeout_seconds,
+            )
+        finally:
+            await conn.close()
+
+        return [_evaluate_pg_config_param(r["name"], r["setting"], r["unit"], r["description"]) for r in rows]
+
+    async def collect_connection_consumers(self) -> list[NormalizedConnectionConsumer]:
+        """Fase 5 T65 — consumidores de conexao agrupados por app/host/usuario (on-demand)."""
+        settings = get_settings()
+        conn = await asyncio.wait_for(
+            self._connect(), timeout=self._connection_params.connect_timeout_seconds
+        )
+        try:
+            rows = await asyncio.wait_for(
+                conn.fetch(_CONNECTION_CONSUMERS_QUERY),
+                timeout=settings.collection_query_timeout_seconds,
+            )
+        finally:
+            await conn.close()
+
+        return [
+            NormalizedConnectionConsumer(
+                application_name=r["application_name"],
+                client_addr=r["client_addr"],
+                username=r["username"],
+                total=r["total"],
+                active=r["active"],
+                idle=r["idle"],
+                idle_in_transaction=r["idle_in_transaction"],
+                waiting=r["waiting"],
+            )
+            for r in rows
+        ]
+
+    async def collect_db_sizes(self) -> list[NormalizedDbSize]:
+        """Fase 5 T63 — tamanho de cada banco PostgreSQL (on-demand)."""
+        settings = get_settings()
+        conn = await asyncio.wait_for(
+            self._connect(), timeout=self._connection_params.connect_timeout_seconds
+        )
+        try:
+            rows = await asyncio.wait_for(
+                conn.fetch(_DB_SIZES_QUERY),
+                timeout=settings.collection_query_timeout_seconds,
+            )
+        finally:
+            await conn.close()
+
+        return [
+            NormalizedDbSize(
+                database_name=r["database_name"],
+                size_bytes=int(r["size_bytes"]),
+            )
+            for r in rows
+        ]
+
+    async def collect_query_stats_snapshot(self) -> list[NormalizedQueryStatsSnapshot]:
+        """Fase 6 T60 — snapshot do pg_stat_statements para trending de queries (periodico)."""
+        settings = get_settings()
+        conn = await asyncio.wait_for(
+            self._connect(), timeout=self._connection_params.connect_timeout_seconds
+        )
+        try:
+            rows = await asyncio.wait_for(
+                conn.fetch(_QUERY_STATS_SNAPSHOT_QUERY),
+                timeout=settings.collection_query_timeout_seconds,
+            )
+        finally:
+            await conn.close()
+        return [
+            NormalizedQueryStatsSnapshot(
+                queryid=r["queryid"],
+                query_text=r["query_text"],
+                calls=r["calls"],
+                total_exec_time=r["total_exec_time"],
+                total_rows=r["total_rows"],
+            )
+            for r in rows
+            if r["queryid"] is not None
+        ]
 
     async def close(self) -> None:
         """Sem estado persistente entre chamadas (cada `check_capabilities` fecha sua conexao)."""

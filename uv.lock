@@ -379,6 +379,20 @@ wheels = [
 ]
 
 [[package]]
+name = "ibm-db"
+version = "3.3.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/dc/9d/9f31efe9462a220d3e4e19dc96839b97a8dcd4203e9245a0497cfae6f683/ibm_db-3.3.0.tar.gz", hash = "sha256:75c6749957d202e0b6b37e1e823583bfc37b65293ee123fb287e409d7426b53d", size = 315316, upload-time = "2026-08-11T21:00:35.04Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ef/75/d60e93559b1b0ff8684622ab54901416834a27a5ff11391d341523cbce0b/ibm_db-3.3.0-cp312-cp312-macosx_10_15_x86_64.whl", hash = "sha256:17335ee3f401f32c10db831a727ea365ca22c12a6ae1f97cab5357c85d8fda27", size = 24195236, upload-time = "2026-08-11T20:58:51.819Z" },
+    { url = "https://files.pythonhosted.org/packages/60/34/761cb391e31b952696a5756738aa14840d09e144d662c9d7a8f49f2c43c8/ibm_db-3.3.0-cp312-cp312-macosx_14_0_arm64.whl", hash = "sha256:b801774c68c303e5a53fbd982b79bbfa5905b789eb3476b8ae1db22ce6726c20", size = 20865076, upload-time = "2026-08-11T20:58:55.181Z" },
+    { url = "https://files.pythonhosted.org/packages/bb/3d/0832755c8d6e164f6b25a8dcee5408a497f80780a1f8044cee2896ef0113/ibm_db-3.3.0-cp312-cp312-manylinux_2_34_i686.whl", hash = "sha256:e15138cfeb6e2a0fa5c248bfae7ba9cee7b83856048c81b9e7e36f461df74f8c", size = 43810768, upload-time = "2026-08-11T20:59:00.559Z" },
+    { url = "https://files.pythonhosted.org/packages/61/8a/6c57f4c4fcaa4eef419d5eae30f9b7ce620560c3cbd103324dcab5f1e9b1/ibm_db-3.3.0-cp312-cp312-manylinux_2_34_x86_64.whl", hash = "sha256:f282dcc731a33cd19bf310a6f0f28088fa9bd64fb42f28b955b38a5e8f240990", size = 48156737, upload-time = "2026-08-11T20:59:06.154Z" },
+    { url = "https://files.pythonhosted.org/packages/6d/4d/5d14c9ae0051879b4bd4aa6e16b3a8bc0f3ba638c3852d30a2ce77ec76a5/ibm_db-3.3.0-cp312-cp312-win32.whl", hash = "sha256:e3908f9af3e038797a95b60ee0ccfb1a10f35d01cfb623151f534461e9f2691f", size = 24601597, upload-time = "2026-08-11T20:59:10.363Z" },
+    { url = "https://files.pythonhosted.org/packages/29/12/890970bbd9e1232ad8e612e133eb40032011a5a24b632d85b4d1d5a6bdbf/ibm_db-3.3.0-cp312-cp312-win_amd64.whl", hash = "sha256:70147f6885ae7b02f440e5a73be6cf44667d0d708ffec9695d2e5881b9e0ed41", size = 28421640, upload-time = "2026-08-11T20:59:14.33Z" },
+]
+
+[[package]]
 name = "idna"
 version = "3.19"
 source = { registry = "https://pypi.org/simple" }
@@ -479,6 +493,26 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/a2/6e/371856a3fb9d31ca8dac321cda606860fa4548858c0cc45d9d1d4ca2628b/mypy_extensions-1.1.0.tar.gz", hash = "sha256:52e68efc3284861e772bbcd66823fde5ae21fd2fdb51c62a211403730b916558", size = 6343, upload-time = "2025-04-22T14:54:24.164Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/79/7b/2c79738432f5c924bef5071f933bcc9efd0473bac3b4aa584a6f7c1c8df8/mypy_extensions-1.1.0-py3-none-any.whl", hash = "sha256:1be4cccdb0f2482337c4743e60421de3a356cd97508abadd57d47403e94f5505", size = 4963, upload-time = "2025-04-22T14:54:22.983Z" },
+]
+
+[[package]]
+name = "oracledb"
+version = "26.0.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cryptography" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8c/f3/22113415f48b6608ada31ebb46047b3b8ac361dba393d1b5ed1f768d8f6a/oracledb-26.0.1.tar.gz", hash = "sha256:786397a6b37e94ebfa6c1c6cd026755eb8fccfd39e15bcb64cb5879491882aef", size = 910463, upload-time = "2026-09-22T21:23:20.378Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/83/fa/349ee179b3e106f210ac070d199dd341f37e2af9f5faf2563b80d8aa6ab1/oracledb-26.0.1-cp312-cp312-macosx_10_13_universal2.whl", hash = "sha256:eea4d0824fa82b03c0d90aad81f10dbbacdaf351979c0130190a362a539e63ae", size = 4908265, upload-time = "2026-09-22T21:23:49.524Z" },
+    { url = "https://files.pythonhosted.org/packages/60/68/2dc6a99d385835290825c0d6689097af29637db8754197040b95814bb5cd/oracledb-26.0.1-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:2c05707b2ba57d8210bdf062ba3419900591f3369d1532fb116af51445c2993d", size = 2448388, upload-time = "2026-09-22T21:23:50.993Z" },
+    { url = "https://files.pythonhosted.org/packages/d5/4b/ce48ed072c2328b429a6bc87a35ddd735945151145d9fe49c1e177b0da83/oracledb-26.0.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:36cbf2be185412fee95be96aa6f187a73fd5181bb03186b53d5b70ac18fa354b", size = 2663296, upload-time = "2026-09-22T21:23:52.426Z" },
+    { url = "https://files.pythonhosted.org/packages/f2/c8/73166ff29389c5ce3272fcc534360ab65248f90fcdf175a99b5fa2bb8466/oracledb-26.0.1-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:d5ad1b6f4db3d8a43182e7734922342fac5901456b34acead92f6fc60cc59882", size = 2493289, upload-time = "2026-09-22T21:23:53.949Z" },
+    { url = "https://files.pythonhosted.org/packages/f4/c0/f6b4f82d6dc7f7d7654c0e4889caa1abbe019ec76daa1b4b4ee80859172b/oracledb-26.0.1-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:aecc4cdd03cb5a5ad51f43680d16d74132ae7df65c991e7bd69bbe2ccc0fd209", size = 2694730, upload-time = "2026-09-22T21:23:55.609Z" },
+    { url = "https://files.pythonhosted.org/packages/9b/da/a3ad79e18c5b27b357de005ce9d79dff1ef1646b7c55b6e6557b238f03bd/oracledb-26.0.1-cp312-cp312-win32.whl", hash = "sha256:f55d6fd9ebc3e8bf3bf4828fcd6ae152b363859628d27f92a4764111adfb1001", size = 1578393, upload-time = "2026-09-22T21:23:56.975Z" },
+    { url = "https://files.pythonhosted.org/packages/06/c6/8e2ad66bda2cda6d085f3516ad8f7834b1d7d4c9da21f96834467525b551/oracledb-26.0.1-cp312-cp312-win_amd64.whl", hash = "sha256:1c6f2f0d7290b15f1a166c0d24187e7746a6f08ea6e886e521110f1bf8d2002c", size = 1970972, upload-time = "2026-09-22T21:23:58.352Z" },
+    { url = "https://files.pythonhosted.org/packages/ba/ce/98c3a83142a562e40135abb8503b59eba7af1135c11c8077986a289f3a35/oracledb-26.0.1-cp312-cp312-win_arm64.whl", hash = "sha256:c31b6f7440047c867a1b41cbaace7867db0750ecab4dc6454c9f501991152deb", size = 1622016, upload-time = "2026-09-22T21:23:59.996Z" },
 ]
 
 [[package]]
@@ -802,6 +836,8 @@ dependencies = [
     { name = "cryptography" },
     { name = "fastapi" },
     { name = "httpx" },
+    { name = "ibm-db" },
+    { name = "oracledb" },
     { name = "passlib", extra = ["bcrypt"] },
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic" },
@@ -833,6 +869,8 @@ requires-dist = [
     { name = "cryptography", specifier = ">=42" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.27" },
+    { name = "ibm-db", specifier = ">=3.2" },
+    { name = "oracledb", specifier = ">=2.0" },
     { name = "passlib", extras = ["bcrypt"], specifier = ">=1.7" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
     { name = "pydantic", specifier = ">=2.8" },

@@ -33,6 +33,10 @@ dependencies = [
     "passlib[bcrypt]>=1.7",
     "bcrypt>=3.2,<4.0",
     "python-jose[cryptography]>=3.3",
+    # Oracle: thin mode, sem Oracle Client instalado (oracledb >= 2.0 suporta async).
+    "oracledb>=2.0",
+    # IBM DB2: driver DBAPI-2 sincrono — executado via thread executor.
+    "ibm-db>=3.2",
 ]
 
 [dependency-groups]

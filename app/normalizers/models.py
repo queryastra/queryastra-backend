@@ -19,7 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.normalizers.wait_taxonomy import WaitCategory
 
-EngineType = Literal["postgresql", "sqlserver", "mysql", "cockroachdb", "aurora_postgresql", "aurora_mysql"]
+EngineType = Literal["postgresql", "sqlserver", "mysql", "cockroachdb", "aurora_postgresql", "aurora_mysql", "oracle", "db2", "redshift"]
 TargetType = Literal["server", "instance"]
 
 
@@ -337,3 +337,212 @@ class NormalizedPlanSnapshot(BaseModel):
     plan_hash: str
     plan_xml_masked: str
     last_execution_time: datetime | None = None
+
+
+class NormalizedVacuumTableStats(BaseModel):
+    """Estatisticas de vacuum/autovacuum por tabela (PostgreSQL only).
+
+    Fonte: `pg_stat_user_tables` JOIN `pg_class`. Dados on-demand (sem persistent storage) —
+    valores mudam continuamente conforme DML ocorre e autovacuum roda."""
+
+    model_config = ConfigDict(frozen=True)
+
+    schema_name: str
+    table_name: str
+    n_dead_tup: int
+    n_live_tup: int
+    dead_tup_pct: float
+    last_vacuum: datetime | None
+    last_autovacuum: datetime | None
+    last_analyze: datetime | None
+    last_autoanalyze: datetime | None
+    vacuum_count: int
+    autovacuum_count: int
+    table_size_bytes: int
+    xid_age: int
+
+
+class NormalizedAutovacuumWorker(BaseModel):
+    """Worker de autovacuum em execucao no momento (PostgreSQL only).
+
+    Fonte: `pg_stat_activity WHERE application_name = 'autovacuum worker'`."""
+
+    model_config = ConfigDict(frozen=True)
+
+    pid: int
+    datname: str
+    query: str
+    running_for_seconds: int
+
+
+class NormalizedIdleInTransactionSession(BaseModel):
+    """Sessao com transacao aberta mas sem request ativa ('idle in transaction').
+
+    PostgreSQL: `pg_stat_activity WHERE state IN ('idle in transaction', ...)`.
+    SQL Server: `sys.dm_exec_sessions` com `open_transaction_count > 0` e sem request ativa.
+
+    Sessoes neste estado seguram locks sem executar nada — causam bloqueio silencioso em
+    producao e sao um dos vetores mais comuns de degradacao inesperada de performance."""
+
+    model_config = ConfigDict(frozen=True)
+
+    session_id: int
+    username: str | None
+    application_name: str | None
+    client_info: str | None
+    idle_seconds: int
+    open_transaction_count: int | None = None
+    last_query: str | None = None
+    state: str | None = None
+
+
+class NormalizedIndexBloatEntry(BaseModel):
+    """Indice com estimativa de bloat (espaco desperdicado) — PostgreSQL only (Fase 5, T55).
+
+    Usa dead_tup% da tabela como proxy de bloat do indice (correlacao alta: DML que gera
+    dead tuples tambem fragmenta os indices dessa tabela). Dados on-demand."""
+
+    model_config = ConfigDict(frozen=True)
+
+    schema_name: str
+    table_name: str
+    index_name: str
+    index_size_bytes: int
+    idx_scan: int
+    idx_tup_read: int
+    idx_tup_fetch: int
+    bloat_pct: float
+
+
+class NormalizedBgwriterStats(BaseModel):
+    """Estatisticas do bgwriter e checkpoints — PostgreSQL only (Fase 5, T57).
+
+    Quando buffers_backend > ~10% do total, backends estao fazendo I/O direto — indica
+    shared_buffers insuficiente ou checkpoint_completion_target muito baixo."""
+
+    model_config = ConfigDict(frozen=True)
+
+    checkpoints_timed: int
+    checkpoints_req: int
+    checkpoint_write_time: float
+    checkpoint_sync_time: float
+    buffers_checkpoint: int
+    buffers_clean: int
+    maxwritten_clean: int
+    buffers_backend: int
+    buffers_backend_fsync: int
+    buffers_alloc: int
+    stats_reset: datetime | None
+
+
+class NormalizedUserFunction(BaseModel):
+    """Funcao PL/pgSQL com estatisticas de execucao — PostgreSQL only (Fase 5, T58).
+
+    Requer track_functions = 'all' no postgresql.conf; sem isso a view fica vazia."""
+
+    model_config = ConfigDict(frozen=True)
+
+    schema_name: str
+    func_name: str
+    calls: int
+    total_time_ms: float
+    self_time_ms: float
+    avg_time_ms: float
+
+
+class NormalizedReplicationSlot(BaseModel):
+    """Slot de replicacao PostgreSQL (Fase 5, T59).
+
+    Slots inativos com restart_lsn acumulando WAL sao um dos vetores mais comuns de
+    esgotamento de disco em producao."""
+
+    model_config = ConfigDict(frozen=True)
+
+    slot_name: str
+    plugin: str | None
+    slot_type: str
+    database_name: str | None
+    active: bool
+    active_pid: int | None
+    lag_bytes: int | None
+    wal_status: str | None
+
+
+class NormalizedConnectionConsumer(BaseModel):
+    """Grupo de conexoes agrupado por (application_name, client_addr, username) — Fase 5, T65.
+
+    Permite identificar qual aplicacao/maquina esta abrindo e nao fechando conexoes
+    (muitas 'idle' sinalizam connection leak; muitas 'idle in transaction' causam bloqueio)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    application_name: str
+    client_addr: str | None
+    username: str
+    total: int
+    active: int
+    idle: int
+    idle_in_transaction: int
+    waiting: int
+
+
+class NormalizedTempDbStats(BaseModel):
+    """Estatisticas de uso do TempDB — Fase 5, T61. SQL Server only.
+
+    Agrega `sys.dm_db_file_space_usage` + `sys.database_files` + `sys.dm_os_wait_stats`
+    numa unica snapshot; util para detectar pressao de TempDB (versao de versao, objetos
+    internos inflados, PAGELATCH contention nos pages do sistema)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    file_count: int
+    total_size_mb: float
+    user_objects_mb: float
+    internal_objects_mb: float
+    version_store_mb: float
+    free_space_mb: float
+    session_count: int
+    pagelatch_wait_ms: int
+
+
+class NormalizedDbSize(BaseModel):
+    """Tamanho de banco de dados individual — Fase 5, T63.
+
+    PostgreSQL: `pg_database_size(datname)`; SQL Server: `sys.master_files` (datafiles somente)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    database_name: str
+    size_bytes: int
+
+
+class NormalizedQueryStatsSnapshot(BaseModel):
+    """Snapshot de uma linha de pg_stat_statements — Fase 6, T60. PostgreSQL only.
+
+    Valores ACUMULATIVOS desde o ultimo pg_stat_statements_reset(). O delta entre snapshots
+    consecutivos e calculado via LAG() no repositorio para obter metricas por periodo."""
+
+    model_config = ConfigDict(frozen=True)
+
+    queryid: int
+    query_text: str | None
+    calls: int
+    total_exec_time: float
+    total_rows: int
+
+
+class NormalizedConfigComplianceItem(BaseModel):
+    """Parametro de configuracao comparado contra boas praticas (Fase 5, T64).
+
+    Status: 'ok' = dentro do recomendado; 'warn' = fora mas nao critico;
+    'error' = valor claramente perigoso (ex.: log de queries desabilitado)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    param_name: str
+    current_value: str
+    recommended_value: str | None
+    unit: str | None
+    status: Literal["ok", "warn", "error"]
+    description: str
+    recommendation: str | None

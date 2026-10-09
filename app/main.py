@@ -40,6 +40,7 @@ from app.workers.plan_compile_timeout_supervisor import PlanCompileTimeoutSuperv
 from app.workers.plan_history_supervisor import PlanHistorySupervisor
 from app.workers.polling_supervisor import PollingSupervisor
 from app.workers.problem_events_retention_worker import ProblemEventsRetentionWorker
+from app.workers.query_stats_supervisor import QueryStatsSupervisor
 from app.workers.report_worker import ReportWorker
 from app.workers.transaction_error_supervisor import TransactionErrorSupervisor
 
@@ -114,6 +115,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     plan_compile_timeout_task: asyncio.Task[None] | None = None
     plan_history_supervisor: PlanHistorySupervisor | None = None
     plan_history_task: asyncio.Task[None] | None = None
+    query_stats_supervisor: QueryStatsSupervisor | None = None
+    query_stats_task: asyncio.Task[None] | None = None
     report_worker: ReportWorker | None = None
     report_worker_task: asyncio.Task[None] | None = None
 
@@ -272,6 +275,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     else:
         logger.info("PlanHistorySupervisor desabilitado (PLAN_HISTORY_SUPERVISOR_ENABLED=false)")
 
+    if settings.query_stats_supervisor_enabled:
+        query_stats_supervisor = QueryStatsSupervisor(
+            async_session_factory, settings.query_stats_check_interval_seconds
+        )
+        query_stats_task = asyncio.create_task(query_stats_supervisor.run())
+        logger.info(
+            "QueryStatsSupervisor habilitado (check_interval=%ss)",
+            settings.query_stats_check_interval_seconds,
+        )
+    else:
+        logger.info("QueryStatsSupervisor desabilitado (QUERY_STATS_SUPERVISOR_ENABLED=false)")
+
     if settings.report_worker_enabled:
         report_worker = ReportWorker(
             async_session_factory, settings.report_worker_check_interval_seconds
@@ -316,6 +331,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if plan_history_supervisor is not None and plan_history_task is not None:
         plan_history_supervisor.stop()
         await plan_history_task
+    if query_stats_supervisor is not None and query_stats_task is not None:
+        query_stats_supervisor.stop()
+        await query_stats_task
     if report_worker is not None and report_worker_task is not None:
         report_worker.stop()
         await report_worker_task
@@ -329,18 +347,37 @@ def create_app() -> FastAPI:
     configure_logging()
     settings = get_settings()
 
+    # Aviso de segurança para defaults inseguros — impede expor em rede sem configuração mínima
+    _INSECURE_JWT_DEFAULT = "change-me-in-production-use-a-long-random-string"
+    if settings.jwt_secret_key == _INSECURE_JWT_DEFAULT:
+        logger.warning(
+            "SEGURANÇA: JWT_SECRET_KEY ainda é o valor padrão inseguro. "
+            "Defina JWT_SECRET_KEY no .env com uma string aleatória longa antes de expor em rede."
+        )
+    if settings.admin_password == "admin":
+        logger.warning(
+            "SEGURANÇA: ADMIN_PASSWORD ainda é 'admin'. "
+            "Troque a senha do administrador antes de expor o sistema em rede."
+        )
+
+    is_dev = settings.environment == "development"
     app = FastAPI(
         title="QueryAstra Backend",
         version="0.1.0",
         lifespan=lifespan,
+        # Swagger UI e ReDoc só ficam ativos em development — expor em produção
+        # revela schema completo da API para qualquer visitante sem autenticação.
+        docs_url="/docs" if is_dev else None,
+        redoc_url="/redoc" if is_dev else None,
+        openapi_url="/openapi.json" if is_dev else None,
     )
 
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", "Accept"],
     )
 
     app.include_router(api_v1_router, prefix=settings.api_v1_prefix)

@@ -9,8 +9,13 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY pyproject.toml uv.lock ./
+# ibm-db não tem wheel para linux/aarch64 — tenta instalar tudo; se falhar (ARM),
+# reinstala sem ibm-db. O adaptador Db2 detecta a ausência em runtime e reporta erro
+# claro, sem derrubar o restante da aplicação.
 RUN pip install --no-cache-dir uv \
-    && uv sync --frozen --no-dev
+    && (uv sync --frozen --no-dev \
+        || (echo "Retrying without ibm-db (ARM/unsupported platform)..." \
+            && uv sync --frozen --no-dev --no-install-package ibm-db))
 
 COPY . .
 

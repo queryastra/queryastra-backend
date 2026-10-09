@@ -2,7 +2,7 @@
 
 Mais simples que `PollingSupervisor` (app/workers/polling_supervisor.py): so ha UM intervalo
 compartilhado (`missing_index_check_interval_seconds`, default 1 dia — mesma cadencia baixa do
-monitoramento legado (Docs/monitoramento-autbank-analysis.md §1)), nao um intervalo por
+monitoramento legado (Docs/monitoramento-bk-analysis.md §1)), nao um intervalo por
 instancia como o `polling_interval_seconds` de alta frequencia. Um unico loop acorda no
 intervalo configurado, relista instancias ativas e roda uma checagem por instancia, em
 sequencia (nao ha requisito de paralelismo numa tarefa que ja e de baixissima frequencia).

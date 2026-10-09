@@ -33,7 +33,7 @@ class Instance(Base):
     __tablename__ = "instances"
     __table_args__ = (
         CheckConstraint(
-            "db_type IN ('postgresql', 'sqlserver', 'mysql', 'cockroachdb', 'aurora_postgresql', 'aurora_mysql')",
+            "db_type IN ('postgresql', 'sqlserver', 'mysql', 'cockroachdb', 'aurora_postgresql', 'aurora_mysql', 'oracle', 'db2', 'redshift')",
             name="ck_instances_db_type",
         ),
         CheckConstraint(

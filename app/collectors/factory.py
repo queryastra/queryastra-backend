@@ -13,8 +13,11 @@ from app.collectors.aurora.postgresql_adapter import AuroraPostgreSQLCollector
 from app.collectors.base import Collector
 from app.collectors.cockroachdb.adapter import CockroachDBCollector
 from app.collectors.connection import ConnectionParams
+from app.collectors.db2.adapter import DB2Collector
 from app.collectors.mysql.adapter import MySQLCollector
+from app.collectors.oracle.adapter import OracleCollector
 from app.collectors.postgresql.adapter import PostgreSQLCollector
+from app.collectors.redshift.adapter import RedshiftCollector
 from app.collectors.sqlserver.adapter import SQLServerCollector
 
 
@@ -34,4 +37,10 @@ def create_collector(
         return AuroraPostgreSQLCollector(connection=connection, instance_id=instance_id)
     if db_type == "aurora_mysql":
         return AuroraMySQLCollector(connection=connection, instance_id=instance_id)
+    if db_type == "oracle":
+        return OracleCollector(connection=connection, instance_id=instance_id)
+    if db_type == "db2":
+        return DB2Collector(connection=connection, instance_id=instance_id)
+    if db_type == "redshift":
+        return RedshiftCollector(connection=connection, instance_id=instance_id)
     raise ValueError(f"db_type desconhecido: {db_type}")

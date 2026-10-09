@@ -97,12 +97,17 @@ from app.normalizers.models import (
     NormalizedBackupStatus,
     NormalizedBlockingEvent,
     NormalizedConfirmedTransactionError,
+    NormalizedConfigComplianceItem,
+    NormalizedConnectionConsumer,
+    NormalizedDbSize,
     NormalizedDeadlockEvent,
+    NormalizedIdleInTransactionSession,
     NormalizedMetricSample,
     NormalizedMissingIndexSuggestion,
     NormalizedPlanCompileTimeoutFinding,
     NormalizedPlanSnapshot,
     NormalizedQuerySample,
+    NormalizedTempDbStats,
     NormalizedTransactionEvent,
 )
 from app.normalizers.wait_taxonomy import map_wait_event
@@ -110,6 +115,30 @@ from app.normalizers.wait_taxonomy import map_wait_event
 logger = get_logger(__name__)
 
 _SERVER_STATE_PERMISSIONS = {"VIEW SERVER STATE", "VIEW SERVER PERFORMANCE STATE"}
+
+# Fase 5 T56 — sessoes com transacao aberta mas sem request ativa. Requer VIEW SERVER STATE.
+# `NOT EXISTS (SELECT 1 FROM sys.dm_exec_requests r WHERE r.session_id = s.session_id)`
+# garante que so sessoes OCIOSAS (sem request em execucao) sao retornadas — sessoes com
+# request ativa mas transacao aberta sao cobertas pela coleta normal de sessoes.
+_IDLE_IN_TRANSACTION_QUERY = """
+    SELECT
+        s.session_id,
+        ISNULL(s.login_name, '') AS username,
+        ISNULL(s.host_name, '') AS host_name,
+        ISNULL(s.program_name, '') AS program_name,
+        s.open_transaction_count,
+        DATEDIFF(SECOND, s.last_request_end_time, GETDATE()) AS idle_seconds,
+        ISNULL(t.text, '') AS last_query
+    FROM sys.dm_exec_sessions s
+    LEFT JOIN sys.dm_exec_connections c ON c.session_id = s.session_id
+    OUTER APPLY sys.dm_exec_sql_text(c.most_recent_sql_handle) t
+    WHERE s.is_user_process = 1
+      AND s.open_transaction_count > 0
+      AND NOT EXISTS (
+          SELECT 1 FROM sys.dm_exec_requests r WHERE r.session_id = s.session_id
+      )
+    ORDER BY idle_seconds DESC
+"""
 
 # Sentinela negativo de `blocking_session_id` (-2 a -5): bloqueador nao determinavel — NAO
 # significa "sem bloqueio" nem e um erro (collector-queries.md §2).
@@ -1164,6 +1193,308 @@ def _connect_and_collect_replication_lag(
             )
         )
     return samples
+
+
+def _connect_and_collect_idle_in_transaction(
+    connection: ConnectionParams,
+    query_timeout_seconds: float,
+) -> list[NormalizedIdleInTransactionSession]:
+    """Fase 5 T56 — helper sincrono: sessoes idle in transaction no SQL Server."""
+    login_timeout_seconds = int(connection.connect_timeout_seconds)
+    conn = pymssql.connect(
+        server=connection.host,
+        port=str(connection.port),
+        user=connection.username,
+        password=connection.secret_value,
+        timeout=int(query_timeout_seconds),
+        login_timeout=login_timeout_seconds,
+    )
+    try:
+        cursor = conn.cursor(as_dict=True)
+        cursor.execute(_IDLE_IN_TRANSACTION_QUERY)
+        rows: list[dict] = cursor.fetchall()
+        cursor.close()
+    finally:
+        conn.close()
+
+    result = []
+    for row in rows:
+        idle_seconds = row.get("idle_seconds")
+        result.append(
+            NormalizedIdleInTransactionSession(
+                session_id=int(row["session_id"]),
+                username=str(row["username"]) or None,
+                application_name=str(row["program_name"]) or None,
+                client_info=str(row["host_name"]) or None,
+                idle_seconds=int(idle_seconds) if idle_seconds is not None else 0,
+                open_transaction_count=int(row.get("open_transaction_count") or 0),
+                last_query=str(row.get("last_query") or "") or None,
+                state=None,
+            )
+        )
+    return result
+
+
+_SS_CONFIG_COMPLIANCE_QUERY = """
+    SELECT
+        name,
+        CAST(value_in_use AS varchar(100)) AS setting,
+        description
+    FROM sys.configurations
+    WHERE name IN (
+        'max degree of parallelism',
+        'cost threshold for parallelism',
+        'optimize for ad hoc workloads',
+        'max server memory (MB)',
+        'min server memory (MB)',
+        'fill factor (%)',
+        'recovery interval (min)'
+    )
+    ORDER BY name
+"""
+
+# Fase 5 T65 — consumidores de conexao SQL Server.
+_SS_CONNECTION_CONSUMERS_QUERY = """
+    SELECT
+        ISNULL(program_name, '')           AS application_name,
+        ISNULL(client_net_address, '')     AS client_addr,
+        ISNULL(login_name, '')             AS username,
+        COUNT(*)                           AS total,
+        SUM(CASE WHEN s.status = 'running' THEN 1 ELSE 0 END)  AS active,
+        SUM(CASE WHEN s.status = 'sleeping'
+                  AND (r.session_id IS NULL OR r.blocking_session_id = 0) THEN 1 ELSE 0 END) AS idle,
+        SUM(CASE WHEN s.open_transaction_count > 0
+                  AND s.status = 'sleeping' THEN 1 ELSE 0 END) AS idle_in_transaction,
+        SUM(CASE WHEN r.blocking_session_id > 0 THEN 1 ELSE 0 END) AS waiting
+    FROM sys.dm_exec_sessions s
+    LEFT JOIN sys.dm_exec_requests r ON r.session_id = s.session_id
+    LEFT JOIN sys.dm_exec_connections c ON c.session_id = s.session_id
+    WHERE s.is_user_process = 1
+    GROUP BY s.program_name, c.client_net_address, s.login_name
+    ORDER BY total DESC, idle_in_transaction DESC
+"""
+
+
+def _evaluate_ss_config_param(name: str, setting: str, description: str) -> NormalizedConfigComplianceItem:
+    """Avalia um parametro do sys.configurations e retorna item de compliance SQL Server."""
+    try:
+        v = float(setting)
+    except (ValueError, TypeError):
+        v = None
+
+    rules: dict[str, tuple[str | None, str | None, str]] = {}
+
+    if name == "max degree of parallelism":
+        status = "error" if v == 0 else ("warn" if v and v > 16 else "ok")
+        rules[name] = ("1 – num_vcpus/2", "0 permite paralelismo irrestrito — pode saturar CPUs em queries longas e prejudicar workloads OLTP concorrentes.", status)
+    elif name == "cost threshold for parallelism":
+        status = "warn" if v is not None and v < 25 else "ok"
+        rules[name] = ("25 – 50", "O padrao (5) faz o planner paralelizar queries simples desnecessariamente; 25-50 e mais adequado para OLTP.", status)
+    elif name == "optimize for ad hoc workloads":
+        status = "error" if v == 0 else "ok"
+        rules[name] = ("1 (habilitado)", "Desabilitado (0) faz o plan cache guardar planos completos de single-use queries, inflando a memoria.", status)
+    elif name == "max server memory (MB)":
+        status = "warn" if v is not None and v >= 2147483647 else "ok"
+        rules[name] = ("RAM total - 4 GB (mínimo)", "Sem limite (2147483647) — o SQL Server pode consumir toda a RAM e causar paginacao do OS.", status)
+    elif name == "fill factor (%)":
+        status = "warn" if v == 0 or v == 100 else "ok"
+        rules[name] = ("70 – 90", "0 ou 100 = paginas de indice 100% cheias; inserts futuras causam page splits e fragmentacao.", status)
+    elif name == "recovery interval (min)":
+        status = "warn" if v is not None and v == 0 else "ok"
+        rules[name] = ("0 (auto)", "0 e o padrao automatico e e correto; valores altos aumentam tempo de recovery apos crash.", status)
+    else:
+        status = "ok"
+
+    rec_val, recommendation, status_val = rules.get(name, (None, None, "ok"))
+
+    return NormalizedConfigComplianceItem(
+        param_name=name,
+        current_value=setting,
+        recommended_value=rec_val,
+        unit=None,
+        status=status_val,
+        description=description,
+        recommendation=recommendation,
+    )
+
+
+def _connect_and_collect_config_compliance(
+    connection: ConnectionParams,
+    query_timeout_seconds: float,
+) -> list[NormalizedConfigComplianceItem]:
+    """Fase 5 T64 — helper sincrono: compliance de configuracao SQL Server."""
+    login_timeout_seconds = int(connection.connect_timeout_seconds)
+    conn = pymssql.connect(
+        server=connection.host,
+        port=str(connection.port),
+        user=connection.username,
+        password=connection.secret_value,
+        timeout=int(query_timeout_seconds),
+        login_timeout=login_timeout_seconds,
+    )
+    try:
+        cursor = conn.cursor(as_dict=True)
+        cursor.execute(_SS_CONFIG_COMPLIANCE_QUERY)
+        rows: list[dict] = cursor.fetchall()
+        cursor.close()
+    finally:
+        conn.close()
+
+    return [_evaluate_ss_config_param(r["name"], str(r["setting"]), str(r["description"] or "")) for r in rows]
+
+
+def _connect_and_collect_connection_consumers(
+    connection: ConnectionParams,
+    query_timeout_seconds: float,
+) -> list[NormalizedConnectionConsumer]:
+    """Fase 5 T65 — helper sincrono: consumidores de conexao SQL Server."""
+    login_timeout_seconds = int(connection.connect_timeout_seconds)
+    conn = pymssql.connect(
+        server=connection.host,
+        port=str(connection.port),
+        user=connection.username,
+        password=connection.secret_value,
+        timeout=int(query_timeout_seconds),
+        login_timeout=login_timeout_seconds,
+    )
+    try:
+        cursor = conn.cursor(as_dict=True)
+        cursor.execute(_SS_CONNECTION_CONSUMERS_QUERY)
+        rows: list[dict] = cursor.fetchall()
+        cursor.close()
+    finally:
+        conn.close()
+
+    return [
+        NormalizedConnectionConsumer(
+            application_name=str(r["application_name"]),
+            client_addr=str(r["client_addr"]) if r["client_addr"] else None,
+            username=str(r["username"]),
+            total=int(r["total"]),
+            active=int(r["active"]),
+            idle=int(r["idle"]),
+            idle_in_transaction=int(r["idle_in_transaction"]),
+            waiting=int(r["waiting"]),
+        )
+        for r in rows
+    ]
+
+
+_SS_TEMPDB_FILE_QUERY = """
+SELECT
+    COUNT(*) AS file_count,
+    CAST(SUM(CAST(size AS BIGINT) * 8) AS FLOAT) / 1024.0 AS total_size_mb
+FROM tempdb.sys.database_files
+WHERE type = 0
+"""
+
+_SS_TEMPDB_SPACE_QUERY = """
+SELECT
+    SUM(CAST(internal_object_reserved_page_count AS BIGINT)) * 8.0 / 1024.0 AS internal_objects_mb,
+    SUM(CAST(user_object_reserved_page_count AS BIGINT)) * 8.0 / 1024.0 AS user_objects_mb,
+    SUM(CAST(version_store_reserved_page_count AS BIGINT)) * 8.0 / 1024.0 AS version_store_mb,
+    SUM(CAST(unallocated_extent_page_count AS BIGINT)) * 8.0 / 1024.0 AS free_space_mb
+FROM tempdb.sys.dm_db_file_space_usage
+"""
+
+_SS_TEMPDB_SESSIONS_QUERY = """
+SELECT COUNT(DISTINCT session_id) AS session_count
+FROM tempdb.sys.dm_db_task_space_usage
+WHERE internal_objects_alloc_page_count > 0
+   OR user_objects_alloc_page_count > 0
+"""
+
+_SS_TEMPDB_PAGELATCH_QUERY = """
+SELECT ISNULL(SUM(wait_time_ms), 0) AS pagelatch_wait_ms
+FROM sys.dm_os_wait_stats
+WHERE wait_type LIKE 'PAGELATCH_%'
+"""
+
+_SS_DB_SIZES_QUERY = """
+SELECT
+    name AS database_name,
+    SUM(CAST(size AS BIGINT)) * 8 * 1024 AS size_bytes
+FROM sys.master_files
+WHERE type = 0
+GROUP BY name
+ORDER BY size_bytes DESC
+"""
+
+
+def _connect_and_collect_tempdb_stats(
+    connection: ConnectionParams,
+    query_timeout_seconds: float,
+) -> NormalizedTempDbStats:
+    """Fase 5 T61 — helper sincrono: snapshot de uso do TempDB."""
+    login_timeout_seconds = int(connection.connect_timeout_seconds)
+    conn = pymssql.connect(
+        server=connection.host,
+        port=str(connection.port),
+        user=connection.username,
+        password=connection.secret_value,
+        timeout=int(query_timeout_seconds),
+        login_timeout=login_timeout_seconds,
+    )
+    try:
+        cursor = conn.cursor(as_dict=True)
+
+        cursor.execute(_SS_TEMPDB_FILE_QUERY)
+        file_row = cursor.fetchone() or {}
+
+        cursor.execute(_SS_TEMPDB_SPACE_QUERY)
+        space_row = cursor.fetchone() or {}
+
+        cursor.execute(_SS_TEMPDB_SESSIONS_QUERY)
+        session_row = cursor.fetchone() or {}
+
+        cursor.execute(_SS_TEMPDB_PAGELATCH_QUERY)
+        pagelatch_row = cursor.fetchone() or {}
+
+        cursor.close()
+    finally:
+        conn.close()
+
+    return NormalizedTempDbStats(
+        file_count=int(file_row.get("file_count") or 0),
+        total_size_mb=float(file_row.get("total_size_mb") or 0.0),
+        internal_objects_mb=float(space_row.get("internal_objects_mb") or 0.0),
+        user_objects_mb=float(space_row.get("user_objects_mb") or 0.0),
+        version_store_mb=float(space_row.get("version_store_mb") or 0.0),
+        free_space_mb=float(space_row.get("free_space_mb") or 0.0),
+        session_count=int(session_row.get("session_count") or 0),
+        pagelatch_wait_ms=int(pagelatch_row.get("pagelatch_wait_ms") or 0),
+    )
+
+
+def _connect_and_collect_db_sizes_ss(
+    connection: ConnectionParams,
+    query_timeout_seconds: float,
+) -> list[NormalizedDbSize]:
+    """Fase 5 T63 — helper sincrono: tamanho de cada banco SQL Server."""
+    login_timeout_seconds = int(connection.connect_timeout_seconds)
+    conn = pymssql.connect(
+        server=connection.host,
+        port=str(connection.port),
+        user=connection.username,
+        password=connection.secret_value,
+        timeout=int(query_timeout_seconds),
+        login_timeout=login_timeout_seconds,
+    )
+    try:
+        cursor = conn.cursor(as_dict=True)
+        cursor.execute(_SS_DB_SIZES_QUERY)
+        rows: list[dict] = cursor.fetchall()
+        cursor.close()
+    finally:
+        conn.close()
+
+    return [
+        NormalizedDbSize(
+            database_name=str(r["database_name"]),
+            size_bytes=int(r["size_bytes"]),
+        )
+        for r in rows
+    ]
 
 
 def _connect_and_run_scalar_query(
@@ -2679,6 +3010,91 @@ class SQLServerCollector:
                 self._connection_params,
                 sql_hash,
                 database_names,
+                settings.collection_query_timeout_seconds,
+            ),
+            timeout=overall_timeout,
+        )
+
+    async def collect_idle_in_transaction(self) -> list[NormalizedIdleInTransactionSession]:
+        """Fase 5 T56 — sessoes idle in transaction SQL Server (on-demand)."""
+        settings = get_settings()
+        overall_timeout = (
+            self._connection_params.connect_timeout_seconds
+            + settings.collection_query_timeout_seconds
+        )
+        return await asyncio.wait_for(
+            run_in_instance_executor(
+                self._instance_id,
+                _connect_and_collect_idle_in_transaction,
+                self._connection_params,
+                settings.collection_query_timeout_seconds,
+            ),
+            timeout=overall_timeout,
+        )
+
+    async def collect_config_compliance(self) -> list[NormalizedConfigComplianceItem]:
+        """Fase 5 T64 — compliance de configuracao SQL Server (on-demand)."""
+        settings = get_settings()
+        overall_timeout = (
+            self._connection_params.connect_timeout_seconds
+            + settings.collection_query_timeout_seconds
+        )
+        return await asyncio.wait_for(
+            run_in_instance_executor(
+                self._instance_id,
+                _connect_and_collect_config_compliance,
+                self._connection_params,
+                settings.collection_query_timeout_seconds,
+            ),
+            timeout=overall_timeout,
+        )
+
+    async def collect_connection_consumers(self) -> list[NormalizedConnectionConsumer]:
+        """Fase 5 T65 — consumidores de conexao SQL Server (on-demand)."""
+        settings = get_settings()
+        overall_timeout = (
+            self._connection_params.connect_timeout_seconds
+            + settings.collection_query_timeout_seconds
+        )
+        return await asyncio.wait_for(
+            run_in_instance_executor(
+                self._instance_id,
+                _connect_and_collect_connection_consumers,
+                self._connection_params,
+                settings.collection_query_timeout_seconds,
+            ),
+            timeout=overall_timeout,
+        )
+
+    async def collect_tempdb_stats(self) -> NormalizedTempDbStats | None:
+        """Fase 5 T61 — snapshot de uso do TempDB (SQL Server only, on-demand)."""
+        settings = get_settings()
+        overall_timeout = (
+            self._connection_params.connect_timeout_seconds
+            + settings.collection_query_timeout_seconds * 4
+        )
+        return await asyncio.wait_for(
+            run_in_instance_executor(
+                self._instance_id,
+                _connect_and_collect_tempdb_stats,
+                self._connection_params,
+                settings.collection_query_timeout_seconds,
+            ),
+            timeout=overall_timeout,
+        )
+
+    async def collect_db_sizes(self) -> list[NormalizedDbSize]:
+        """Fase 5 T63 — tamanho de cada banco SQL Server (on-demand)."""
+        settings = get_settings()
+        overall_timeout = (
+            self._connection_params.connect_timeout_seconds
+            + settings.collection_query_timeout_seconds
+        )
+        return await asyncio.wait_for(
+            run_in_instance_executor(
+                self._instance_id,
+                _connect_and_collect_db_sizes_ss,
+                self._connection_params,
                 settings.collection_query_timeout_seconds,
             ),
             timeout=overall_timeout,

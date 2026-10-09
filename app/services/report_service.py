@@ -13,18 +13,24 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import pathlib
+
 import sqlalchemy as sa
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
 from reportlab.platypus import (
+    Image as RLImage,
     Paragraph,
     SimpleDocTemplate,
     Spacer,
     Table,
     TableStyle,
 )
+
+_ASSETS_DIR = pathlib.Path(__file__).parent.parent / "assets"
+_LOGO_PNG = _ASSETS_DIR / "logo-planet-128.png"
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.instance import Instance
@@ -114,6 +120,55 @@ _COMMON_TABLE_STYLE = TableStyle(
 )
 
 
+_LOGO_PURPLE = colors.HexColor("#2B1760")
+
+_BRAND_STYLE = ParagraphStyle(
+    "Brand",
+    parent=_STYLES["Normal"],
+    fontSize=18,
+    fontName="Helvetica-Bold",
+    textColor=_LOGO_PURPLE,
+    leading=20,
+)
+
+
+def _build_header_table(report_title: str) -> Table:
+    """Page header: QueryAstra logo+name on left, report title on right."""
+    logo_size = 1.1 * cm
+    if _LOGO_PNG.exists():
+        logo: object = RLImage(str(_LOGO_PNG), width=logo_size, height=logo_size)
+    else:
+        logo = Paragraph("Q", _BRAND_STYLE)
+
+    brand_cell = Table(
+        [[logo, Paragraph("QueryAstra", _BRAND_STYLE)]],
+        colWidths=[logo_size + 0.1 * cm, 5 * cm],
+    )
+    brand_cell.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+    ]))
+
+    title_para = Paragraph(report_title, _TITLE_STYLE)
+
+    header = Table(
+        [[brand_cell, title_para]],
+        colWidths=[6.5 * cm, 10.5 * cm],
+    )
+    header.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("TOPPADDING", (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+        ("LINEBELOW", (0, 0), (-1, 0), 1, _LOGO_PURPLE),
+    ]))
+    return header
+
+
 def _ms_to_readable(ms: float | None) -> str:
     if ms is None:
         return "-"
@@ -136,13 +191,13 @@ def _sql_cell(sql_id: str) -> Paragraph:
 
 
 def _sql_detail_blocks(rank: int, sql_id: str, row: dict[str, Any]) -> list[Any]:
-    """Blocos de detalhe para uma query (seção abaixo da tabela resumo)."""
+    """Detail blocks for a query (section below the summary table)."""
     blocks: list[Any] = []
     meta = (
-        f"Banco: <b>{str(row.get('database_name', 'N/A'))[:50]}</b>"
-        f"  |  Execucoes: <b>{row.get('execution_count', 0)}</b>"
-        f"  |  Wait Total: <b>{_ms_to_readable(row.get('total_wait_ms'))}</b>"
-        f"  |  Espera: <b>{str(row.get('dominant_wait') or 'CPU')[:30]}</b>"
+        f"Database: <b>{str(row.get('database_name', 'N/A'))[:50]}</b>"
+        f"  |  Executions: <b>{row.get('execution_count', 0)}</b>"
+        f"  |  Total Wait: <b>{_ms_to_readable(row.get('total_wait_ms'))}</b>"
+        f"  |  Dominant Wait: <b>{str(row.get('dominant_wait') or 'CPU')[:30]}</b>"
     )
     blocks.append(Paragraph(f"{rank}. {sql_id}", _SQL_DETAIL_ID_STYLE))
     blocks.append(Paragraph(meta, _SQL_DETAIL_META_STYLE))
@@ -154,7 +209,7 @@ def _sql_detail_blocks(rank: int, sql_id: str, row: dict[str, Any]) -> list[Any]
         safe = truncated.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         blocks.append(Paragraph(safe, _SQL_DETAIL_CMD_STYLE))
     else:
-        blocks.append(Paragraph("(texto nao disponivel)", _SQL_DETAIL_META_STYLE))
+        blocks.append(Paragraph("(text not available)", _SQL_DETAIL_META_STYLE))
     return blocks
 
 
@@ -277,21 +332,23 @@ def _build_pdf(
 
     story: list[Any] = []
 
-    # Cabecalho
-    story.append(Paragraph(title, _TITLE_STYLE))
-    since_str = since.strftime("%d/%m/%Y %H:%M")
-    until_str = until.strftime("%d/%m/%Y %H:%M")
-    period_str = f"{since_str} - {until_str} UTC"
+    # Header: QueryAstra logo + report title
+    story.append(_build_header_table(title))
+    story.append(Spacer(1, 0.3 * cm))
+
+    since_str = since.strftime("%Y-%m-%d %H:%M")
+    until_str = until.strftime("%Y-%m-%d %H:%M")
+    period_str = f"{since_str} — {until_str} UTC"
     story.append(
         Paragraph(
-            f"Instancia: <b>{instance.name}</b> ({instance.host}) &nbsp;|&nbsp; "
-            f"Periodo: {period_str}",
+            f"Instance: <b>{instance.name}</b> ({instance.host}) &nbsp;|&nbsp; "
+            f"Period: {period_str}",
             _SUBTITLE_STYLE,
         )
     )
     story.append(
         Paragraph(
-            f"Gerado em: {datetime.now(UTC).strftime('%d/%m/%Y %H:%M')} UTC",
+            f"Generated: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M')} UTC",
             _CAPTION_STYLE,
         )
     )
@@ -299,10 +356,10 @@ def _build_pdf(
 
     if not rows:
         story.append(
-            Paragraph("Nenhum dado encontrado para o periodo informado.", _STYLES["Normal"])
+            Paragraph("No data found for the specified period.", _STYLES["Normal"])
         )
     elif report_type == "top_sql":
-        story.append(Paragraph("Top SQL - Queries com Maior Tempo de Espera", _SECTION_STYLE))
+        story.append(Paragraph("Top SQL — Queries with Highest Wait Time", _SECTION_STYLE))
         header_style = ParagraphStyle(
             "TblHdr", parent=_STYLES["Normal"],
             fontSize=9, fontName="Helvetica-Bold", textColor=colors.white,
@@ -310,10 +367,10 @@ def _build_pdf(
         data: list[list[Any]] = [[
             Paragraph("#", header_style),
             Paragraph("Query", header_style),
-            Paragraph("Banco", header_style),
-            Paragraph("Wait Total", header_style),
-            Paragraph("Execucoes", header_style),
-            Paragraph("Espera Dominante", header_style),
+            Paragraph("Database", header_style),
+            Paragraph("Total Wait", header_style),
+            Paragraph("Executions", header_style),
+            Paragraph("Dominant Wait", header_style),
         ]]
         sql_ids: list[str] = []
         for i, r in enumerate(rows, 1):
@@ -329,23 +386,21 @@ def _build_pdf(
                     str(r["dominant_wait"] or "CPU")[:25],
                 ]
             )
-        # 17 cm utilizaveis no A4 com margens de 2cm
         col_widths = [0.7 * cm, 3.8 * cm, 3.8 * cm, 1.9 * cm, 1.9 * cm, 2.9 * cm]
         t = Table(data, colWidths=col_widths, repeatRows=1)
         t.setStyle(_COMMON_TABLE_STYLE)
         story.append(t)
 
-        # Secao de detalhe por query (comando SQL)
         story.append(Spacer(1, 0.5 * cm))
-        story.append(Paragraph("Detalhe das Queries", _SECTION_STYLE))
+        story.append(Paragraph("Query Details", _SECTION_STYLE))
         for i, r in enumerate(rows, 1):
             for block in _sql_detail_blocks(i, sql_ids[i - 1], r):
                 story.append(block)
 
     elif report_type == "average_wait":
-        story.append(Paragraph("Wait Medio por Banco de Dados", _SECTION_STYLE))
+        story.append(Paragraph("Average Wait by Database", _SECTION_STYLE))
         data = [
-            ["Banco de Dados", "Amostras", "Wait Total", "Wait Medio/Amostra", "Espera Dominante"]
+            ["Database", "Samples", "Total Wait", "Avg Wait / Sample", "Dominant Wait"]
         ]
         for r in rows:
             data.append(
@@ -364,10 +419,10 @@ def _build_pdf(
 
     elif report_type == "typical_day":
         story.append(
-            Paragraph("Dia Tipico - Padrao de Espera por Hora do Dia (UTC)", _SECTION_STYLE)
+            Paragraph("Typical Day — Wait Pattern by Hour of Day (UTC)", _SECTION_STYLE)
         )
         by_hour = {int(r["hour_of_day"]): r for r in rows}
-        data = [["Hora (UTC)", "Amostras", "Wait Total", "Wait Medio/Amostra", "Carga"]]
+        data = [["Hour (UTC)", "Samples", "Total Wait", "Avg Wait / Sample", "Load"]]
         max_total = max((r["total_wait_ms"] or 0 for r in rows), default=1)
         for h in range(24):
             hr: dict[str, Any] | None = by_hour.get(h)
@@ -423,6 +478,6 @@ async def generate_report(
     elif report_type == "typical_day":
         rows = await _query_typical_day(session, instance.id, since, until)
     else:
-        raise ValueError(f"report_type desconhecido: {report_type!r}")
+        raise ValueError(f"unknown report_type: {report_type!r}")
 
     return _build_pdf(title, instance, report_type, since, until, rows)

@@ -18,11 +18,14 @@ from __future__ import annotations
 
 import hashlib
 import secrets
+import time
+from collections import defaultdict
 from datetime import UTC, datetime, timedelta
+from threading import Lock
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,11 +33,57 @@ from app.api.deps import CurrentUser, get_current_user, get_db_session, require_
 from app.repositories.password_reset_tokens_repository import PasswordResetTokensRepository
 from app.repositories.user_instance_access_repository import UserInstanceAccessRepository
 from app.repositories.users_repository import UsersRepository
+from app.services.audit_service import record_audit
 from app.services.auth_service import create_access_token, hash_password, verify_password
 
 _PASSWORD_RESET_TOKEN_TTL_HOURS = 24
 
 router = APIRouter()
+
+# ---------------------------------------------------------------------------
+# Rate limiting de login — brute-force protection (sem dependência externa)
+# ---------------------------------------------------------------------------
+# Máximo de tentativas falhas por IP antes de bloquear temporariamente.
+# Janela deslizante: os contadores são limpos automaticamente conforme envelhecem.
+_LOGIN_RATE_LIMIT_MAX_FAILURES = 10
+_LOGIN_RATE_LIMIT_WINDOW_SECONDS = 600  # 10 minutos
+
+_login_failures: dict[str, list[float]] = defaultdict(list)
+_login_lock = Lock()
+
+
+def _get_client_ip(request: Request) -> str:
+    # Respeita X-Forwarded-For quando atrás de proxy reverso (nginx, Cloudflare, etc.)
+    forwarded_for = request.headers.get("X-Forwarded-For")
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _check_login_rate_limit(ip: str) -> None:
+    now = time.monotonic()
+    with _login_lock:
+        # Remove tentativas fora da janela deslizante
+        _login_failures[ip] = [
+            t for t in _login_failures[ip]
+            if now - t < _LOGIN_RATE_LIMIT_WINDOW_SECONDS
+        ]
+        if len(_login_failures[ip]) >= _LOGIN_RATE_LIMIT_MAX_FAILURES:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Muitas tentativas de login. Aguarde alguns minutos antes de tentar novamente.",
+                headers={"Retry-After": str(_LOGIN_RATE_LIMIT_WINDOW_SECONDS)},
+            )
+
+
+def _record_login_failure(ip: str) -> None:
+    with _login_lock:
+        _login_failures[ip].append(time.monotonic())
+
+
+def _clear_login_failures(ip: str) -> None:
+    with _login_lock:
+        _login_failures.pop(ip, None)
 
 _VALID_ROLES = ("admin", "operator", "viewer")
 
@@ -113,10 +162,18 @@ def get_password_reset_tokens_repository(
 
 @router.post("/login", response_model=LoginResponse)
 async def login(
+    request: Request,
     payload: LoginRequest,
     repository: Annotated[UsersRepository, Depends(get_users_repository)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> LoginResponse:
-    """Login com username/password. Retorna JWT Bearer token."""
+    """Login com username/password. Retorna JWT Bearer token.
+
+    Rate limiting: bloqueio temporário após 10 tentativas falhas no mesmo IP (janela de 10 min).
+    """
+    client_ip = _get_client_ip(request)
+    _check_login_rate_limit(client_ip)
+
     user = await repository.get_by_username(payload.username)
     password_ok = (
         user is not None
@@ -124,11 +181,17 @@ async def login(
         and verify_password(payload.password, user.hashed_password)
     )
     if not password_ok or user is None:
+        _record_login_failure(client_ip)
+        await record_audit(session, actor=payload.username, action="login.failure", ip_address=client_ip)
+        await session.commit()
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Credenciais invalidas.",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    _clear_login_failures(client_ip)
+    await record_audit(session, actor=user.username, action="login.success", ip_address=client_ip)
+    await session.commit()
     token = create_access_token(user.id, user.username, user.role)
     return LoginResponse(access_token=token, role=user.role, username=user.username)
 
@@ -167,7 +230,7 @@ async def list_users(
 @router.post("/users", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def create_user(
     payload: UserCreateRequest,
-    _: Annotated[CurrentUser, Depends(require_admin)],
+    current_admin: Annotated[CurrentUser, Depends(require_admin)],
     repository: Annotated[UsersRepository, Depends(get_users_repository)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> UserResponse:
@@ -180,6 +243,15 @@ async def create_user(
         )
     hashed = hash_password(payload.password)
     user = await repository.create(payload.username, hashed, payload.role)
+    await record_audit(
+        session,
+        actor=current_admin.username,
+        action="user.create",
+        target_type="user",
+        target_id=str(user.id),
+        target_name=user.username,
+        detail={"role": payload.role},
+    )
     await session.commit()
     return UserResponse(
         id=user.id,
@@ -194,7 +266,7 @@ async def create_user(
 async def patch_user(
     user_id: int,
     payload: UserPatchRequest,
-    _: Annotated[CurrentUser, Depends(require_admin)],
+    current_admin: Annotated[CurrentUser, Depends(require_admin)],
     repository: Annotated[UsersRepository, Depends(get_users_repository)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> UserResponse:
@@ -216,6 +288,15 @@ async def patch_user(
     elif payload.is_active is True:
         user = await repository.reactivate(user_id)
         assert user is not None
+    await record_audit(
+        session,
+        actor=current_admin.username,
+        action="user.patch",
+        target_type="user",
+        target_id=str(user_id),
+        target_name=user.username,
+        detail={k: v for k, v in payload.model_dump().items() if v is not None},
+    )
     await session.commit()
     return UserResponse(
         id=user.id,
@@ -239,9 +320,21 @@ async def delete_user(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Nao e possivel excluir o proprio usuario.",
         )
+    user = await repository.get_by_id(user_id)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario nao encontrado.")
+    target_username = user.username
     found = await repository.delete(user_id)
     if not found:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario nao encontrado.")
+    await record_audit(
+        session,
+        actor=current_admin.username,
+        action="user.delete",
+        target_type="user",
+        target_id=str(user_id),
+        target_name=target_username,
+    )
     await session.commit()
 
 
@@ -297,7 +390,7 @@ async def list_user_instances(
 async def grant_instance_access(
     user_id: int,
     instance_id: UUID,
-    _: Annotated[CurrentUser, Depends(require_admin)],
+    current_admin: Annotated[CurrentUser, Depends(require_admin)],
     users_repo: Annotated[UsersRepository, Depends(get_users_repository)],
     access_repo: Annotated[
         UserInstanceAccessRepository, Depends(get_user_instance_access_repository)
@@ -309,6 +402,15 @@ async def grant_instance_access(
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario nao encontrado.")
     await access_repo.grant(user_id, instance_id)
+    await record_audit(
+        session,
+        actor=current_admin.username,
+        action="instance.access_granted",
+        target_type="user",
+        target_id=str(user_id),
+        target_name=user.username,
+        detail={"instance_id": str(instance_id)},
+    )
     await session.commit()
     return InstanceAccessResponse(instance_id=str(instance_id))
 
@@ -317,20 +419,31 @@ async def grant_instance_access(
 async def revoke_instance_access(
     user_id: int,
     instance_id: UUID,
-    _: Annotated[CurrentUser, Depends(require_admin)],
+    current_admin: Annotated[CurrentUser, Depends(require_admin)],
     access_repo: Annotated[
         UserInstanceAccessRepository, Depends(get_user_instance_access_repository)
     ],
+    users_repo: Annotated[UsersRepository, Depends(get_users_repository)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> None:
     """Revoga acesso a uma instância de um usuário. Requer papel admin."""
+    user = await users_repo.get_by_id(user_id)
     removed = await access_repo.revoke(user_id, instance_id)
-    await session.commit()
     if not removed:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Acesso nao encontrado para este usuario/instancia.",
         )
+    await record_audit(
+        session,
+        actor=current_admin.username,
+        action="instance.access_revoked",
+        target_type="user",
+        target_id=str(user_id),
+        target_name=user.username if user else str(user_id),
+        detail={"instance_id": str(instance_id)},
+    )
+    await session.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -374,7 +487,7 @@ async def generate_reset_token(
 async def admin_change_user_password(
     user_id: int,
     payload: AdminChangePasswordRequest,
-    _: Annotated[CurrentUser, Depends(require_admin)],
+    current_admin: Annotated[CurrentUser, Depends(require_admin)],
     users_repo: Annotated[UsersRepository, Depends(get_users_repository)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> dict[str, bool]:
@@ -384,6 +497,14 @@ async def admin_change_user_password(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario nao encontrado.")
 
     user.hashed_password = hash_password(payload.new_password)
+    await record_audit(
+        session,
+        actor=current_admin.username,
+        action="user.password_changed",
+        target_type="user",
+        target_id=str(user_id),
+        target_name=user.username,
+    )
     await session.commit()
 
     return {"ok": True}
@@ -444,6 +565,14 @@ async def change_my_password(
         )
 
     user.hashed_password = hash_password(payload.new_password)
+    await record_audit(
+        session,
+        actor=current_user.username,
+        action="user.password_changed_self",
+        target_type="user",
+        target_id=str(current_user.user_id),
+        target_name=current_user.username,
+    )
     await session.commit()
 
     return {"detail": "Senha alterada com sucesso."}

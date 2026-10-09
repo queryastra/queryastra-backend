@@ -24,6 +24,7 @@ from uuid import UUID
 import aiomysql
 
 from app.collectors.base import CapabilityResult, CapabilityStatus, CollectionResult
+from app.collectors.collector_mixin import CollectorNoOpMixin
 from app.collectors.capabilities import (
     CONNECTIVITY,
     MYSQL_PERFORMANCE_SCHEMA,
@@ -109,7 +110,7 @@ _PROCESSLIST_FALLBACK_QUERY = """
 """
 
 
-class MySQLCollector:
+class MySQLCollector(CollectorNoOpMixin):
     """Implementa `app.collectors.base.Collector` para instancias MySQL e MariaDB."""
 
     def __init__(
@@ -126,7 +127,7 @@ class MySQLCollector:
         """Abre (ou reutiliza) conexao aiomysql."""
         if self._conn is not None:
             try:
-                self._conn.ping()
+                await self._conn.ping()
                 return self._conn
             except Exception:
                 self._conn = None
@@ -550,32 +551,6 @@ class MySQLCollector:
         if self._conn is not None:
             self._conn.close()
             self._conn = None
-
-    # Metodos nao aplicaveis ao MySQL — retornam lista vazia ou no-op
-
-    async def collect_deadlock_events(self) -> list[NormalizedDeadlockEvent]:
-        return []
-
-    async def collect_transaction_error_events(self) -> list[NormalizedConfirmedTransactionError]:
-        return []
-
-    async def ensure_transaction_error_capture(self) -> bool:
-        return True
-
-    async def scan_plan_compile_timeouts(self) -> list[NormalizedPlanCompileTimeoutFinding]:
-        return []
-
-    async def scan_plan_history(self) -> list[NormalizedPlanSnapshot]:
-        return []
-
-    async def collect_freespace_metrics(self) -> list[NormalizedMetricSample]:
-        return []
-
-    async def collect_missing_index_suggestions(self) -> list[NormalizedMissingIndexSuggestion]:
-        return []
-
-    async def collect_backup_status(self) -> list[NormalizedBackupStatus]:
-        return []
 
     # Nao exposto pelo MySQL — retornar sempre vazio
     async def _collect_blocking_events(self) -> list[NormalizedBlockingEvent]:

@@ -1351,6 +1351,39 @@ class QuerySamplesRepository(BaseRepository):
         )
         return list(result.fetchall())
 
+    async def wait_heatmap(
+        self, instance_id: UUID, since: datetime, until: datetime
+    ) -> list[sa.Row]:
+        """Agrega `query_samples` por (time_bucket de 1h, wait_type) — Fase 5, T62.
+
+        Retorna linhas com `bucket` (ISO-8601 string), `wait_type` (WaitCategory) e
+        `total_wait_ms` (soma de `effective_wait_ms` com a mesma correcao de LAG do `wait_summary`).
+        Apenas buckets com pelo menos 1 amostra de wait nao-benigno. Ordenado por bucket asc."""
+        stmt = sa.text(
+            f"""
+            WITH effective AS ({self._EFFECTIVE_WAIT_SELECT})
+            SELECT
+                time_bucket('1 hour', time) AS bucket,
+                wait_type,
+                COUNT(*) AS sample_count,
+                COALESCE(SUM(effective_wait_ms), 0) AS total_wait_ms
+            FROM effective
+            WHERE wait_type IS NOT NULL
+            GROUP BY bucket, wait_type
+            ORDER BY bucket ASC, total_wait_ms DESC
+        """
+        )
+        result = await self._session.execute(
+            stmt,
+            {
+                "instance_id": instance_id,
+                "since": since,
+                "until": until,
+                "benign_wait_types": list(self._BENIGN_WAIT_EVENT_NATIVE),
+            },
+        )
+        return list(result.fetchall())
+
     async def latest_by_session(
         self, instance_id: UUID, session_ids: Sequence[str], since: datetime
     ) -> dict[str, sa.Row]:

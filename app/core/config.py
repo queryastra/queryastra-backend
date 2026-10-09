@@ -116,7 +116,7 @@ class Settings(BaseSettings):
         default=False, alias="MISSING_INDEX_SUPERVISOR_ENABLED"
     )
     # Intervalo (segundos) entre checagens de indice ausente por instancia ativa. Default 1 dia -
-    # o monitoramento legado (Docs/monitoramento-autbank-analysis.md §1) ja roda essa
+    # o monitoramento legado (Docs/monitoramento-bk-analysis.md §1) ja roda essa
     # familia de checagem 1x/dia ou 1x/semana, nao a cada poucos segundos.
     missing_index_check_interval_seconds: int = Field(
         default=86400, alias="MISSING_INDEX_CHECK_INTERVAL_SECONDS"
@@ -282,6 +282,18 @@ class Settings(BaseSettings):
     # nao atrasar demais uma execucao agendada para uma hora exata.
     report_worker_check_interval_seconds: int = Field(
         default=60, alias="REPORT_WORKER_CHECK_INTERVAL_SECONDS"
+    )
+
+    # Fase 6 T60 — Trending de queries via pg_stat_statements (QueryStatsSupervisor).
+    # Default false — mesma politica de seguranca dos demais workers.
+    query_stats_supervisor_enabled: bool = Field(
+        default=False, alias="QUERY_STATS_SUPERVISOR_ENABLED"
+    )
+    # Intervalo (segundos) entre snapshots de pg_stat_statements por instancia ativa.
+    # Default 3600s (1h) — resolucao horaria e suficiente para detectar regressoes; mais
+    # frequente aumentaria o volume de dados sem ganho proporcional de observabilidade.
+    query_stats_check_interval_seconds: int = Field(
+        default=3600, alias="QUERY_STATS_CHECK_INTERVAL_SECONDS"
     )
 
     # Defaults gravados no banco na primeira inicializacao (system_settings seed no lifespan de

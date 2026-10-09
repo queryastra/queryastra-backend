@@ -8,6 +8,7 @@ chave/valor documentado ali), primeira preferência global editável pelo usuár
 """
 
 from app.models.alert import Alert, AlertNotification, AlertRule, AlertSilence
+from app.models.audit_log import AuditLog
 from app.models.backup_status import BackupStatus
 from app.models.blocking_incident import BlockingIncident
 from app.models.deadlock_event import DeadlockEvent
@@ -21,6 +22,7 @@ from app.models.transaction_event import TransactionEvent
 from app.models.user import User
 
 __all__ = [
+    "AuditLog",
     "Instance",
     "InstanceMaintenanceWindow",
     "Server",

@@ -21,16 +21,28 @@ from typing import Protocol, runtime_checkable
 from uuid import UUID
 
 from app.normalizers.models import (
+    NormalizedAutovacuumWorker,
     NormalizedBackupStatus,
+    NormalizedBgwriterStats,
     NormalizedBlockingEvent,
     NormalizedConfirmedTransactionError,
+    NormalizedConfigComplianceItem,
+    NormalizedConnectionConsumer,
+    NormalizedDbSize,
+    NormalizedQueryStatsSnapshot,
     NormalizedDeadlockEvent,
+    NormalizedIdleInTransactionSession,
+    NormalizedIndexBloatEntry,
     NormalizedMetricSample,
     NormalizedMissingIndexSuggestion,
     NormalizedPlanCompileTimeoutFinding,
     NormalizedPlanSnapshot,
     NormalizedQuerySample,
+    NormalizedReplicationSlot,
+    NormalizedTempDbStats,
     NormalizedTransactionEvent,
+    NormalizedUserFunction,
+    NormalizedVacuumTableStats,
 )
 
 
@@ -255,5 +267,99 @@ class Collector(Protocol):
         repositorio, nao aqui (mesmo racional de `collect_deadlock_events`, que tambem devolve
         tudo que esta no ring buffer a cada chamada). So SQL Server — PostgreSQL devolve lista
         vazia sempre.
+        """
+        ...
+
+    async def collect_vacuum_stats(
+        self,
+    ) -> tuple[list[NormalizedVacuumTableStats], list[NormalizedAutovacuumWorker]]:
+        """Estatisticas de vacuum/autovacuum por tabela + workers em execucao (Fase 5, T54).
+
+        On-demand (sem persistent storage) — endpoint de API consulta diretamente.
+        So PostgreSQL (`pg_stat_user_tables`, `pg_class`, `pg_stat_activity`).
+        SQL Server e outros motores devolvem `([], [])` via `CollectorNoOpMixin`.
+        """
+        ...
+
+    async def collect_idle_in_transaction(self) -> list[NormalizedIdleInTransactionSession]:
+        """Sessoes com transacao aberta mas sem request ativa — 'idle in transaction' (Fase 5, T56).
+
+        On-demand (sem persistent storage) — endpoint de API consulta diretamente.
+        PostgreSQL: `pg_stat_activity WHERE state IN ('idle in transaction', ...)`.
+        SQL Server: `sys.dm_exec_sessions` com `open_transaction_count > 0` e sem request ativa.
+        Outros motores devolvem `[]` via `CollectorNoOpMixin`.
+        """
+        ...
+
+    async def collect_index_bloat(self) -> list[NormalizedIndexBloatEntry]:
+        """Indices com estimativa de bloat por tabela — PostgreSQL only (Fase 5, T55).
+
+        On-demand. Usa dead_tup% da tabela pai como proxy de fragmentacao do indice.
+        Outros motores devolvem `[]` via `CollectorNoOpMixin`.
+        """
+        ...
+
+    async def collect_bgwriter_stats(self) -> NormalizedBgwriterStats | None:
+        """Estatisticas do bgwriter + checkpoints — PostgreSQL only (Fase 5, T57).
+
+        On-demand. `None` quando o motor nao suporta ou ha erro de coleta.
+        Outros motores devolvem `None` via `CollectorNoOpMixin`.
+        """
+        ...
+
+    async def collect_user_functions(self) -> list[NormalizedUserFunction]:
+        """Top funcoes PL/pgSQL por tempo total — PostgreSQL only (Fase 5, T58).
+
+        On-demand. Requer `track_functions = 'all'` no postgresql.conf; vazio sem isso.
+        Outros motores devolvem `[]` via `CollectorNoOpMixin`.
+        """
+        ...
+
+    async def collect_replication_slots(self) -> list[NormalizedReplicationSlot]:
+        """Slots de replicacao com lag em bytes — PostgreSQL only (Fase 5, T59).
+
+        On-demand. Slots inativos com lag acumulando sao risco de disco cheio.
+        Outros motores devolvem `[]` via `CollectorNoOpMixin`.
+        """
+        ...
+
+    async def collect_config_compliance(self) -> list[NormalizedConfigComplianceItem]:
+        """Checklist de parametros de configuracao vs boas praticas (Fase 5, T64).
+
+        On-demand. PostgreSQL: `pg_settings`; SQL Server: `sys.configurations`.
+        Outros motores devolvem `[]` via `CollectorNoOpMixin`.
+        """
+        ...
+
+    async def collect_connection_consumers(self) -> list[NormalizedConnectionConsumer]:
+        """Conexoes agrupadas por (application_name, client_addr, username) — Fase 5, T65.
+
+        On-demand. Mostra quantas conexoes ativas/idle/idle-in-transaction cada app/maquina tem.
+        PostgreSQL: `pg_stat_activity`; SQL Server: `sys.dm_exec_sessions`.
+        """
+        ...
+
+    async def collect_tempdb_stats(self) -> NormalizedTempDbStats | None:
+        """Snapshot de uso do TempDB — Fase 5, T61. SQL Server only.
+
+        On-demand. Combina `sys.dm_db_file_space_usage`, `sys.database_files` (tempdb context)
+        e `sys.dm_os_wait_stats` (PAGELATCH). Retorna `None` em engines sem TempDB.
+        """
+        ...
+
+    async def collect_db_sizes(self) -> list[NormalizedDbSize]:
+        """Tamanho atual de cada banco de dados na instancia — Fase 5, T63.
+
+        On-demand. PostgreSQL: `pg_database_size()`; SQL Server: `sys.master_files` (data files).
+        Retorna lista vazia para engines sem suporte.
+        """
+        ...
+
+    async def collect_query_stats_snapshot(self) -> list[NormalizedQueryStatsSnapshot]:
+        """Top-200 queries de pg_stat_statements para snapshot periodico — Fase 6, T60.
+
+        Periodico (nao on-demand): chamado pelo QueryStatsSupervisor a cada hora.
+        PostgreSQL only — retorna lista vazia em engines sem suporte.
+        Requer extensao pg_stat_statements instalada; captura graciosamente lista vazia se ausente.
         """
         ...
