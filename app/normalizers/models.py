@@ -336,6 +336,7 @@ class NormalizedPlanSnapshot(BaseModel):
     sql_hash: str
     plan_hash: str
     plan_xml_masked: str
+    plan_format: str = "sqlserver_xml"
     last_execution_time: datetime | None = None
 
 
@@ -546,3 +547,39 @@ class NormalizedConfigComplianceItem(BaseModel):
     status: Literal["ok", "warn", "error"]
     description: str
     recommendation: str | None
+
+
+class NormalizedUnusedIndex(BaseModel):
+    """Indice com zero scans desde o ultimo stats reset — Fase 5, T69. PostgreSQL only.
+
+    Um indice nunca usado desperdiça espaço em disco e penaliza INSERT/UPDATE/DELETE.
+    Exclui chaves primárias (sempre obrigatórias)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    schema_name: str
+    table_name: str
+    index_name: str
+    index_size_bytes: int
+    idx_scan: int
+
+
+class NormalizedTableIoStats(BaseModel):
+    """Estatísticas de I/O de tabela do pg_stat_user_tables — Fase 5, T68. PostgreSQL only.
+
+    Seq_scan alto com idx_scan baixo indica falta de índice. Dead tuples altos indicam
+    necessidade de VACUUM. Ordena pelo maior seq_scan para priorizar otimizações."""
+
+    model_config = ConfigDict(frozen=True)
+
+    schema_name: str
+    table_name: str
+    seq_scan: int
+    idx_scan: int
+    n_live_tup: int
+    n_dead_tup: int
+    table_size_bytes: int
+    last_analyze: datetime | None
+    last_autoanalyze: datetime | None
+    last_vacuum: datetime | None
+    last_autovacuum: datetime | None

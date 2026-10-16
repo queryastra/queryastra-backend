@@ -32,7 +32,9 @@ from app.normalizers.models import (
     NormalizedPlanCompileTimeoutFinding,
     NormalizedPlanSnapshot,
     NormalizedReplicationSlot,
+    NormalizedTableIoStats,
     NormalizedTempDbStats,
+    NormalizedUnusedIndex,
     NormalizedUserFunction,
     NormalizedVacuumTableStats,
 )
@@ -71,6 +73,11 @@ class CollectorNoOpMixin:
     async def scan_plan_history(self) -> list[NormalizedPlanSnapshot]:
         return []
 
+    async def explain_queries(
+        self, queries: list[tuple[str, str]]
+    ) -> list[NormalizedPlanSnapshot]:
+        return []
+
     async def collect_vacuum_stats(
         self,
     ) -> tuple[list[NormalizedVacuumTableStats], list[NormalizedAutovacuumWorker]]:
@@ -104,4 +111,10 @@ class CollectorNoOpMixin:
         return []
 
     async def collect_query_stats_snapshot(self) -> list[NormalizedQueryStatsSnapshot]:
+        return []
+
+    async def collect_unused_indexes(self) -> list[NormalizedUnusedIndex]:
+        return []
+
+    async def collect_table_io_stats(self) -> list[NormalizedTableIoStats]:
         return []

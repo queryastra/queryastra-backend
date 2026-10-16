@@ -53,6 +53,13 @@ class SystemSettings(Base):
     smtp_username: Mapped[str | None] = mapped_column(Text, nullable=True)
     smtp_password_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     smtp_from_address: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Configuracao de IA (BYOK) — editavel pela UI (Configuracoes → IA). ai_api_key_encrypted
+    # armazena a chave cifrada com Fernet; tem precedencia sobre AI_API_KEY do .env quando
+    # presente.
+    ai_provider: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ai_api_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ai_base_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ai_model: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )

@@ -82,3 +82,29 @@ class SystemSettingsRepository(BaseRepository):
             return None
         key = get_settings().credential_encryption_key.encode()
         return Fernet(key).decrypt(row.smtp_password_encrypted.encode()).decode()
+
+    async def update_ai_settings(
+        self,
+        provider: str | None,
+        raw_api_key: str | None,
+        base_url: str | None,
+        model: str | None,
+    ) -> SystemSettings:
+        """Atualiza config de IA. raw_api_key=None preserva a chave já armazenada."""
+        row = await self.get()
+        row.ai_provider = provider
+        row.ai_base_url = base_url
+        row.ai_model = model
+        if raw_api_key is not None:
+            key = get_settings().credential_encryption_key.encode()
+            row.ai_api_key_encrypted = Fernet(key).encrypt(raw_api_key.encode()).decode()
+        await self._session.commit()
+        await self._session.refresh(row)
+        return row
+
+    def get_ai_api_key_plain(self, row: SystemSettings) -> str | None:
+        """Decifra a chave de API de IA armazenada. Retorna None se não configurada."""
+        if not row.ai_api_key_encrypted:
+            return None
+        key = get_settings().credential_encryption_key.encode()
+        return Fernet(key).decrypt(row.ai_api_key_encrypted.encode()).decode()

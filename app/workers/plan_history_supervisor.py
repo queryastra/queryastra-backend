@@ -1,24 +1,34 @@
-"""Supervisor de historico de plano de execucao — item priorizado pelo usuario.
+"""Supervisor de historico de plano de execucao.
 
-Mesmo padrao de baixa frequencia de `MissingIndexSupervisor`/`BackupStatusSupervisor`/
-`PlanCompileTimeoutSupervisor`: um unico loop acorda no intervalo configurado
-(`plan_history_check_interval_seconds`, default 1 dia), relista instancias ativas e varre o
-cache de planos de cada uma (so SQL Server — `collector.scan_plan_history()` ja devolve lista
-vazia sem tentar conectar no PostgreSQL, mas este supervisor pula a chamada de proposito pra nao
-abrir conexao a toa, mesmo racional do `PlanCompileTimeoutSupervisor`).
+Roda periodicamente (`plan_history_check_interval_seconds`, default 1 dia) para todas as
+instancias ativas. Dois modos de coleta:
 
-Cada snapshot devolvido pelo coletor (um por `sql_hash` distinto com plano em cache) so vira uma
-linha nova em `query_plan_snapshots` quando o `plan_hash` mudou desde o ultimo conhecido para o
-mesmo par (instance_id, sql_hash) — `QueryPlanSnapshotsRepository.insert_if_changed` faz essa
-deduplicacao. Mesma politica de resiliencia dos demais supervisores: erro em uma instancia nunca
-derruba outra instancia nem o supervisor inteiro.
+  - SQL Server: `collector.scan_plan_history()` — lê o cache de planos das DMVs do próprio banco
+    (sys.dm_exec_query_stats + sys.dm_exec_query_plan). Não precisa de contexto externo.
+
+  - PostgreSQL, MySQL/MariaDB, Oracle, Aurora: `collector.explain_queries(queries)` — recebe a
+    lista das top-50 queries (por duração média, últimas 24h) buscada da tabela `query_samples`
+    do QueryAstra e gera planos via EXPLAIN/V$SQL_PLAN na instância alvo. O sql_hash já vem
+    correto (o mesmo hash usado ao persistir as amostras), garantindo a ligação entre o plano e
+    os registros de query_samples.
+
+  - DB2, CockroachDB, Aurora PostgreSQL, Redshift: CockroachDB/Aurora PG/Redshift herdam o
+    adapter PostgreSQL (plan_format='postgresql_json'); DB2 devolve lista vazia por enquanto.
+
+Cada snapshot só vira linha nova em `query_plan_snapshots` quando `plan_hash` mudou em relação
+ao último snapshot conhecido para o mesmo par (instance_id, sql_hash) —
+`QueryPlanSnapshotsRepository.insert_if_changed` faz essa deduplicação. Erro em uma instância
+nunca derruba outra instância nem o supervisor inteiro.
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
+
+import sqlalchemy as sa
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -36,9 +46,49 @@ from app.security.credential_reference import (
 
 logger = get_logger(__name__)
 
+# DB types que usam explain_queries() em vez de scan_plan_history()
+_EXPLAIN_BASED_TYPES = frozenset({
+    "postgresql", "mysql", "oracle", "cockroachdb",
+    "aurora_postgresql", "aurora_mysql", "redshift",
+})
+
 _CollectorFactory = Callable[..., Collector]
 _InstancesRepositoryFactory = Callable[[AsyncSession], InstancesRepository]
 _QueryPlanSnapshotsRepositoryFactory = Callable[[AsyncSession], QueryPlanSnapshotsRepository]
+
+
+async def _fetch_top_queries(
+    session: AsyncSession, instance_id: UUID, limit: int = 50
+) -> list[tuple[str, str]]:
+    """Retorna as top queries (sql_hash, sql_text_masked) das últimas 24h para a instância,
+    ordenadas por duração média decrescente. Usado para alimentar explain_queries()."""
+    since = datetime.now(UTC) - timedelta(hours=24)
+    # ROW_NUMBER escolhe a linha mais recente por hash (sql_text_masked atual);
+    # AVG é calculado sobre toda a janela do hash antes do LIMIT — resultado já
+    # vem ordenado por avg_duration DESC, sem precisar de sort Python posterior.
+    stmt = sa.text("""
+        SELECT sql_hash, sql_text_masked
+        FROM (
+            SELECT sql_hash,
+                   sql_text_masked,
+                   AVG(duration_ms) OVER (PARTITION BY sql_hash) AS avg_duration,
+                   ROW_NUMBER() OVER (PARTITION BY sql_hash ORDER BY time DESC) AS rn
+            FROM query_samples
+            WHERE instance_id = :instance_id
+              AND time >= :since
+              AND sql_text_masked IS NOT NULL
+              AND sql_text_masked != ''
+        ) sub
+        WHERE rn = 1
+        ORDER BY avg_duration DESC
+        LIMIT :limit
+    """)
+    result = await session.execute(
+        stmt,
+        {"instance_id": instance_id, "since": since, "limit": limit},
+    )
+    rows = result.fetchall()
+    return [(r.sql_hash, r.sql_text_masked) for r in rows]
 
 
 class PlanHistorySupervisor:
@@ -107,9 +157,8 @@ class PlanHistorySupervisor:
                     )
                     return
 
-                if instance.db_type != "sqlserver":
-                    # Sem tentar conectar - PostgreSQL nao tem cache de plano exposto do mesmo
-                    # jeito (mesmo racional de `Collector.scan_plan_history`).
+                if instance.db_type not in ("sqlserver",) | _EXPLAIN_BASED_TYPES:
+                    # db2 e outros sem suporte ainda
                     return
 
                 username: str | None = None
@@ -145,15 +194,23 @@ class PlanHistorySupervisor:
                     instance.db_type, connection=connection, instance_id=instance.id
                 )
                 try:
-                    snapshots = await collector.scan_plan_history()
+                    if instance.db_type == "sqlserver":
+                        snapshots = await collector.scan_plan_history()
+                    else:
+                        # Para engines sem cache de plano exposto, buscamos as top queries
+                        # recentes de query_samples e geramos planos via EXPLAIN/V$SQL_PLAN.
+                        top_queries = await _fetch_top_queries(session, instance.id)
+                        snapshots = await collector.explain_queries(top_queries)
+
                     new_rows = []
                     if snapshots:
                         repository = self._query_plan_snapshots_repository_factory(session)
                         new_rows = await repository.insert_if_changed(snapshots)
                     logger.info(
-                        "Varredura de historico de plano concluida instance_id=%s scanned=%s "
-                        "changed=%s",
+                        "Varredura de historico de plano concluida instance_id=%s db_type=%s "
+                        "scanned=%s changed=%s",
                         instance_id,
+                        instance.db_type,
                         len(snapshots),
                         len(new_rows),
                     )

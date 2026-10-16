@@ -120,7 +120,7 @@ class OracleCollector(CollectorNoOpMixin):
             rows = await asyncio.wait_for(cursor.fetchall(), timeout=timeout_seconds)
             return [dict(zip(cols, row, strict=False)) for row in rows]
         finally:
-            await cursor.close()
+            cursor.close()
 
     async def check_capabilities(self) -> list[CapabilityResult]:
         try:
@@ -146,7 +146,7 @@ class OracleCollector(CollectorNoOpMixin):
                     cursor.execute("SELECT COUNT(*) FROM v$session WHERE rownum <= 1"),
                     timeout=settings.collection_query_timeout_seconds,
                 )
-                await cursor.close()
+                cursor.close()
                 results.append(
                     CapabilityResult(
                         capability=ORACLE_SESSION_ACTIVITY,
@@ -168,7 +168,7 @@ class OracleCollector(CollectorNoOpMixin):
                     cursor.execute("SELECT COUNT(*) FROM v$sql WHERE rownum <= 1"),
                     timeout=settings.collection_query_timeout_seconds,
                 )
-                await cursor.close()
+                cursor.close()
                 results.append(
                     CapabilityResult(
                         capability=ORACLE_QUERY_STATS,
@@ -375,7 +375,7 @@ class OracleCollector(CollectorNoOpMixin):
             cursor = conn.cursor()
             await asyncio.wait_for(cursor.execute(sql), timeout=timeout_seconds)
             row = await cursor.fetchone()
-            await cursor.close()
+            cursor.close()
         finally:
             await conn.close()
         if row is None:
@@ -384,6 +384,114 @@ class OracleCollector(CollectorNoOpMixin):
             return float(row[0])
         except (TypeError, ValueError):
             return None
+
+    async def explain_queries(
+        self, queries: list[tuple[str, str]]
+    ) -> list[NormalizedPlanSnapshot]:
+        """Coleta planos de execução diretamente de V$SQL_PLAN para as queries informadas.
+
+        Para cada sql_hash, procura o sql_id correspondente em V$SQL via hash SHA-256 do texto
+        mascarado. Quando encontrado, formata as linhas de V$SQL_PLAN como texto tabular e
+        retorna o snapshot. Silencia erros por query e continua para as demais.
+        """
+        import hashlib
+
+        if not queries or self._instance_id is None:
+            return []
+
+        try:
+            conn = await asyncio.wait_for(
+                self._connect(), timeout=self._connection_params.connect_timeout_seconds
+            )
+        except Exception:
+            return []
+
+        _V_SQL_QUERY = """
+            SELECT sql_id, plan_hash_value, sql_text
+            FROM V$SQL
+            WHERE executions > 0
+              AND sql_text IS NOT NULL
+            ORDER BY elapsed_time DESC
+            FETCH FIRST 200 ROWS ONLY
+        """
+        _V_SQL_PLAN_QUERY = """
+            SELECT id, operation, options, object_name, cost, cardinality, bytes
+            FROM V$SQL_PLAN
+            WHERE sql_id = '{sql_id}' AND plan_hash_value = {phv}
+            ORDER BY id
+        """
+
+        results: list[NormalizedPlanSnapshot] = []
+        try:
+            # Constrói mapa sql_hash -> (sql_id, plan_hash_value) via V$SQL
+            from app.masking.sql_masking import mask_sql_literals
+
+            sql_rows = await self._fetch_rows(conn, _V_SQL_QUERY, timeout_seconds=10.0)
+            hash_to_plan: dict[str, tuple[str, int]] = {}
+            for row in sql_rows:
+                raw_text = row.get("sql_text") or ""
+                computed_hash = hashlib.sha256(
+                    mask_sql_literals(raw_text).encode()
+                ).hexdigest()
+                if computed_hash not in hash_to_plan:
+                    hash_to_plan[computed_hash] = (row["sql_id"], row["plan_hash_value"])
+
+            for sql_hash, sql_text in queries[:40]:
+                plan_info = hash_to_plan.get(sql_hash)
+                if not plan_info:
+                    continue
+                sql_id, phv = plan_info
+                try:
+                    plan_rows = await self._fetch_rows(
+                        conn,
+                        _V_SQL_PLAN_QUERY.format(sql_id=sql_id, phv=phv),
+                        timeout_seconds=5.0,
+                    )
+                except Exception:
+                    continue
+
+                if not plan_rows:
+                    continue
+
+                # Formata as linhas como tabela de texto
+                header = "| {:>4} | {:<30} | {:<20} | {:<20} | {:>8} | {:>10} | {:>10} |".format(
+                    "ID", "OPERATION", "OPTIONS", "OBJECT", "COST", "ROWS", "BYTES"
+                )
+                sep = "-" * len(header)
+                lines = [sep, header, sep]
+                for r in plan_rows:
+                    lines.append(
+                        "| {:>4} | {:<30} | {:<20} | {:<20} | {:>8} | {:>10} | {:>10} |".format(
+                            r.get("id") or 0,
+                            (r.get("operation") or "")[:30],
+                            (r.get("options") or "")[:20],
+                            (r.get("object_name") or "")[:20],
+                            r.get("cost") or 0,
+                            r.get("cardinality") or 0,
+                            r.get("bytes") or 0,
+                        )
+                    )
+                lines.append(sep)
+                plan_text = "\n".join(lines)
+                plan_hash = hashlib.sha256(plan_text.encode()).hexdigest()
+                results.append(
+                    NormalizedPlanSnapshot(
+                        instance_id=self._instance_id,
+                        sql_hash=sql_hash,
+                        plan_hash=plan_hash,
+                        plan_xml_masked=plan_text,
+                        plan_format="oracle_text",
+                    )
+                )
+        except Exception:
+            pass
+        finally:
+            try:
+                await conn.close()
+            except Exception:
+                pass
+
+        return results
 
     async def close(self) -> None:
         logger.info("close chamado para instância oracle (instance_id=%s)", self._instance_id)

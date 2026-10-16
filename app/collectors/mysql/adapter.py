@@ -546,6 +546,57 @@ class MySQLCollector(CollectorNoOpMixin):
             logger.warning("Erro em run_scalar_query MySQL: %s", exc)
         return None
 
+    async def explain_queries(
+        self, queries: list[tuple[str, str]]
+    ) -> list[NormalizedPlanSnapshot]:
+        """Gera planos estimados via EXPLAIN FORMAT=JSON para as queries informadas.
+
+        Substitui `?` por NULL antes de executar — plano estimado, sem executar a query.
+        Silencia erros por query e continua para as demais.
+        """
+        import hashlib
+        import json
+        import re
+
+        if not queries or self._instance_id is None:
+            return []
+
+        try:
+            conn = await self._get_connection()
+        except Exception:
+            return []
+
+        results: list[NormalizedPlanSnapshot] = []
+        for sql_hash, sql_text in queries[:40]:
+            if not sql_text or not sql_text.strip():
+                continue
+            explainable = re.sub(r"\?", "NULL", sql_text)
+            try:
+                async with conn.cursor() as cur:
+                    await asyncio.wait_for(
+                        cur.execute(f"EXPLAIN FORMAT=JSON {explainable}"), timeout=5.0
+                    )
+                    row = await cur.fetchone()
+                if not row:
+                    continue
+                raw = row[0]
+                plan_obj = json.loads(raw) if isinstance(raw, str) else raw
+                plan_json = json.dumps(plan_obj, ensure_ascii=False)
+                plan_hash = hashlib.sha256(plan_json.encode()).hexdigest()
+                results.append(
+                    NormalizedPlanSnapshot(
+                        instance_id=self._instance_id,
+                        sql_hash=sql_hash,
+                        plan_hash=plan_hash,
+                        plan_xml_masked=plan_json,
+                        plan_format="mysql_json",
+                    )
+                )
+            except Exception:
+                continue
+
+        return results
+
     async def close(self) -> None:
         """Fecha a conexao."""
         if self._conn is not None:

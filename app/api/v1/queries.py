@@ -57,8 +57,13 @@ from app.core.config import get_settings
 from app.repositories.instances_repository import InstancesRepository
 from app.repositories.query_plan_snapshots_repository import QueryPlanSnapshotsRepository
 from app.repositories.query_samples_repository import QuerySamplesRepository
+from app.repositories.system_settings_repository import SystemSettingsRepository
 from app.security.credential_reference import CredentialResolver
+from app.repositories.ai_api_key_repository import AiApiKeyRepository
+from app.services.ai_advisor import AiAdvisor, MultiKeyAiAdvisor
 from app.services.execution_plan_service import fetch_execution_plan
+from app.services.plan_advisor import analyze_plan_by_format
+from app.services.sql_advisor import analyze_sql
 from app.services.sql_insight_client import SqlInsightClient
 
 router = APIRouter()
@@ -295,6 +300,48 @@ def get_credential_resolver() -> CredentialResolver:
 def get_sql_insight_client() -> SqlInsightClient:
     settings = get_settings()
     return SqlInsightClient(settings.sql_insight_base_url, settings.sql_insight_timeout_seconds)
+
+
+async def get_ai_advisor(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> AiAdvisor | MultiKeyAiAdvisor:
+    """Chaves do banco têm precedência sobre env vars.
+
+    Se existirem chaves em `ai_api_keys`, usa `MultiKeyAiAdvisor` com failover automático.
+    Caso contrário, cai no legado (system_settings ou env vars).
+    """
+    settings = get_settings()
+    key_repo = AiApiKeyRepository(session)
+    enabled_keys = await key_repo.get_enabled_for_failover()
+
+    if enabled_keys:
+        key_advisors = [
+            (
+                row,
+                key_repo,
+                AiAdvisor(
+                    provider=row.provider,
+                    api_key=key_repo.get_plain_api_key(row),
+                    base_url=row.base_url,
+                    model=row.model,
+                    timeout_seconds=settings.ai_timeout_seconds,
+                ),
+            )
+            for row in enabled_keys
+        ]
+        return MultiKeyAiAdvisor(key_advisors)
+
+    # Fallback: system_settings singleton (chave única configurada via UI antiga ou env vars)
+    ss_repo = SystemSettingsRepository(session)
+    ss_row = await ss_repo.get()
+    db_key = ss_repo.get_ai_api_key_plain(ss_row)
+    return AiAdvisor(
+        provider=ss_row.ai_provider or settings.ai_provider,
+        api_key=db_key or settings.ai_api_key,
+        base_url=ss_row.ai_base_url or settings.ai_base_url,
+        model=ss_row.ai_model or settings.ai_model,
+        timeout_seconds=settings.ai_timeout_seconds,
+    )
 
 
 def get_query_plan_snapshots_repository(
@@ -1260,3 +1307,142 @@ async def get_query_plan_history(
         )
         for row in rows
     ]
+
+
+# ── Recomendações (sql_advisor + plan_advisor + ai_advisor) ──────────────────────────────────
+
+
+class SqlFindingResponse(BaseModel):
+    rule_id: str
+    severity: str
+    description: str
+    suggestion: str
+
+
+class PlanFindingResponse(BaseModel):
+    finding_id: str
+    severity: str
+    description: str
+    suggestion: str
+    operator: str | None = None
+    object_name: str | None = None
+
+
+class AiAnalysisResponse(BaseModel):
+    configured: bool
+    narrative: str | None = None
+
+
+class RecommendationsResponse(BaseModel):
+    sql_findings: list[SqlFindingResponse]
+    plan_available: bool
+    plan_findings: list[PlanFindingResponse]
+    ai: AiAnalysisResponse
+
+
+@router.get(
+    "/detail/{instance_id}/{sql_hash}/recommendations",
+    response_model=RecommendationsResponse,
+)
+async def get_query_recommendations(
+    instance_id: UUID,
+    sql_hash: str,
+    _access: Annotated[None, Depends(check_instance_access)],
+    repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
+    plan_repository: Annotated[
+        QueryPlanSnapshotsRepository, Depends(get_query_plan_snapshots_repository)
+    ],
+    instances_repository: Annotated[InstancesRepository, Depends(get_instances_repository)],
+    ai_advisor: Annotated[AiAdvisor | MultiKeyAiAdvisor, Depends(get_ai_advisor)],
+    since: Annotated[datetime | None, Query(alias="from")] = None,
+    until: Annotated[datetime | None, Query(alias="to")] = None,
+) -> RecommendationsResponse:
+    """Recomendações contextuais: regras estáticas (sql_advisor), análise de plano (plan_advisor)
+    e diagnóstico opcional por IA (ai_advisor). Endpoint isolado — carregamento independente do
+    resto da tela de detalhe, não atrasa o carregamento principal.
+
+    Retorna sempre (nunca 404): sql_findings e plan_findings via análise local; ai.configured
+    indica se a chave de IA está configurada independente de haver ou não achados."""
+    settings = get_settings()
+    resolved_since, resolved_until = resolve_time_window(
+        since, until, timedelta(seconds=settings.api_read_default_lookback_seconds)
+    )
+
+    # Busca amostra para obter sql_text_masked e db_type.
+    # Fallback: se não houver amostras na janela solicitada (ex.: query de ontem vista com filtro
+    # "última hora"), busca nos últimos 30 dias para conseguir o texto SQL e ainda gerar diagnóstico.
+    rows = await repository.query_detail(instance_id, sql_hash, resolved_since, resolved_until, 1)
+    if not rows:
+        fallback_since = datetime.now(UTC) - timedelta(days=30)
+        rows = await repository.query_detail(instance_id, sql_hash, fallback_since, datetime.now(UTC), 1)
+    if not rows:
+        return RecommendationsResponse(
+            sql_findings=[],
+            plan_available=False,
+            plan_findings=[],
+            ai=AiAnalysisResponse(configured=ai_advisor.is_configured),
+        )
+
+    sample = rows[0]
+    sql_text = sample.sql_text_masked or ""
+    object_text = sample.sql_text_full_masked or None
+
+    # Determina db_type a partir da instância
+    instance = await instances_repository.get_by_id(instance_id)
+    db_type = instance.db_type if instance else "sqlserver"
+
+    # ── 1. Análise estática de SQL ────────────────────────────────────────────────────
+    raw_sql_findings = analyze_sql(sql_text, db_type=db_type)
+    sql_findings = [
+        SqlFindingResponse(
+            rule_id=f.rule_id,
+            severity=f.severity,
+            description=f.description,
+            suggestion=f.suggestion,
+        )
+        for f in raw_sql_findings
+    ]
+
+    # ── 2. Análise do plano de execução ───────────────────────────────────────────────
+    plan_available = False
+    plan_findings: list[PlanFindingResponse] = []
+
+    plan_rows = await plan_repository.list_for_query(instance_id, sql_hash, limit=1)
+    if plan_rows:
+        plan_available = True
+        raw_plan_findings = analyze_plan_by_format(
+            plan_rows[0].plan_xml_masked or "",
+            getattr(plan_rows[0], "plan_format", "sqlserver_xml"),
+        )
+        plan_findings = [
+            PlanFindingResponse(
+                finding_id=f.finding_id,
+                severity=f.severity,
+                description=f.description,
+                suggestion=f.suggestion,
+                operator=f.operator,
+                object_name=f.object_name,
+            )
+            for f in raw_plan_findings
+        ]
+
+    # ── 3. Diagnóstico por IA (opcional, BYOK) ────────────────────────────────────────
+    avg_duration = getattr(sample, "duration_ms", None)
+    ai_result = await ai_advisor.analyze(
+        sql_text_masked=sql_text,
+        db_type=db_type,
+        avg_duration_ms=float(avg_duration) if avg_duration is not None else None,
+        sql_findings=[f.model_dump() for f in sql_findings],
+        plan_findings=[f.model_dump() for f in plan_findings],
+        object_text_masked=object_text,
+    )
+
+    return RecommendationsResponse(
+        sql_findings=sql_findings,
+        plan_available=plan_available,
+        plan_findings=plan_findings,
+        ai=AiAnalysisResponse(
+            configured=ai_result.configured,
+            narrative=ai_result.narrative,
+        ),
+    )

@@ -102,3 +102,8 @@ class PostgreSQLBackedCollector:
 
     async def scan_plan_history(self) -> list[NormalizedPlanSnapshot]:
         return await self._pg.scan_plan_history()
+
+    async def explain_queries(
+        self, queries: list[tuple[str, str]]
+    ) -> list[NormalizedPlanSnapshot]:
+        return await self._pg.explain_queries(queries)

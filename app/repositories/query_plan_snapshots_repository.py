@@ -58,6 +58,7 @@ class QueryPlanSnapshotsRepository(BaseRepository):
                 sql_hash=s.sql_hash,
                 plan_hash=s.plan_hash,
                 plan_xml_masked=s.plan_xml_masked,
+                plan_format=s.plan_format,
                 last_execution_time=s.last_execution_time,
             )
             for s in snapshots

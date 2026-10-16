@@ -104,7 +104,9 @@ from app.normalizers.models import (
     NormalizedPlanSnapshot,
     NormalizedQuerySample,
     NormalizedReplicationSlot,
+    NormalizedTableIoStats,
     NormalizedTransactionEvent,
+    NormalizedUnusedIndex,
     NormalizedUserFunction,
     NormalizedVacuumTableStats,
 )
@@ -393,6 +395,45 @@ _CONNECTION_CONSUMERS_QUERY = """
     ORDER BY total DESC, idle_in_transaction DESC
 """
 
+# Fase 5 T69 — indices com zero scans. Exclui PKs (indisprimary). Minimo 128KB para ignorar
+# indices triviais em tabelas pequenas. Ordenado por tamanho DESC para priorizar economia de espaco.
+_UNUSED_INDEXES_QUERY = """
+    SELECT
+        s.schemaname AS schema_name,
+        s.relname AS table_name,
+        s.indexrelname AS index_name,
+        pg_relation_size(s.indexrelid) AS index_size_bytes,
+        COALESCE(s.idx_scan, 0) AS idx_scan
+    FROM pg_stat_user_indexes s
+    JOIN pg_index i ON i.indexrelid = s.indexrelid
+    WHERE COALESCE(s.idx_scan, 0) = 0
+      AND NOT i.indisprimary
+      AND pg_relation_size(s.indexrelid) > 131072
+    ORDER BY pg_relation_size(s.indexrelid) DESC
+    LIMIT 50
+"""
+
+# Fase 5 T68 — I/O de tabelas do pg_stat_user_tables. Tabelas com seq_scan alto e idx_scan
+# baixo sao candidatas a criacao de indice. Dead tuples altos indicam necessidade de VACUUM.
+_TABLE_IO_STATS_QUERY = """
+    SELECT
+        schemaname AS schema_name,
+        relname AS table_name,
+        COALESCE(seq_scan, 0) AS seq_scan,
+        COALESCE(idx_scan, 0) AS idx_scan,
+        COALESCE(n_live_tup, 0) AS n_live_tup,
+        COALESCE(n_dead_tup, 0) AS n_dead_tup,
+        pg_relation_size(relid) AS table_size_bytes,
+        last_analyze,
+        last_autoanalyze,
+        last_vacuum,
+        last_autovacuum
+    FROM pg_stat_user_tables
+    WHERE COALESCE(seq_scan, 0) > 0
+    ORDER BY seq_scan DESC
+    LIMIT 50
+"""
+
 # Fase 6 T60 — snapshot periodico de pg_stat_statements (top-200 por total_exec_time).
 # Valores acumulativos; deltas calculados via LAG() no repositorio.
 # LEFT(query, 500): textos longos nao agregam valor para identificacao e enchem o banco.
@@ -570,6 +611,8 @@ class PostgreSQLCollector:
     def __init__(self, connection: ConnectionParams, instance_id: UUID | None = None) -> None:
         self._connection_params = connection
         self._instance_id = instance_id
+        self.skip_blocking_queries = False
+        self.skip_pg_catalog_metrics = False
 
     async def check_capabilities(self) -> list[CapabilityResult]:
         """Conecta e checa roles (`pg_has_role`) e extensao `pg_stat_statements`.
@@ -758,36 +801,45 @@ class PostgreSQLCollector:
             collected_at = self._now()
             session_rows = session_rows[: settings.collection_max_rows]
 
-            blocking_rows = await self._fetch_rows(
-                conn, _BLOCKING_QUERY, settings.collection_query_timeout_seconds
-            )
-            blocking_rows = blocking_rows[: settings.collection_max_rows]
-
-            all_session_rows = await self._fetch_rows(
-                conn, _ALL_SESSIONS_QUERY, settings.collection_query_timeout_seconds
-            )
-            all_session_rows = all_session_rows[: settings.collection_max_rows]
-
-            blocked_object_rows = await self._fetch_rows(
-                conn, _BLOCKED_OBJECT_QUERY, settings.collection_query_timeout_seconds
-            )
-            blocked_object_rows = blocked_object_rows[: settings.collection_max_rows]
-
-            database_stats_row = await asyncio.wait_for(
-                conn.fetchrow(_DATABASE_STATS_QUERY),
-                timeout=settings.collection_query_timeout_seconds,
-            )
-
-            if version_num >= _PG17_VERSION_NUM:
-                checkpoint_row = await asyncio.wait_for(
-                    conn.fetchrow(_CHECKPOINTER_QUERY),
-                    timeout=settings.collection_query_timeout_seconds,
-                )
+            if self.skip_blocking_queries:
+                blocking_rows = []
+                all_session_rows = []
+                blocked_object_rows = []
             else:
-                checkpoint_row = await asyncio.wait_for(
-                    conn.fetchrow(_BGWRITER_QUERY),
+                blocking_rows = await self._fetch_rows(
+                    conn, _BLOCKING_QUERY, settings.collection_query_timeout_seconds
+                )
+                blocking_rows = blocking_rows[: settings.collection_max_rows]
+
+                all_session_rows = await self._fetch_rows(
+                    conn, _ALL_SESSIONS_QUERY, settings.collection_query_timeout_seconds
+                )
+                all_session_rows = all_session_rows[: settings.collection_max_rows]
+
+                blocked_object_rows = await self._fetch_rows(
+                    conn, _BLOCKED_OBJECT_QUERY, settings.collection_query_timeout_seconds
+                )
+                blocked_object_rows = blocked_object_rows[: settings.collection_max_rows]
+
+            if self.skip_pg_catalog_metrics:
+                database_stats_row = None
+                checkpoint_row = None
+            else:
+                database_stats_row = await asyncio.wait_for(
+                    conn.fetchrow(_DATABASE_STATS_QUERY),
                     timeout=settings.collection_query_timeout_seconds,
                 )
+
+                if version_num >= _PG17_VERSION_NUM:
+                    checkpoint_row = await asyncio.wait_for(
+                        conn.fetchrow(_CHECKPOINTER_QUERY),
+                        timeout=settings.collection_query_timeout_seconds,
+                    )
+                else:
+                    checkpoint_row = await asyncio.wait_for(
+                        conn.fetchrow(_BGWRITER_QUERY),
+                        timeout=settings.collection_query_timeout_seconds,
+                    )
         finally:
             await conn.close()
 
@@ -1094,8 +1146,8 @@ class PostgreSQLCollector:
     def _build_metric_samples(
         self,
         session_rows: list[asyncpg.Record],
-        database_stats_row: asyncpg.Record,
-        checkpoint_row: asyncpg.Record,
+        database_stats_row: asyncpg.Record | None,
+        checkpoint_row: asyncpg.Record | None,
         version_num: int,
         collected_at: datetime,
     ) -> list[NormalizedMetricSample]:
@@ -1115,43 +1167,50 @@ class PostgreSQLCollector:
                 labels=labels,
             )
 
-        candidates = [
+        candidates: list[NormalizedMetricSample | None] = [
             sample(PG_ACTIVE_SESSION_COUNT, len(session_rows)),
-            sample(PG_NUMBACKENDS, database_stats_row["numbackends"]),
-            sample(PG_XACT_COMMIT, database_stats_row["xact_commit"]),
-            sample(PG_XACT_ROLLBACK, database_stats_row["xact_rollback"]),
-            sample(PG_BLKS_READ, database_stats_row["blks_read"]),
-            sample(PG_BLKS_HIT, database_stats_row["blks_hit"]),
-            sample(PG_TUP_RETURNED, database_stats_row["tup_returned"]),
-            sample(PG_TUP_FETCHED, database_stats_row["tup_fetched"]),
-            sample(PG_TUP_INSERTED, database_stats_row["tup_inserted"]),
-            sample(PG_TUP_UPDATED, database_stats_row["tup_updated"]),
-            sample(PG_TUP_DELETED, database_stats_row["tup_deleted"]),
-            sample(PG_DEADLOCKS, database_stats_row["deadlocks"]),
-            sample(PG_TEMP_FILES, database_stats_row["temp_files"]),
-            sample(PG_TEMP_BYTES, database_stats_row["temp_bytes"]),
         ]
 
-        if version_num >= _PG17_VERSION_NUM:
+        if database_stats_row is not None:
             candidates.extend(
                 [
-                    sample(PG_CHECKPOINTS_TIMED, checkpoint_row["num_timed"]),
-                    sample(PG_CHECKPOINTS_REQUESTED, checkpoint_row["num_requested"]),
-                    sample(PG_CHECKPOINT_WRITE_TIME_MS, checkpoint_row["write_time"]),
-                    sample(PG_CHECKPOINT_SYNC_TIME_MS, checkpoint_row["sync_time"]),
-                    sample(PG_CHECKPOINT_BUFFERS_WRITTEN, checkpoint_row["buffers_written"]),
+                    sample(PG_NUMBACKENDS, database_stats_row["numbackends"]),
+                    sample(PG_XACT_COMMIT, database_stats_row["xact_commit"]),
+                    sample(PG_XACT_ROLLBACK, database_stats_row["xact_rollback"]),
+                    sample(PG_BLKS_READ, database_stats_row["blks_read"]),
+                    sample(PG_BLKS_HIT, database_stats_row["blks_hit"]),
+                    sample(PG_TUP_RETURNED, database_stats_row["tup_returned"]),
+                    sample(PG_TUP_FETCHED, database_stats_row["tup_fetched"]),
+                    sample(PG_TUP_INSERTED, database_stats_row["tup_inserted"]),
+                    sample(PG_TUP_UPDATED, database_stats_row["tup_updated"]),
+                    sample(PG_TUP_DELETED, database_stats_row["tup_deleted"]),
+                    sample(PG_DEADLOCKS, database_stats_row["deadlocks"]),
+                    sample(PG_TEMP_FILES, database_stats_row["temp_files"]),
+                    sample(PG_TEMP_BYTES, database_stats_row["temp_bytes"]),
                 ]
             )
-        else:
-            candidates.extend(
-                [
-                    sample(PG_CHECKPOINTS_TIMED, checkpoint_row["checkpoints_timed"]),
-                    sample(PG_CHECKPOINTS_REQUESTED, checkpoint_row["checkpoints_req"]),
-                    sample(PG_CHECKPOINT_WRITE_TIME_MS, checkpoint_row["checkpoint_write_time"]),
-                    sample(PG_CHECKPOINT_SYNC_TIME_MS, checkpoint_row["checkpoint_sync_time"]),
-                    sample(PG_CHECKPOINT_BUFFERS_WRITTEN, checkpoint_row["buffers_checkpoint"]),
-                ]
-            )
+
+        if checkpoint_row is not None:
+            if version_num >= _PG17_VERSION_NUM:
+                candidates.extend(
+                    [
+                        sample(PG_CHECKPOINTS_TIMED, checkpoint_row["num_timed"]),
+                        sample(PG_CHECKPOINTS_REQUESTED, checkpoint_row["num_requested"]),
+                        sample(PG_CHECKPOINT_WRITE_TIME_MS, checkpoint_row["write_time"]),
+                        sample(PG_CHECKPOINT_SYNC_TIME_MS, checkpoint_row["sync_time"]),
+                        sample(PG_CHECKPOINT_BUFFERS_WRITTEN, checkpoint_row["buffers_written"]),
+                    ]
+                )
+            else:
+                candidates.extend(
+                    [
+                        sample(PG_CHECKPOINTS_TIMED, checkpoint_row["checkpoints_timed"]),
+                        sample(PG_CHECKPOINTS_REQUESTED, checkpoint_row["checkpoints_req"]),
+                        sample(PG_CHECKPOINT_WRITE_TIME_MS, checkpoint_row["checkpoint_write_time"]),
+                        sample(PG_CHECKPOINT_SYNC_TIME_MS, checkpoint_row["checkpoint_sync_time"]),
+                        sample(PG_CHECKPOINT_BUFFERS_WRITTEN, checkpoint_row["buffers_checkpoint"]),
+                    ]
+                )
 
         return [c for c in candidates if c is not None]
 
@@ -1399,9 +1458,65 @@ class PostgreSQLCollector:
         return []
 
     async def scan_plan_history(self) -> list[NormalizedPlanSnapshot]:
-        """Mesma limitacao de `scan_plan_compile_timeouts` — sem cache de plano exposto via SQL,
-        sempre lista vazia, sem tentar conectar."""
+        """PostgreSQL não tem cache de plano exposto via SQL — use explain_queries()."""
         return []
+
+    async def explain_queries(
+        self, queries: list[tuple[str, str]]
+    ) -> list[NormalizedPlanSnapshot]:
+        """Gera planos estimados via EXPLAIN (FORMAT JSON) para as queries informadas.
+
+        `queries` é uma lista de (sql_hash, sql_text_masked). Substitui literais mascarados
+        (`?`) por NULL antes de executar o EXPLAIN — plano estimado, sem executar a query.
+        Silencia erros por query (EXPLAIN pode falhar em CTEs complexas, DML sem RETURNING,
+        etc.) e continua para as demais.
+        """
+        import hashlib
+        import json
+        import re
+
+        if not queries or self._instance_id is None:
+            return []
+
+        try:
+            conn = await asyncio.wait_for(
+                self._connect(), timeout=self._connection_params.connect_timeout_seconds
+            )
+        except Exception:
+            return []
+
+        results: list[NormalizedPlanSnapshot] = []
+        try:
+            for sql_hash, sql_text in queries[:40]:
+                if not sql_text or not sql_text.strip():
+                    continue
+                # Substitui literais mascarados por NULL para tornar o SQL EXPLAINável
+                explainable = re.sub(r"\?", "NULL", sql_text)
+                try:
+                    rows = await asyncio.wait_for(
+                        conn.fetch(f"EXPLAIN (FORMAT JSON) {explainable}"),
+                        timeout=5.0,
+                    )
+                    if not rows:
+                        continue
+                    plan_obj = rows[0][0]
+                    plan_json = json.dumps(plan_obj, ensure_ascii=False)
+                    plan_hash = hashlib.sha256(plan_json.encode()).hexdigest()
+                    results.append(
+                        NormalizedPlanSnapshot(
+                            instance_id=self._instance_id,
+                            sql_hash=sql_hash,
+                            plan_hash=plan_hash,
+                            plan_xml_masked=plan_json,
+                            plan_format="postgresql_json",
+                        )
+                    )
+                except Exception:
+                    continue
+        finally:
+            await conn.close()
+
+        return results
 
     async def run_scalar_query(self, sql: str, timeout_seconds: float) -> float | None:
         """Fase 2, item 2 (`rule_type="custom_sql"`) — `sql` ja deve ter passado por
@@ -1714,6 +1829,62 @@ class PostgreSQLCollector:
             )
             for r in rows
             if r["queryid"] is not None
+        ]
+
+    async def collect_unused_indexes(self) -> list[NormalizedUnusedIndex]:
+        """Fase 5 T69 — indices com zero scans (on-demand). Exclui PKs."""
+        settings = get_settings()
+        conn = await asyncio.wait_for(
+            self._connect(), timeout=self._connection_params.connect_timeout_seconds
+        )
+        try:
+            rows = await asyncio.wait_for(
+                conn.fetch(_UNUSED_INDEXES_QUERY),
+                timeout=settings.collection_query_timeout_seconds,
+            )
+        finally:
+            await conn.close()
+
+        return [
+            NormalizedUnusedIndex(
+                schema_name=str(row["schema_name"]),
+                table_name=str(row["table_name"]),
+                index_name=str(row["index_name"]),
+                index_size_bytes=int(row["index_size_bytes"] or 0),
+                idx_scan=int(row["idx_scan"] or 0),
+            )
+            for row in rows
+        ]
+
+    async def collect_table_io_stats(self) -> list[NormalizedTableIoStats]:
+        """Fase 5 T68 — I/O de tabelas por seq_scan (on-demand)."""
+        settings = get_settings()
+        conn = await asyncio.wait_for(
+            self._connect(), timeout=self._connection_params.connect_timeout_seconds
+        )
+        try:
+            rows = await asyncio.wait_for(
+                conn.fetch(_TABLE_IO_STATS_QUERY),
+                timeout=settings.collection_query_timeout_seconds,
+            )
+        finally:
+            await conn.close()
+
+        return [
+            NormalizedTableIoStats(
+                schema_name=str(row["schema_name"]),
+                table_name=str(row["table_name"]),
+                seq_scan=int(row["seq_scan"] or 0),
+                idx_scan=int(row["idx_scan"] or 0),
+                n_live_tup=int(row["n_live_tup"] or 0),
+                n_dead_tup=int(row["n_dead_tup"] or 0),
+                table_size_bytes=int(row["table_size_bytes"] or 0),
+                last_analyze=row["last_analyze"],
+                last_autoanalyze=row["last_autoanalyze"],
+                last_vacuum=row["last_vacuum"],
+                last_autovacuum=row["last_autovacuum"],
+            )
+            for row in rows
         ]
 
     async def close(self) -> None:

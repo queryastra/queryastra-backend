@@ -67,6 +67,7 @@ class InstancesRepository(BaseRepository):
         self,
         instance_id: UUID,
         *,
+        name: str | None = None,
         polling_interval_seconds: int | None = None,
         criticality: str | None = None,
     ) -> Instance | None:
@@ -86,6 +87,8 @@ class InstancesRepository(BaseRepository):
         instance = await self.get_by_id(instance_id)
         if instance is None:
             return None
+        if name is not None:
+            instance.name = name
         if polling_interval_seconds is not None:
             instance.polling_interval_seconds = polling_interval_seconds
         if criticality is not None:

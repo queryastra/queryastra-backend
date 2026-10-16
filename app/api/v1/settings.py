@@ -33,6 +33,10 @@ class SystemSettingsResponse(BaseModel):
     smtp_username: str | None
     smtp_from_address: str | None
     smtp_configured: bool
+    ai_provider: str | None
+    ai_base_url: str | None
+    ai_model: str | None
+    ai_configured: bool
 
 
 class SystemSettingsUpdateRequest(BaseModel):
@@ -47,6 +51,12 @@ class SystemSettingsUpdateRequest(BaseModel):
     smtp_password: str | None = Field(default=None)
     smtp_from_address: str | None = Field(default=None)
     smtp_save: bool = Field(default=False)
+    # IA (BYOK) — enviado em bloco quando o card de IA for salvo
+    ai_provider: str | None = Field(default=None)
+    ai_api_key: str | None = Field(default=None)
+    ai_base_url: str | None = Field(default=None)
+    ai_model: str | None = Field(default=None)
+    ai_save: bool = Field(default=False)
 
 
 def get_system_settings_repository(
@@ -64,6 +74,10 @@ def _to_response(row: SystemSettings) -> SystemSettingsResponse:
         smtp_username=row.smtp_username,
         smtp_from_address=row.smtp_from_address,
         smtp_configured=bool(row.smtp_password_encrypted),
+        ai_provider=row.ai_provider,
+        ai_base_url=row.ai_base_url,
+        ai_model=row.ai_model,
+        ai_configured=bool(row.ai_api_key_encrypted),
     )
 
 
@@ -163,5 +177,12 @@ async def update_system_settings(
             username=payload.smtp_username,
             raw_password=payload.smtp_password,
             from_address=payload.smtp_from_address,
+        )
+    if payload.ai_save:
+        row = await repository.update_ai_settings(
+            provider=payload.ai_provider,
+            raw_api_key=payload.ai_api_key,
+            base_url=payload.ai_base_url,
+            model=payload.ai_model,
         )
     return _to_response(row)

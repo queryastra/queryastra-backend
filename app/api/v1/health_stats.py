@@ -1,4 +1,4 @@
-"""Endpoints on-demand de saude do banco — Fase 5 (T55, T57, T58, T59, T61, T62, T63, T64, T65).
+"""Endpoints on-demand de saude do banco — Fase 5 (T55, T57, T58, T59, T61, T62, T63, T64, T65, T68, T69).
 
 Todos os endpoints consultam diretamente o servidor monitorado a cada requisicao (sem
 persistencia), exceto T62 que agrega dados do `query_samples` local.
@@ -322,6 +322,28 @@ class TempDbStatsResponse(BaseModel):
     pagelatch_wait_ms: int
 
 
+class UnusedIndexResponse(BaseModel):
+    schema_name: str
+    table_name: str
+    index_name: str
+    index_size_bytes: int
+    idx_scan: int
+
+
+class TableIoStatsResponse(BaseModel):
+    schema_name: str
+    table_name: str
+    seq_scan: int
+    idx_scan: int
+    n_live_tup: int
+    n_dead_tup: int
+    table_size_bytes: int
+    last_analyze: datetime | None
+    last_autoanalyze: datetime | None
+    last_vacuum: datetime | None
+    last_autovacuum: datetime | None
+
+
 class WaitHeatmapBucketResponse(BaseModel):
     bucket: str
     wait_type: str
@@ -522,3 +544,53 @@ async def get_query_trends(
     # Ordena: maior regression_ratio primeiro, depois por current_mean_ms desc
     result.sort(key=lambda s: (-(s.regression_ratio or 0), -(s.current_mean_ms or 0)))
     return result
+
+
+@router.get("/{instance_id}/unused-indexes", response_model=list[UnusedIndexResponse])
+async def get_unused_indexes(
+    instance_id: UUID,
+    _access: Annotated[None, Depends(check_instance_access)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    credential_resolver: CredentialResolver = Depends(CredentialResolver),  # noqa: B008
+) -> list[UnusedIndexResponse]:
+    """Indices com zero scans desde o ultimo stats reset (PostgreSQL only) — Fase 5, T69.
+
+    Indices nunca usados desperdicam espaco e penalizam escritas. Consulta on-demand."""
+    collector = await _build_collector(instance_id, session, credential_resolver)
+    try:
+        entries = await collector.collect_unused_indexes()
+    except Exception as exc:
+        logger.exception("Erro ao coletar unused indexes para instance_id=%s", instance_id)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Erro ao consultar unused indexes na instancia.",
+        ) from exc
+    finally:
+        await collector.close()
+
+    return [UnusedIndexResponse(**e.model_dump()) for e in entries]
+
+
+@router.get("/{instance_id}/table-io-stats", response_model=list[TableIoStatsResponse])
+async def get_table_io_stats(
+    instance_id: UUID,
+    _access: Annotated[None, Depends(check_instance_access)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    credential_resolver: CredentialResolver = Depends(CredentialResolver),  # noqa: B008
+) -> list[TableIoStatsResponse]:
+    """Estatisticas de I/O de tabelas ordenadas por seq_scan (PostgreSQL only) — Fase 5, T68.
+
+    Tabelas com seq_scan alto e idx_scan baixo sao candidatas a novos indices. Consulta on-demand."""
+    collector = await _build_collector(instance_id, session, credential_resolver)
+    try:
+        entries = await collector.collect_table_io_stats()
+    except Exception as exc:
+        logger.exception("Erro ao coletar table IO stats para instance_id=%s", instance_id)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Erro ao consultar table IO stats na instancia.",
+        ) from exc
+    finally:
+        await collector.close()
+
+    return [TableIoStatsResponse(**e.model_dump()) for e in entries]

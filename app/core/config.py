@@ -109,6 +109,21 @@ class Settings(BaseSettings):
     # servico fora) degrada para "indisponivel", nunca derruba a tela de detalhe de query.
     sql_insight_timeout_seconds: float = Field(default=3.0, alias="SQL_INSIGHT_TIMEOUT_SECONDS")
 
+    # ── IA para diagnóstico contextual de queries (painel "Recomendações") ────────────
+    # Provedor de IA: "openai" (padrão; também serve Azure OpenAI e Ollama via AI_BASE_URL),
+    # "anthropic" (Anthropic Claude). Sem configuração = painel aparece com mensagem
+    # instruindo como ativar, nunca um erro.
+    ai_provider: str | None = Field(default=None, alias="AI_PROVIDER")
+    # Chave de API do provedor (obrigatória para openai/anthropic; Ollama self-hosted dispensa).
+    ai_api_key: str | None = Field(default=None, alias="AI_API_KEY")
+    # Base URL customizada — para Azure OpenAI (ex.: https://meu-recurso.openai.azure.com)
+    # ou Ollama (ex.: http://localhost:11434). Vazio = endpoint padrão do provedor.
+    ai_base_url: str | None = Field(default=None, alias="AI_BASE_URL")
+    # Modelo a usar. Padrão por provedor: openai→gpt-4o-mini, anthropic→claude-haiku-5-5.
+    ai_model: str | None = Field(default=None, alias="AI_MODEL")
+    # Timeout (segundos) para a chamada ao provedor de IA.
+    ai_timeout_seconds: float = Field(default=20.0, alias="AI_TIMEOUT_SECONDS")
+
     # Liga o supervisor de checagem de indices ausentes (MissingIndexSupervisor,
     # ARCHITECTURE_SPEC.md Q18/Q21) no lifespan do backend. Default false - mesma politica de
     # seguranca dos demais workers (nunca ligar coleta real sem configuracao explicita).

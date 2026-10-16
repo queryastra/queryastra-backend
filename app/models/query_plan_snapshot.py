@@ -17,7 +17,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Text
+from sqlalchemy import DateTime, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
@@ -39,6 +39,9 @@ class QueryPlanSnapshot(Base):
     sql_hash: Mapped[str] = mapped_column(Text, nullable=False)
     plan_hash: Mapped[str] = mapped_column(Text, nullable=False)
     plan_xml_masked: Mapped[str] = mapped_column(Text, nullable=False)
+    plan_format: Mapped[str] = mapped_column(
+        String(30), nullable=False, server_default="sqlserver_xml"
+    )
     last_execution_time: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

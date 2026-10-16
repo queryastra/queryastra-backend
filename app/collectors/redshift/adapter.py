@@ -17,6 +17,7 @@ from app.collectors.connection import ConnectionParams
 from app.collectors.postgresql.pg_backed import PostgreSQLBackedCollector
 from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.normalizers.models import NormalizedPlanSnapshot
 
 logger = get_logger(__name__)
 
@@ -72,3 +73,9 @@ class RedshiftCollector(PostgreSQLBackedCollector):
             )
 
         return results
+
+    async def explain_queries(
+        self, queries: list[tuple[str, str]]
+    ) -> list[NormalizedPlanSnapshot]:
+        # Redshift não suporta EXPLAIN FORMAT JSON — retorna lista vazia sem tentar conectar.
+        return []

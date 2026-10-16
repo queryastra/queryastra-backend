@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -171,12 +171,13 @@ class InstanceSettingsUpdateRequest(BaseModel):
     `polling_interval_seconds`; sub-tela "Geral" manda só `criticality`); pelo menos um precisa
     vir preenchido."""
 
+    name: str | None = Field(default=None, min_length=1)
     polling_interval_seconds: int | None = Field(default=None, ge=1)
     criticality: str | None = Field(default=None, pattern="^(critical|standard)$")
 
     @model_validator(mode="after")
     def _require_at_least_one_field(self) -> InstanceSettingsUpdateRequest:
-        if self.polling_interval_seconds is None and self.criticality is None:
+        if self.name is None and self.polling_interval_seconds is None and self.criticality is None:
             raise ValueError("informe ao menos um campo para atualizar")
         return self
 
@@ -267,11 +268,14 @@ def get_instance_database_sleeping_overrides_repository(
 
 @router.post("", response_model=InstanceDetailResponse, status_code=status.HTTP_201_CREATED)
 async def create_instance(
+    request: Request,
     payload: InstanceCreateRequest,
     service: Annotated[InstanceService, Depends(get_instance_service)],
-    _: Annotated[CurrentUser, Depends(require_admin)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    current_admin: Annotated[CurrentUser, Depends(require_admin)],
 ) -> InstanceDetailResponse:
     """Testa a conexao e, se as capacidades mandatorias estiverem OK, cadastra a instancia."""
+    ip = request.client.host if request.client else None
     password = payload.password.get_secret_value() if payload.password is not None else None
     register_input = RegisterInstanceInput(
         name=payload.name,
@@ -288,6 +292,16 @@ async def create_instance(
     try:
         instance = await service.register_instance(register_input)
     except InstanceRegistrationRejected as exc:
+        await record_audit(
+            session,
+            actor=current_admin.username,
+            action="instance.create_failed",
+            ip_address=ip,
+            target_type="instance",
+            target_name=payload.name,
+            detail={"db_type": payload.db_type, "host": payload.host, "port": payload.port},
+        )
+        await session.commit()
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={
@@ -295,6 +309,17 @@ async def create_instance(
                 "capabilities": _capabilities_to_dicts(exc.capabilities),
             },
         ) from exc
+    await record_audit(
+        session,
+        actor=current_admin.username,
+        action="instance.create",
+        ip_address=ip,
+        target_type="instance",
+        target_id=str(instance.id),
+        target_name=instance.name,
+        detail={"db_type": instance.db_type, "host": instance.host, "port": instance.port},
+    )
+    await session.commit()
     # Instancia recem-criada nunca tem telemetria ainda — usa `UNKNOWN_STATUS` direto, sem
     # `InstanceDerivedStatusService`/sem Depends novo neste endpoint especifico. Isso evita
     # exigir `MetricSamplesRepository` no fluxo de criacao, o que quebraria
@@ -372,16 +397,30 @@ async def list_instances(
 
 @router.delete("/{instance_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_instance(
+    request: Request,
     instance_id: UUID,
     repository: Annotated[InstancesRepository, Depends(get_instances_repository)],
-    _: Annotated[CurrentUser, Depends(require_admin)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    current_admin: Annotated[CurrentUser, Depends(require_admin)],
 ) -> None:
     """Exclui o cadastro da instância e seus dados dependentes."""
-    deleted = await repository.delete(instance_id)
-    if not deleted:
+    instance = await repository.get_by_id(instance_id)
+    if instance is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Instancia nao encontrada."
         )
+    instance_name = instance.name
+    await repository.delete(instance_id)
+    await record_audit(
+        session,
+        actor=current_admin.username,
+        action="instance.delete",
+        ip_address=request.client.host if request.client else None,
+        target_type="instance",
+        target_id=str(instance_id),
+        target_name=instance_name,
+    )
+    await session.commit()
 
 
 @router.get("/{instance_id}", response_model=InstanceDetailResponse)
@@ -454,11 +493,13 @@ async def set_instance_active(
 async def update_instance_settings(
     instance_id: UUID,
     payload: InstanceSettingsUpdateRequest,
+    request: Request,
     repository: Annotated[InstancesRepository, Depends(get_instances_repository)],
     status_service: Annotated[
         InstanceDerivedStatusService, Depends(get_instance_derived_status_service)
     ],
-    _: Annotated[CurrentUser, Depends(require_admin)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    current_admin: Annotated[CurrentUser, Depends(require_admin)],
 ) -> InstanceDetailResponse:
     """Tela de Configurações — atualiza qualquer combinação dos campos informados, sem
     restrição de acesso hoje (será limitada por RBAC quando essa feature existir, Fase 2).
@@ -466,6 +507,7 @@ async def update_instance_settings(
     novo intervalo passa a valer sozinho na próxima reconciliação, sem restart do backend."""
     instance = await repository.update_settings(
         instance_id,
+        name=payload.name,
         polling_interval_seconds=payload.polling_interval_seconds,
         criticality=payload.criticality,
     )
@@ -473,6 +515,24 @@ async def update_instance_settings(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Instancia nao encontrada."
         )
+    changed: dict[str, object] = {}
+    if payload.name is not None:
+        changed["name"] = payload.name
+    if payload.polling_interval_seconds is not None:
+        changed["polling_interval_seconds"] = payload.polling_interval_seconds
+    if payload.criticality is not None:
+        changed["criticality"] = payload.criticality
+    await record_audit(
+        session,
+        actor=current_admin.username,
+        action="instance.settings_changed",
+        target_type="instance",
+        target_id=str(instance_id),
+        target_name=instance.name,
+        ip_address=request.client.host if request.client else None,
+        detail={"changed": changed},
+    )
+    await session.commit()
     derived = await status_service.compute(instance_id)
     return InstanceDetailResponse(
         **InstanceResponse.model_validate(instance).model_dump(),

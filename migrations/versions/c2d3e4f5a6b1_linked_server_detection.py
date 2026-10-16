@@ -15,7 +15,9 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import UUID
 
 revision = "c2d3e4f5a6b1"
-down_revision = "b1c2d3e4f5a6"
+# Merge: depends on both add_new_db_types (b1c2d3) AND the migration that creates
+# blocking_incidents (c7a1f3). Without this, Alembic runs c2 before c7 on fresh DBs.
+down_revision = ("b1c2d3e4f5a6", "c7a1f3d9e5b2")
 branch_labels = None
 depends_on = None
 

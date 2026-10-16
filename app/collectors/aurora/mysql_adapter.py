@@ -156,3 +156,8 @@ class AuroraMySQLCollector:
 
     async def scan_plan_history(self) -> list[NormalizedPlanSnapshot]:
         return await self._mysql.scan_plan_history()
+
+    async def explain_queries(
+        self, queries: list[tuple[str, str]]
+    ) -> list[NormalizedPlanSnapshot]:
+        return await self._mysql.explain_queries(queries)

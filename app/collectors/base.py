@@ -39,8 +39,10 @@ from app.normalizers.models import (
     NormalizedPlanSnapshot,
     NormalizedQuerySample,
     NormalizedReplicationSlot,
+    NormalizedTableIoStats,
     NormalizedTempDbStats,
     NormalizedTransactionEvent,
+    NormalizedUnusedIndex,
     NormalizedUserFunction,
     NormalizedVacuumTableStats,
 )
@@ -270,6 +272,18 @@ class Collector(Protocol):
         """
         ...
 
+    async def explain_queries(
+        self, queries: list[tuple[str, str]]
+    ) -> list[NormalizedPlanSnapshot]:
+        """Gera planos via EXPLAIN/V$SQL_PLAN para as queries informadas.
+
+        Chamado pelo `PlanHistorySupervisor` para engines sem cache de plano exposto
+        (PostgreSQL, MySQL, Oracle, etc.). `queries` e lista de (sql_hash, sql_text_masked).
+        Retorna lista vazia quando o engine nao suporta (SQL Server, DB2, Redshift, etc.) ou
+        quando nenhuma query foi informada — nunca propaga excecao.
+        """
+        ...
+
     async def collect_vacuum_stats(
         self,
     ) -> tuple[list[NormalizedVacuumTableStats], list[NormalizedAutovacuumWorker]]:
@@ -361,5 +375,21 @@ class Collector(Protocol):
         Periodico (nao on-demand): chamado pelo QueryStatsSupervisor a cada hora.
         PostgreSQL only — retorna lista vazia em engines sem suporte.
         Requer extensao pg_stat_statements instalada; captura graciosamente lista vazia se ausente.
+        """
+        ...
+
+    async def collect_unused_indexes(self) -> list[NormalizedUnusedIndex]:
+        """Indices com idx_scan = 0 desde o ultimo stats reset — Fase 5, T69.
+
+        On-demand. Exclui chaves primarias. Ordenado por tamanho DESC.
+        PostgreSQL only — retorna lista vazia em engines sem suporte.
+        """
+        ...
+
+    async def collect_table_io_stats(self) -> list[NormalizedTableIoStats]:
+        """Estatísticas de I/O de tabelas ordenadas por seq_scan — Fase 5, T68.
+
+        On-demand. Tabelas com muitos seq_scan e poucos idx_scan sao candidatas a novos indices.
+        PostgreSQL only — retorna lista vazia em engines sem suporte.
         """
         ...

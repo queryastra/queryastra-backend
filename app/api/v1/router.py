@@ -10,6 +10,8 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from app.api.v1 import (
+    ai_deep_analysis,
+    ai_keys,
     alerts,
     audit_log,
     auth,
@@ -51,12 +53,14 @@ api_v1_router.include_router(backup_status.router, prefix="/backup-status", tags
 api_v1_router.include_router(transactions.router, prefix="/transactions", tags=["transactions"])
 api_v1_router.include_router(deadlocks.router, prefix="/deadlocks", tags=["deadlocks"])
 api_v1_router.include_router(settings.router, prefix="/settings", tags=["settings"])
+api_v1_router.include_router(ai_keys.router, prefix="/ai-keys", tags=["ai-keys"])
 api_v1_router.include_router(topology.router, prefix="/topology", tags=["topology"])
 api_v1_router.include_router(capacity.router, prefix="/capacity", tags=["capacity"])
 api_v1_router.include_router(reports.router, prefix="/reports", tags=["reports"])
 api_v1_router.include_router(status.router, prefix="/status", tags=["status"])
 api_v1_router.include_router(vacuum.router, prefix="/instances", tags=["vacuum"])
 api_v1_router.include_router(health_stats.router, prefix="/instances", tags=["health-stats"])
+api_v1_router.include_router(ai_deep_analysis.router, prefix="/instances", tags=["ai-deep-analysis"])
 api_v1_router.include_router(websocket.router, tags=["websocket"])
 
 # Endpoint de health-check do backend em si (nao confundir com health-check de instancia
