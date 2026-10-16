@@ -38,16 +38,16 @@ class ExecutionPlanResult:
 
 
 _POSTGRESQL_NOT_SUPPORTED_REASON = (
-    "PostgreSQL nao expoe plano de execucao via SQL — pg_stat_statements nao guarda plano, e "
-    "auto_explain so escreve no log do servidor (sem funcao SQL-acessivel)."
+    "PostgreSQL does not expose execution plans via SQL — pg_stat_statements does not store plans, "
+    "and auto_explain only writes to the server log (no SQL-accessible function)."
 )
 _PLAN_NOT_FOUND_REASON = (
-    "Plano não encontrado no cache nem no Query Store — pode ter sido removido (memória, "
-    "recompilação, limite de retenção do Query Store) desde a última execução. Mais provável "
-    "de encontrar logo após ver a query rodando ao vivo."
+    "Plan not found in cache or Query Store — it may have been evicted (memory pressure, "
+    "recompilation, Query Store retention limit) since the last execution. Most likely to be found "
+    "immediately after observing the query running live."
 )
-_CREDENTIAL_MISSING_REASON = "Credencial da instancia nao configurada."
-_CREDENTIAL_RESOLUTION_FAILED_REASON = "Falha ao resolver a credencial da instancia."
+_CREDENTIAL_MISSING_REASON = "Instance credential not configured."
+_CREDENTIAL_RESOLUTION_FAILED_REASON = "Failed to resolve the instance credential."
 
 
 async def fetch_execution_plan(

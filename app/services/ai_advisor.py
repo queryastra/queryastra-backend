@@ -332,26 +332,26 @@ def _build_user_prompt(
     plan_findings: list[dict],
     object_text_masked: str | None = None,
 ) -> str:
-    lines = [f"## Contexto\n- Banco: {db_type}"]
+    lines = [f"## Context\n- Database: {db_type}"]
     if avg_duration_ms is not None:
-        lines.append(f"- Duração média: {avg_duration_ms:.0f} ms")
+        lines.append(f"- Average duration: {avg_duration_ms:.0f} ms")
 
     if sql_findings:
-        lines.append("\n## Achados estáticos (regras de código)")
-        for f in sql_findings[:8]:  # limita para não exceder tokens
+        lines.append("\n## Static findings (code rules)")
+        for f in sql_findings[:8]:
             lines.append(f"- [{f.get('rule_id')} {f.get('severity')}] {f.get('description')}")
 
     if plan_findings:
-        lines.append("\n## Achados do plano de execução")
+        lines.append("\n## Execution plan findings")
         for f in plan_findings[:6]:
             op = f.get("operator") or ""
             obj = f.get("object_name") or ""
             suffix = f" ({op}{' — ' + obj if obj else ''})" if op else ""
             lines.append(f"- [{f.get('finding_id')} {f.get('severity')}]{suffix} {f.get('description')}")
 
-    lines.append(f"\n## Statement em execução (valores mascarados)\n```sql\n{sql_text[:2000]}\n```")
+    lines.append(f"\n## Running statement (values masked)\n```sql\n{sql_text[:2000]}\n```")
 
     if object_text_masked and object_text_masked.strip() != sql_text.strip():
-        lines.append(f"\n## Código completo do objeto (batch/procedure, valores mascarados)\n```sql\n{object_text_masked[:4000]}\n```")
+        lines.append(f"\n## Full object source (batch/procedure, values masked)\n```sql\n{object_text_masked[:4000]}\n```")
 
     return "\n".join(lines)
