@@ -29,17 +29,35 @@ _DEFAULT_MODELS = {
     "anthropic": "claude-haiku-5-5",
 }
 
-_SYSTEM_PROMPT = (
-    "Você é um DBA sênior especialista em performance de banco de dados. "
-    "Analise o statement SQL em execução e, quando disponível, o código completo do objeto "
-    "(batch/procedure/function) em que ele aparece. Use o contexto completo para identificar "
-    "problemas de lógica, estrutura e performance no objeto como um todo, não apenas no statement isolado. "
-    "Produza um diagnóstico CONCISO e ACIONÁVEL em até 4 parágrafos curtos. "
-    "Foque em: (1) causa provável do problema, "
-    "(2) o impacto observado, (3) as 2-3 ações mais importantes a tomar. "
-    "Não liste cada achado individualmente — sintetize uma narrativa. "
-    "Responda em português do Brasil. Seja direto, sem introduções genéricas."
+_LOCALE_TO_LANGUAGE: dict[str, str] = {
+    "pt-BR": "Brazilian Portuguese",
+    "pt-PT": "European Portuguese",
+    "en": "English",
+    "es": "Spanish",
+    "de": "German",
+    "fr": "French",
+    "it": "Italian",
+    "nl": "Dutch",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "zh-CN": "Simplified Chinese",
+}
+
+_BASE_QUERY_SYSTEM_PROMPT = (
+    "You are a senior DBA specializing in database performance. "
+    "Analyze the running SQL statement and, when available, the full source of the object "
+    "(batch/procedure/function) it belongs to. Use the full context to identify logic, "
+    "structural, and performance problems in the object as a whole, not just the isolated statement. "
+    "Produce a CONCISE and ACTIONABLE diagnosis in up to 4 short paragraphs. "
+    "Focus on: (1) likely root cause, (2) observed impact, (3) the 2-3 most important actions to take. "
+    "Do not list each finding individually — synthesize a narrative. "
+    "Respond in {language}. Be direct, with no generic introductions."
 )
+
+
+def _build_query_system_prompt(locale: str) -> str:
+    language = _LOCALE_TO_LANGUAGE.get(locale, "English")
+    return _BASE_QUERY_SYSTEM_PROMPT.format(language=language)
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,19 +102,21 @@ class AiAdvisor:
         sql_findings: list[dict],
         plan_findings: list[dict],
         object_text_masked: str | None = None,
+        locale: str = "en",
     ) -> AiAnalysis:
         if not self.is_configured:
             return AiAnalysis(configured=False)
 
+        system_prompt = _build_query_system_prompt(locale)
         user_content = _build_user_prompt(
             sql_text_masked, db_type, avg_duration_ms, sql_findings, plan_findings,
             object_text_masked=object_text_masked,
         )
         try:
             if self._provider == "anthropic":
-                narrative, tokens = await self._call_anthropic(user_content)
+                narrative, tokens = await self._call_anthropic(user_content, system_prompt=system_prompt)
             else:
-                narrative, tokens = await self._call_openai_compat(user_content)
+                narrative, tokens = await self._call_openai_compat(user_content, system_prompt=system_prompt)
         except httpx.HTTPStatusError as exc:
             body = exc.response.text[:300] if exc.response.content else "(sem corpo)"
             logger.warning(
@@ -223,12 +243,14 @@ class MultiKeyAiAdvisor:
         sql_findings: list[dict],
         plan_findings: list[dict],
         object_text_masked: str | None = None,
+        locale: str = "en",
     ) -> AiAnalysis:
         if not self._key_advisors:
             return AiAnalysis(configured=False)
 
         from app.repositories.ai_api_key_repository import AiApiKeyRepository
 
+        system_prompt = _build_query_system_prompt(locale)
         for row, repo, advisor in self._key_advisors:
             if AiApiKeyRepository.is_in_error_cooldown(row):
                 logger.warning("Pulando chave '%s' (cooldown ativo, last_error_at=%s)", row.name, row.last_error_at)
@@ -247,9 +269,9 @@ class MultiKeyAiAdvisor:
             )
             try:
                 if advisor._provider == "anthropic":
-                    narrative, tokens = await advisor._call_anthropic(user_content)
+                    narrative, tokens = await advisor._call_anthropic(user_content, system_prompt=system_prompt)
                 else:
-                    narrative, tokens = await advisor._call_openai_compat(user_content)
+                    narrative, tokens = await advisor._call_openai_compat(user_content, system_prompt=system_prompt)
 
                 await repo.record_success(row, tokens)
                 return AiAnalysis(configured=True, narrative=narrative, tokens_consumed=tokens)

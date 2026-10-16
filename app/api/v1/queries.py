@@ -1356,6 +1356,7 @@ async def get_query_recommendations(
     ai_advisor: Annotated[AiAdvisor | MultiKeyAiAdvisor, Depends(get_ai_advisor)],
     since: Annotated[datetime | None, Query(alias="from")] = None,
     until: Annotated[datetime | None, Query(alias="to")] = None,
+    locale: str = "en",
 ) -> RecommendationsResponse:
     """Recomendações contextuais: regras estáticas (sql_advisor), análise de plano (plan_advisor)
     e diagnóstico opcional por IA (ai_advisor). Endpoint isolado — carregamento independente do
@@ -1435,6 +1436,7 @@ async def get_query_recommendations(
         sql_findings=[f.model_dump() for f in sql_findings],
         plan_findings=[f.model_dump() for f in plan_findings],
         object_text_masked=object_text,
+        locale=locale,
     )
 
     return RecommendationsResponse(
