@@ -224,11 +224,11 @@ def analyze_plan(plan_xml: str) -> list[PlanFinding]:
             _add(PlanFinding(
                 finding_id="P001",
                 severity="warning",
-                description="Key Lookup detectado — o índice não cobre todas as colunas necessárias.",
+                description="Key Lookup detected — the index does not cover all required columns.",
                 suggestion=(
-                    "Crie um índice covering com as colunas projetadas no INCLUDE. "
-                    "Key Lookup elimina o acesso direto à linha base (RID/clustered), "
-                    "mas ainda faz uma leitura extra por linha."
+                    "Create a covering index with the projected columns in INCLUDE. "
+                    "Key Lookup eliminates direct access to the base row (RID/clustered), "
+                    "but still performs one extra read per row."
                 ),
                 operator="Key Lookup",
                 object_name=node.object_name,
@@ -240,11 +240,11 @@ def analyze_plan(plan_xml: str) -> list[PlanFinding]:
             _add(PlanFinding(
                 finding_id="P002",
                 severity="warning",
-                description=f"Sort com {pct_str} do custo total — dados não chegam na ordem desejada.",
+                description=f"Sort consuming {pct_str} of total cost — data does not arrive in the desired order.",
                 suggestion=(
-                    "Crie um índice com as colunas do ORDER BY / GROUP BY na mesma ordem. "
-                    "Sort explícito no plano significa que o otimizador não encontrou "
-                    "um índice ordenado adequado."
+                    "Create an index with ORDER BY / GROUP BY columns in the same order. "
+                    "An explicit Sort in the plan means the optimizer did not find "
+                    "a suitable ordered index."
                 ),
                 operator="Sort",
             ))
@@ -255,10 +255,10 @@ def analyze_plan(plan_xml: str) -> list[PlanFinding]:
             _add(PlanFinding(
                 finding_id="P003",
                 severity="warning",
-                description=f"{op} com {pct_str} do custo total — varredura completa da tabela.",
+                description=f"{op} consuming {pct_str} of total cost — full table scan.",
                 suggestion=(
-                    "Avalie criar um índice nas colunas do filtro WHERE. "
-                    f"Um {op} lê todas as linhas da tabela independente do filtro aplicado."
+                    "Consider creating an index on the WHERE filter columns. "
+                    f"A {op} reads all rows in the table regardless of the applied filter."
                 ),
                 operator=op,
                 object_name=node.object_name,
@@ -273,13 +273,13 @@ def analyze_plan(plan_xml: str) -> list[PlanFinding]:
                     finding_id="P004",
                     severity="warning",
                     description=(
-                        f"Erro de estimativa de cardinalidade: estimado {node.estimate_rows:.0f} linhas, "
-                        f"real {node.actual_rows:.0f} ({direction}estimado {abs(ratio):.0f}x)."
+                        f"Cardinality estimation error: estimated {node.estimate_rows:.0f} rows, "
+                        f"actual {node.actual_rows:.0f} ({direction}estimated {abs(ratio):.0f}x)."
                     ),
                     suggestion=(
-                        "Estatísticas desatualizadas ou parameter sniffing. "
-                        "Tente UPDATE STATISTICS com FULLSCAN ou adicione OPTION (RECOMPILE) "
-                        "para forçar recompilação com os parâmetros reais."
+                        "Stale statistics or parameter sniffing. "
+                        "Try UPDATE STATISTICS with FULLSCAN or add OPTION (RECOMPILE) "
+                        "to force recompilation with the actual parameters."
                     ),
                     operator=op or None,
                     object_name=node.object_name,
@@ -290,11 +290,11 @@ def analyze_plan(plan_xml: str) -> list[PlanFinding]:
             _add(PlanFinding(
                 finding_id="P005",
                 severity="critical",
-                description="SpillToTempDb — Sort ou Hash Match derramou dados no disco por falta de memória.",
+                description="SpillToTempDb — Sort or Hash Match spilled data to disk due to insufficient memory grant.",
                 suggestion=(
-                    "O grant de memória foi insuficiente (estimativa de linhas errada). "
-                    "Corrija as estatísticas para melhorar o grant, ou ajuste max server memory / "
-                    "Resource Governor se o servidor tiver memória disponível."
+                    "The memory grant was insufficient (wrong row estimate). "
+                    "Fix statistics to improve the grant, or tune max server memory / "
+                    "Resource Governor if the server has available memory."
                 ),
                 operator=op or None,
             ))
@@ -304,10 +304,10 @@ def analyze_plan(plan_xml: str) -> list[PlanFinding]:
             _add(PlanFinding(
                 finding_id="P006",
                 severity="critical",
-                description="NoJoinPredicate — JOIN sem condição (produto cartesiano).",
+                description="NoJoinPredicate — JOIN without a condition (Cartesian product).",
                 suggestion=(
-                    "Verifique as condições de JOIN. Um JOIN sem predicado multiplica "
-                    "todas as linhas de uma tabela pelas da outra."
+                    "Check JOIN conditions. A JOIN without a predicate multiplies "
+                    "all rows from one table by those from the other."
                 ),
                 operator=op or None,
             ))
@@ -317,10 +317,10 @@ def analyze_plan(plan_xml: str) -> list[PlanFinding]:
             _add(PlanFinding(
                 finding_id="P007",
                 severity="info",
-                description="Colunas sem estatísticas — otimizador usou estimativas padrão (possivelmente incorretas).",
+                description="Columns without statistics — optimizer used default estimates (possibly incorrect).",
                 suggestion=(
-                    "Crie estatísticas nas colunas filtradas: "
-                    "CREATE STATISTICS stat_nome ON tabela(coluna) WITH FULLSCAN"
+                    "Create statistics on the filtered columns: "
+                    "CREATE STATISTICS stat_name ON table(column) WITH FULLSCAN"
                 ),
                 operator=op or None,
                 object_name=node.object_name,
@@ -335,13 +335,13 @@ def analyze_plan(plan_xml: str) -> list[PlanFinding]:
                     finding_id="P008",
                     severity="info",
                     description=(
-                        f"Nested Loops com ~{outer_rows:,.0f} linhas estimadas no outer input — "
-                        "pode ser lento se o inner input não tiver seek eficiente."
+                        f"Nested Loops with ~{outer_rows:,.0f} estimated rows on the outer input — "
+                        "may be slow if the inner input does not have an efficient seek."
                     ),
                     suggestion=(
-                        "Verifique se o inner input do loop usa Index Seek. "
-                        "Para grandes volumes, Hash Match ou Merge Join podem ser mais eficientes "
-                        "— use OPTION (HASH JOIN) ou OPTION (MERGE JOIN) para comparar."
+                        "Verify that the inner input of the loop uses an Index Seek. "
+                        "For large volumes, Hash Match or Merge Join may be more efficient "
+                        "— use OPTION (HASH JOIN) or OPTION (MERGE JOIN) to compare."
                     ),
                     operator="Nested Loops",
                 ))
@@ -398,12 +398,12 @@ def analyze_plan_postgresql_json(plan_json_text: str) -> list[PlanFinding]:
                 finding_id="PG01",
                 severity="warning",
                 description=(
-                    f"Seq Scan em '{relation}' representa {cost_pct:.0%} do custo total "
-                    f"({plan_rows:,.0f} linhas estimadas) — varredura completa da tabela."
+                    f"Seq Scan on '{relation}' accounts for {cost_pct:.0%} of total cost "
+                    f"({plan_rows:,.0f} estimated rows) — full table scan."
                 ),
                 suggestion=(
-                    "Crie um índice nas colunas usadas no filtro (WHERE) ou JOIN. "
-                    "Analise com EXPLAIN ANALYZE para confirmar o custo real."
+                    "Create an index on the columns used in the filter (WHERE) or JOIN. "
+                    "Use EXPLAIN ANALYZE to confirm the actual cost."
                 ),
                 operator="Seq Scan",
                 object_name=relation,
@@ -416,12 +416,12 @@ def analyze_plan_postgresql_json(plan_json_text: str) -> list[PlanFinding]:
                 finding_id="PG02",
                 severity="warning",
                 description=(
-                    f"Sort em memória/disco representa {cost_pct:.0%} do custo total. "
-                    f"Chave: {sort_key or 'desconhecida'}."
+                    f"In-memory/disk Sort accounts for {cost_pct:.0%} of total cost. "
+                    f"Key: {sort_key or 'unknown'}."
                 ),
                 suggestion=(
-                    "Crie um índice que cubra as colunas de ordenação. "
-                    "Verifique work_mem se o sort estiver derramando para disco."
+                    "Create an index covering the sort columns. "
+                    "Check work_mem if the sort is spilling to disk."
                 ),
                 operator="Sort",
             ))
@@ -432,11 +432,11 @@ def analyze_plan_postgresql_json(plan_json_text: str) -> list[PlanFinding]:
                 finding_id="PG03",
                 severity="info",
                 description=(
-                    f"{ntype} com {plan_rows:,.0f} linhas estimadas pode pressionar work_mem."
+                    f"{ntype} with {plan_rows:,.0f} estimated rows may pressure work_mem."
                 ),
                 suggestion=(
-                    "Se o plano mostrar 'Batches > 1', aumente work_mem ou adicione índice "
-                    "para permitir Merge Join (que não precisa de hash table em memória)."
+                    "If the plan shows 'Batches > 1', increase work_mem or add an index "
+                    "to allow Merge Join (which does not need an in-memory hash table)."
                 ),
                 operator=ntype,
             ))
@@ -450,12 +450,12 @@ def analyze_plan_postgresql_json(plan_json_text: str) -> list[PlanFinding]:
                     finding_id="PG04",
                     severity="warning",
                     description=(
-                        f"Estimativa errada de cardinalidade: esperado {plan_rows:,.0f} linhas, "
-                        f"real {actual_rows:,.0f} ({direction}estimado {abs(ratio):.0f}x)."
+                        f"Cardinality estimation error: expected {plan_rows:,.0f} rows, "
+                        f"actual {actual_rows:,.0f} ({direction}estimated {abs(ratio):.0f}x)."
                     ),
                     suggestion=(
-                        "Execute ANALYZE na tabela para atualizar estatísticas. "
-                        "Considere aumentar default_statistics_target para colunas skewed."
+                        "Run ANALYZE on the table to update statistics. "
+                        "Consider increasing default_statistics_target for skewed columns."
                     ),
                     operator=ntype or None,
                     object_name=relation,
@@ -469,13 +469,13 @@ def analyze_plan_postgresql_json(plan_json_text: str) -> list[PlanFinding]:
                     finding_id="PG05",
                     severity="info",
                     description=(
-                        f"Nested Loop com ~{outer_rows:,.0f} linhas no outer input — "
-                        "ineficiente se o inner input não usar Index Scan."
+                        f"Nested Loop with ~{outer_rows:,.0f} rows on the outer input — "
+                        "inefficient if the inner input does not use an Index Scan."
                     ),
                     suggestion=(
-                        "Certifique-se de que o inner input do loop usa Index Scan. "
-                        "Para grandes volumes, um Hash Join pode ser mais eficiente — "
-                        "teste com SET enable_nestloop = off."
+                        "Make sure the inner input of the loop uses an Index Scan. "
+                        "For large volumes, a Hash Join may be more efficient — "
+                        "test with SET enable_nestloop = off."
                     ),
                     operator="Nested Loop",
                 ))
@@ -536,12 +536,12 @@ def analyze_plan_mysql_json(plan_json_text: str) -> list[PlanFinding]:
                 finding_id="MY01",
                 severity="warning",
                 description=(
-                    f"Full Table Scan em '{table_name}' ({rows:,} linhas examinadas, "
-                    f"{filtered:.0f}% filtradas) — nenhum índice usado."
+                    f"Full Table Scan on '{table_name}' ({rows:,} rows examined, "
+                    f"{filtered:.0f}% filtered) — no index used."
                 ),
                 suggestion=(
-                    "Crie um índice nas colunas do WHERE/JOIN. "
-                    "Use EXPLAIN para confirmar qual índice o otimizador escolheria."
+                    "Create an index on the WHERE/JOIN columns. "
+                    "Use EXPLAIN to confirm which index the optimizer would choose."
                 ),
                 operator="ALL",
                 object_name=table_name,
@@ -553,11 +553,11 @@ def analyze_plan_mysql_json(plan_json_text: str) -> list[PlanFinding]:
                 finding_id="MY02",
                 severity="warning",
                 description=(
-                    f"Filesort em '{table_name}' — ordenação feita em memória/disco sem índice."
+                    f"Filesort on '{table_name}' — sorting done in memory/disk without an index."
                 ),
                 suggestion=(
-                    "Crie um índice composto que cubra as colunas do ORDER BY, "
-                    "de preferência o mesmo usado no WHERE para evitar scan extra."
+                    "Create a composite index covering the ORDER BY columns, "
+                    "ideally the same one used in WHERE to avoid an extra scan."
                 ),
                 operator="filesort",
                 object_name=table_name,
@@ -569,12 +569,12 @@ def analyze_plan_mysql_json(plan_json_text: str) -> list[PlanFinding]:
                 finding_id="MY03",
                 severity="warning",
                 description=(
-                    "Tabela temporária criada internamente — indica GROUP BY/DISTINCT/UNION "
-                    "sem índice adequado ou colunas TEXT/BLOB forçando disco."
+                    "Internal temporary table created — indicates GROUP BY/DISTINCT/UNION "
+                    "without a suitable index or TEXT/BLOB columns forcing disk usage."
                 ),
                 suggestion=(
-                    "Revise os índices para as colunas de agrupamento/ordenação. "
-                    "Aumente tmp_table_size e max_heap_table_size se a tabela estiver indo para disco."
+                    "Review indexes for the grouping/sorting columns. "
+                    "Increase tmp_table_size and max_heap_table_size if the table is spilling to disk."
                 ),
                 operator="temporary table",
             ))
@@ -585,12 +585,12 @@ def analyze_plan_mysql_json(plan_json_text: str) -> list[PlanFinding]:
                 finding_id="MY04",
                 severity="info",
                 description=(
-                    f"Range scan em '{table_name}' lê ~{rows:,} linhas — "
-                    "índice presente mas seletividade baixa."
+                    f"Range scan on '{table_name}' reads ~{rows:,} rows — "
+                    "index present but low selectivity."
                 ),
                 suggestion=(
-                    "Considere um índice mais seletivo ou reescreva a consulta "
-                    "para reduzir o intervalo escaneado."
+                    "Consider a more selective index or rewrite the query "
+                    "to reduce the scanned range."
                 ),
                 operator="range",
                 object_name=table_name,
@@ -636,12 +636,12 @@ def analyze_plan_oracle_text(plan_text: str) -> list[PlanFinding]:
                 finding_id="OR01",
                 severity="warning",
                 description=(
-                    f"Full Table Scan em '{obj or 'tabela'}' "
-                    f"(custo estimado: {cost:,}, linhas: {rows_est:,})."
+                    f"Full Table Scan on '{obj or 'table'}' "
+                    f"(estimated cost: {cost:,}, rows: {rows_est:,})."
                 ),
                 suggestion=(
-                    "Crie um índice nas colunas do WHERE/JOIN. "
-                    "Use INDEX hints ou verifique estatísticas com DBMS_STATS."
+                    "Create an index on the WHERE/JOIN columns. "
+                    "Use INDEX hints or check statistics with DBMS_STATS."
                 ),
                 operator="TABLE ACCESS FULL",
                 object_name=obj,
@@ -653,12 +653,12 @@ def analyze_plan_oracle_text(plan_text: str) -> list[PlanFinding]:
                 finding_id="OR02",
                 severity="warning",
                 description=(
-                    f"Operação de Sort com custo {cost:,} — "
-                    "pode usar PGA excessiva ou derramar para disco (temp)."
+                    f"Sort operation with cost {cost:,} — "
+                    "may use excessive PGA or spill to disk (temp)."
                 ),
                 suggestion=(
-                    "Crie um índice que cubra as colunas do ORDER BY/GROUP BY. "
-                    "Monitore V$SORT_USAGE e ajuste PGA_AGGREGATE_TARGET se houver spill."
+                    "Create an index covering the ORDER BY/GROUP BY columns. "
+                    "Monitor V$SORT_USAGE and tune PGA_AGGREGATE_TARGET if there is a spill."
                 ),
                 operator="SORT",
             ))
@@ -669,12 +669,12 @@ def analyze_plan_oracle_text(plan_text: str) -> list[PlanFinding]:
                 finding_id="OR03",
                 severity="info",
                 description=(
-                    f"Nested Loops com {rows_est:,} linhas estimadas — "
-                    "ineficiente se o inner não usar Index Scan."
+                    f"Nested Loops with {rows_est:,} estimated rows — "
+                    "inefficient if the inner side does not use an Index Scan."
                 ),
                 suggestion=(
-                    "Verifique se o inner do loop usa um índice. "
-                    "Para grandes volumes, considere HASH JOIN via hint /*+ USE_HASH */."
+                    "Check that the inner side of the loop uses an index. "
+                    "For large volumes, consider HASH JOIN via hint /*+ USE_HASH */."
                 ),
                 operator="NESTED LOOPS",
             ))
@@ -685,12 +685,12 @@ def analyze_plan_oracle_text(plan_text: str) -> list[PlanFinding]:
                 finding_id="OR04",
                 severity="info",
                 description=(
-                    f"Partition Full Scan em '{obj or 'objeto'}' — "
-                    "todas as partições estão sendo lidas."
+                    f"Partition Full Scan on '{obj or 'object'}' — "
+                    "all partitions are being read."
                 ),
                 suggestion=(
-                    "Verifique se o filtro inclui a chave de particionamento "
-                    "para habilitar Partition Pruning e reduzir o scan."
+                    "Check that the filter includes the partition key "
+                    "to enable Partition Pruning and reduce the scan."
                 ),
                 operator="PARTITION FULL",
                 object_name=obj,

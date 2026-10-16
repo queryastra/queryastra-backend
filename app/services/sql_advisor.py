@@ -48,10 +48,10 @@ def analyze_sql(sql_text: str, db_type: str = "sqlserver") -> list[AdvisorFindin
         findings.append(F(
             rule_id="R001",
             severity="warning",
-            description="SELECT * traz todas as colunas, incluindo colunas desnecessárias.",
+            description="SELECT * fetches all columns, including unnecessary ones.",
             suggestion=(
-                "Substitua por lista explícita de colunas. Reduz I/O de rede e disco, "
-                "e evita key lookups causados por colunas fora do índice."
+                "Replace with an explicit column list. Reduces network and disk I/O, "
+                "and avoids key lookups caused by columns outside the index."
             ),
         ))
 
@@ -60,10 +60,10 @@ def analyze_sql(sql_text: str, db_type: str = "sqlserver") -> list[AdvisorFindin
         findings.append(F(
             rule_id="R002",
             severity="warning",
-            description="Subquery correlacionada no WHERE com IN (SELECT …).",
+            description="Correlated subquery in WHERE with IN (SELECT …).",
             suggestion=(
-                "Reescreva como INNER JOIN ou EXISTS. O otimizador pode executar "
-                "a subquery repetidamente para cada linha da tabela externa."
+                "Rewrite as INNER JOIN or EXISTS. The optimizer may execute "
+                "the subquery repeatedly for each row of the outer table."
             ),
         ))
 
@@ -72,10 +72,10 @@ def analyze_sql(sql_text: str, db_type: str = "sqlserver") -> list[AdvisorFindin
         findings.append(F(
             rule_id="R003",
             severity="warning",
-            description="LIKE com wildcard à esquerda impede uso de índice (Full Scan inevitável).",
+            description="LIKE with leading wildcard prevents index use (Full Scan inevitable).",
             suggestion=(
-                "Wildcard à esquerda (LIKE '%texto') força varredura completa. "
-                "Considere Full-Text Search ou reformule para usar prefixo (LIKE 'texto%')."
+                "A leading wildcard (LIKE '%text') forces a full table scan. "
+                "Consider Full-Text Search, or rewrite to use a prefix (LIKE 'text%')."
             ),
         ))
 
@@ -89,11 +89,11 @@ def analyze_sql(sql_text: str, db_type: str = "sqlserver") -> list[AdvisorFindin
         findings.append(F(
             rule_id="R004",
             severity="critical",
-            description="Função aplicada sobre coluna no WHERE impede uso de índice (non-sargable).",
+            description="Function applied to a column in WHERE prevents index use (non-sargable).",
             suggestion=(
-                "Mova a função para o lado do literal, não da coluna. "
-                "Ex.: em vez de YEAR(data) = 2024, use data >= '2024-01-01' AND data < '2025-01-01'. "
-                "Ou crie um índice computado sobre a expressão."
+                "Move the function to the literal side, not the column. "
+                "E.g., instead of YEAR(date) = 2024, use date >= '2024-01-01' AND date < '2025-01-01'. "
+                "Or create a computed index on the expression."
             ),
         ))
 
@@ -102,10 +102,10 @@ def analyze_sql(sql_text: str, db_type: str = "sqlserver") -> list[AdvisorFindin
         findings.append(F(
             rule_id="R005",
             severity="warning",
-            description="OR no WHERE pode impedir uso eficiente de índice.",
+            description="OR in WHERE may prevent efficient index use.",
             suggestion=(
-                "Considere reescrever como UNION ALL — cada ramo usa seu próprio índice. "
-                "O otimizador raramente escolhe dois índices distintos com OR."
+                "Consider rewriting as UNION ALL — each branch can use its own index. "
+                "The optimizer rarely chooses two distinct indexes with OR."
             ),
         ))
 
@@ -114,10 +114,10 @@ def analyze_sql(sql_text: str, db_type: str = "sqlserver") -> list[AdvisorFindin
         findings.append(F(
             rule_id="R006",
             severity="warning",
-            description="NOT IN tem comportamento inesperado com NULLs e desempenho inferior a NOT EXISTS.",
+            description="NOT IN has unexpected behavior with NULLs and is slower than NOT EXISTS.",
             suggestion=(
-                "Substitua por NOT EXISTS ou LEFT JOIN … WHERE coluna IS NULL. "
-                "NOT IN retorna zero linhas se a subquery contiver qualquer NULL."
+                "Replace with NOT EXISTS or LEFT JOIN … WHERE column IS NULL. "
+                "NOT IN returns zero rows if the subquery contains any NULL."
             ),
         ))
 
@@ -126,10 +126,10 @@ def analyze_sql(sql_text: str, db_type: str = "sqlserver") -> list[AdvisorFindin
         findings.append(F(
             rule_id="R007",
             severity="info",
-            description="NOT EXISTS é mais seguro que NOT IN com NULLs, mas avalie se LEFT JOIN seria mais eficiente.",
+            description="NOT EXISTS is safer than NOT IN with NULLs, but evaluate whether LEFT JOIN would be more efficient.",
             suggestion=(
-                "LEFT JOIN … WHERE t2.chave IS NULL pode ser mais eficiente quando "
-                "o conjunto de dados for grande e houver índice na chave de join."
+                "LEFT JOIN … WHERE t2.key IS NULL may be more efficient when "
+                "the dataset is large and there is an index on the join key."
             ),
         ))
 
@@ -138,10 +138,10 @@ def analyze_sql(sql_text: str, db_type: str = "sqlserver") -> list[AdvisorFindin
         findings.append(F(
             rule_id="R008",
             severity="info",
-            description="DISTINCT geralmente indica duplicatas inesperadas — possível JOIN incorreto.",
+            description="DISTINCT usually indicates unexpected duplicates — possibly an incorrect JOIN.",
             suggestion=(
-                "Investigue a causa das duplicatas. Se o JOIN gera duplicatas, corrija-o. "
-                "DISTINCT sobre resultado grande gera operação de Sort/Hash implícita."
+                "Investigate the source of duplicates. If the JOIN produces duplicates, fix it. "
+                "DISTINCT over a large result triggers an implicit Sort/Hash operation."
             ),
         ))
 
@@ -150,10 +150,10 @@ def analyze_sql(sql_text: str, db_type: str = "sqlserver") -> list[AdvisorFindin
         findings.append(F(
             rule_id="R009",
             severity="info",
-            description="<> / != geralmente força Full Scan — o otimizador não usa índice de range.",
+            description="<> / != generally forces a Full Scan — the optimizer does not use a range index.",
             suggestion=(
-                "Se possível, reformule com range positivo (< x OR > x) ou "
-                "filtre por exclusão de outra forma para permitir seek no índice."
+                "If possible, rewrite using a positive range (< x OR > x) or "
+                "filter by exclusion in another way to allow an index seek."
             ),
         ))
 
@@ -162,10 +162,10 @@ def analyze_sql(sql_text: str, db_type: str = "sqlserver") -> list[AdvisorFindin
         findings.append(F(
             rule_id="R010",
             severity="info",
-            description="UNION sem ALL elimina duplicatas via Sort/Hash implícito.",
+            description="UNION without ALL eliminates duplicates via an implicit Sort/Hash.",
             suggestion=(
-                "Use UNION ALL quando duplicatas entre os conjuntos forem impossíveis "
-                "ou aceitáveis. Evita o passo de deduplicação."
+                "Use UNION ALL when duplicates between the sets are impossible "
+                "or acceptable. Avoids the deduplication step."
             ),
         ))
 
@@ -175,10 +175,10 @@ def analyze_sql(sql_text: str, db_type: str = "sqlserver") -> list[AdvisorFindin
         findings.append(F(
             rule_id="R011",
             severity="info",
-            description=f"Query com {join_count} JOINs — alta complexidade aumenta custo de otimização do plano.",
+            description=f"Query with {join_count} JOINs — high complexity increases plan optimization cost.",
             suggestion=(
-                "Considere decompor em CTEs ou tabelas temporárias. "
-                "Queries com muitos JOINs tendem a ter planos instáveis com variação de cardinalidade."
+                "Consider decomposing into CTEs or temp tables. "
+                "Queries with many JOINs tend to have unstable plans with cardinality variance."
             ),
         ))
 
@@ -187,10 +187,10 @@ def analyze_sql(sql_text: str, db_type: str = "sqlserver") -> list[AdvisorFindin
         findings.append(F(
             rule_id="R012",
             severity="warning",
-            description="CURSOR processa uma linha por vez — muito mais lento que operações set-based.",
+            description="CURSOR processes one row at a time — much slower than set-based operations.",
             suggestion=(
-                "Reescreva como UPDATE/INSERT/DELETE com JOIN ou CTE. "
-                "CURSORs podem ser 10-100x mais lentos para volumes médios e altos."
+                "Rewrite as UPDATE/INSERT/DELETE with JOIN or CTE. "
+                "CURSORs can be 10-100x slower for medium and large volumes."
             ),
         ))
 
@@ -201,10 +201,10 @@ def analyze_sql(sql_text: str, db_type: str = "sqlserver") -> list[AdvisorFindin
         findings.append(F(
             rule_id="R013",
             severity="info",
-            description="Subquery na lista do SELECT é executada uma vez por linha do resultado.",
+            description="Subquery in the SELECT list is executed once per result row.",
             suggestion=(
-                "Substitua por LEFT JOIN ou OUTER APPLY. Subqueries escalares na lista "
-                "SELECT escalam linearmente com o número de linhas retornadas."
+                "Replace with LEFT JOIN or OUTER APPLY. Scalar subqueries in the SELECT list "
+                "scale linearly with the number of returned rows."
             ),
         ))
 
@@ -219,10 +219,10 @@ def analyze_sql(sql_text: str, db_type: str = "sqlserver") -> list[AdvisorFindin
             findings.append(F(
                 rule_id="S001",
                 severity="warning",
-                description="JOIN implícito (vírgula no FROM) — sintaxe ANSI-86 obsoleta.",
+                description="Implicit JOIN (comma in FROM) — deprecated ANSI-86 syntax.",
                 suggestion=(
-                    "Substitua por INNER JOIN explícito (ANSI-92). Além de mais legível, "
-                    "evita produto cartesiano acidental quando a condição de JOIN for omitida."
+                    "Replace with explicit INNER JOIN (ANSI-92). More readable and avoids "
+                    "accidental cross joins when the JOIN condition is omitted."
                 ),
             ))
 
@@ -231,10 +231,10 @@ def analyze_sql(sql_text: str, db_type: str = "sqlserver") -> list[AdvisorFindin
             findings.append(F(
                 rule_id="S002",
                 severity="info",
-                description="Prefixo SP_ é reservado pelo SQL Server para procedures do sistema.",
+                description="SP_ prefix is reserved by SQL Server for system procedures.",
                 suggestion=(
-                    "Use outro prefixo (ex.: USP_, APP_). O SQL Server pesquisa em master..sys "
-                    "antes do banco atual quando o nome começa com SP_, adicionando overhead."
+                    "Use another prefix (e.g., USP_, APP_). SQL Server searches in master..sys "
+                    "before the current database when the name starts with SP_, adding overhead."
                 ),
             ))
 
@@ -243,10 +243,10 @@ def analyze_sql(sql_text: str, db_type: str = "sqlserver") -> list[AdvisorFindin
             findings.append(F(
                 rule_id="S003",
                 severity="warning",
-                description="INSERT sem especificar colunas explicitamente.",
+                description="INSERT without an explicit column list.",
                 suggestion=(
-                    "Especifique sempre a lista: INSERT INTO tabela (col1, col2) VALUES … "
-                    "Sem lista, qualquer alteração na ordem das colunas da tabela quebra silenciosamente."
+                    "Always specify the list: INSERT INTO table (col1, col2) VALUES … "
+                    "Without a list, any change in column order silently breaks the insert."
                 ),
             ))
 
@@ -255,10 +255,10 @@ def analyze_sql(sql_text: str, db_type: str = "sqlserver") -> list[AdvisorFindin
             findings.append(F(
                 rule_id="S004",
                 severity="info",
-                description="ORDER BY com número de posição de coluna é frágil.",
+                description="ORDER BY with positional column number is fragile.",
                 suggestion=(
-                    "Use ORDER BY com nome de coluna explícito. "
-                    "Alterações no SELECT podem reordenar resultados silenciosamente."
+                    "Use ORDER BY with explicit column names. "
+                    "Changes to the SELECT list may silently reorder results."
                 ),
             ))
 
@@ -268,10 +268,10 @@ def analyze_sql(sql_text: str, db_type: str = "sqlserver") -> list[AdvisorFindin
             findings.append(F(
                 rule_id="S005",
                 severity="critical",
-                description="DELETE sem WHERE — apaga todas as linhas da tabela.",
+                description="DELETE without WHERE — deletes all rows in the table.",
                 suggestion=(
-                    "Adicione WHERE. Para limpar tabela inteira, use TRUNCATE TABLE "
-                    "(mais rápido, gera menos log de transação)."
+                    "Add a WHERE clause. To clear an entire table, use TRUNCATE TABLE "
+                    "(faster, generates less transaction log)."
                 ),
             ))
 
@@ -280,10 +280,10 @@ def analyze_sql(sql_text: str, db_type: str = "sqlserver") -> list[AdvisorFindin
             findings.append(F(
                 rule_id="S006",
                 severity="info",
-                description="INDEX hint hardcoded ignora atualizações de estatísticas.",
+                description="Hardcoded INDEX hint ignores statistics updates.",
                 suggestion=(
-                    "Hints fixos podem ser piores que a escolha do otimizador quando "
-                    "os dados mudam. Prefira atualizar estatísticas e deixar o otimizador decidir."
+                    "Fixed hints may be worse than the optimizer's choice when data changes. "
+                    "Prefer updating statistics and letting the optimizer decide."
                 ),
             ))
 
@@ -292,10 +292,10 @@ def analyze_sql(sql_text: str, db_type: str = "sqlserver") -> list[AdvisorFindin
             findings.append(F(
                 rule_id="S007",
                 severity="warning",
-                description="EXEC() com string não reutiliza plano de execução e abre risco de SQL Injection.",
+                description="EXEC() with a string does not reuse the execution plan and opens SQL Injection risk.",
                 suggestion=(
-                    "Use sp_executeSQL com parâmetros tipados: "
-                    "EXEC sp_executeSQL N'SELECT … WHERE id = @id', N'@id INT', @id = valor"
+                    "Use sp_executeSQL with typed parameters: "
+                    "EXEC sp_executeSQL N'SELECT … WHERE id = @id', N'@id INT', @id = value"
                 ),
             ))
 
@@ -304,8 +304,8 @@ def analyze_sql(sql_text: str, db_type: str = "sqlserver") -> list[AdvisorFindin
             findings.append(F(
                 rule_id="S008",
                 severity="info",
-                description="GOTO torna o fluxo difícil de seguir e manter.",
-                suggestion="Substitua por IF/WHILE/TRY-CATCH. GOTO é considerado má prática em T-SQL moderno.",
+                description="GOTO makes control flow hard to follow and maintain.",
+                suggestion="Replace with IF/WHILE/TRY-CATCH. GOTO is considered bad practice in modern T-SQL.",
             ))
 
         # S009 — DROP PROCEDURE (perde permissões)
@@ -313,8 +313,8 @@ def analyze_sql(sql_text: str, db_type: str = "sqlserver") -> list[AdvisorFindin
             findings.append(F(
                 rule_id="S009",
                 severity="info",
-                description="DROP PROCEDURE remove todas as permissões concedidas.",
-                suggestion="Use ALTER PROCEDURE — preserva permissões existentes sem precisar recriá-las.",
+                description="DROP PROCEDURE removes all granted permissions.",
+                suggestion="Use ALTER PROCEDURE — preserves existing permissions without needing to recreate them.",
             ))
 
         # S010 — XP_CMDSHELL / OPENROWSET
@@ -322,10 +322,10 @@ def analyze_sql(sql_text: str, db_type: str = "sqlserver") -> list[AdvisorFindin
             findings.append(F(
                 rule_id="S010",
                 severity="warning",
-                description="XP_CMDSHELL / OPENROWSET são operações de alto privilégio.",
+                description="XP_CMDSHELL / OPENROWSET are high-privilege operations.",
                 suggestion=(
-                    "Verifique se o uso é intencional. XP_CMDSHELL executa comandos do SO "
-                    "com as permissões do serviço SQL Server."
+                    "Verify the usage is intentional. XP_CMDSHELL executes OS commands "
+                    "with the SQL Server service account permissions."
                 ),
             ))
 
@@ -334,10 +334,10 @@ def analyze_sql(sql_text: str, db_type: str = "sqlserver") -> list[AdvisorFindin
             findings.append(F(
                 rule_id="S011",
                 severity="info",
-                description="ROW_NUMBER para paginação degrada em páginas distantes (OFFSET alto).",
+                description="ROW_NUMBER for pagination degrades on distant pages (high OFFSET).",
                 suggestion=(
-                    "Para tabelas grandes, prefira keyset pagination: "
-                    "WHERE id > @ultimo_id ORDER BY id FETCH NEXT @n ROWS ONLY"
+                    "For large tables, prefer keyset pagination: "
+                    "WHERE id > @last_id ORDER BY id FETCH NEXT @n ROWS ONLY"
                 ),
             ))
 
