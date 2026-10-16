@@ -166,7 +166,7 @@ class AiAdvisor:
     async def _call_openai_compat(
         self,
         user_content: str,
-        system_prompt: str = _SYSTEM_PROMPT,
+        system_prompt: str = "",
         max_tokens: int = 600,
     ) -> tuple[str | None, int]:
         base = self._base_url or "https://api.openai.com"
@@ -194,7 +194,7 @@ class AiAdvisor:
     async def _call_anthropic(
         self,
         user_content: str,
-        system_prompt: str = _SYSTEM_PROMPT,
+        system_prompt: str = "",
         max_tokens: int = 600,
     ) -> tuple[str | None, int]:
         base = self._base_url or "https://api.anthropic.com"
