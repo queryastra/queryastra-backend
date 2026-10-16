@@ -51,6 +51,7 @@ async def run_deep_analysis(
     session: Annotated[AsyncSession, Depends(get_db_session)],
     credential_resolver: Annotated[CredentialResolver, Depends(CredentialResolver)],
     ai_advisor: Annotated[AiAdvisor | MultiKeyAiAdvisor, Depends(get_ai_advisor)],
+    locale: str = "en",
 ) -> DeepAnalysisResponse:
     if not ai_advisor.is_configured:
         return DeepAnalysisResponse(configured=False)
@@ -91,7 +92,7 @@ async def run_deep_analysis(
     collector = create_collector(instance.db_type, connection=connection, instance_id=instance.id)
     try:
         service = DeepAnalysisService(ai_advisor)
-        result = await service.run(collector, instance)
+        result = await service.run(collector, instance, locale=locale)
     except Exception as exc:
         logger.warning("Erro na análise profunda da instância %s: %s", instance_id, exc)
         raise HTTPException(

@@ -15,17 +15,39 @@ from app.services.ai_advisor import AiAdvisor, AiAnalysis, MultiKeyAiAdvisor
 
 logger = get_logger(__name__)
 
-_SYSTEM_PROMPT = (
-    "Você é um DBA sênior especialista em performance de banco de dados. "
-    "Você recebeu um snapshot de diagnóstico coletado AO VIVO diretamente da instância monitorada. "
-    "Com base exclusivamente nos dados fornecidos, produza uma análise PROFUNDA e ACIONÁVEL. "
-    "Identifique os 3 a 5 problemas mais críticos presentes nos dados. "
-    "Para cada problema: (1) nomeie o problema claramente, (2) explique a causa raiz com base nos dados, "
-    "(3) descreva o impacto em produção, (4) liste as ações concretas para corrigir. "
-    "Use os valores numéricos dos dados para justificar cada achado — seja específico, não genérico. "
-    "Se um tipo de dado estiver ausente ou vazio, ignore-o sem mencionar. "
-    "Responda em português do Brasil, em formato Markdown com seções por problema."
+_LOCALE_TO_LANGUAGE: dict[str, str] = {
+    "pt-BR": "Brazilian Portuguese",
+    "pt-PT": "European Portuguese",
+    "en": "English",
+    "es": "Spanish",
+    "de": "German",
+    "fr": "French",
+    "it": "Italian",
+    "nl": "Dutch",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "zh-CN": "Simplified Chinese",
+}
+
+_BASE_SYSTEM_PROMPT = (
+    "You are a senior DBA specializing in database performance. "
+    "You have received a live diagnostic snapshot from the monitored instance. "
+    "Produce a THOROUGH and ACTIONABLE analysis based exclusively on the provided data. "
+    "Identify ALL significant problems visible in the data — do not limit yourself to a small number. "
+    "For EACH problem: (1) name it precisely, (2) cite the specific rows/values that reveal it, "
+    "(3) explain the root cause and production impact in detail, "
+    "(4) provide concrete, step-by-step remediation commands or scripts where applicable. "
+    "Be as specific as possible: quote table names, index names, query text, and numeric values. "
+    "Never give generic advice — every recommendation must be grounded in the actual data provided. "
+    "If a data section is empty, skip it entirely without comment. "
+    "Respond in {language}, using Markdown with one ## section per problem, "
+    "and a final ## Summary section ranking the top 3 actions by urgency."
 )
+
+
+def _build_system_prompt(locale: str) -> str:
+    language = _LOCALE_TO_LANGUAGE.get(locale, "English")
+    return _BASE_SYSTEM_PROMPT.format(language=language)
 
 
 @dataclass
@@ -40,7 +62,7 @@ class DeepAnalysisService:
     def __init__(self, advisor: AiAdvisor | MultiKeyAiAdvisor) -> None:
         self._advisor = advisor
 
-    async def run(self, collector: object, instance: object) -> DeepAnalysisResult:
+    async def run(self, collector: object, instance: object, locale: str = "en") -> DeepAnalysisResult:
         """Coleta diagnóstico da instância e solicita análise à IA."""
         if not self._advisor.is_configured:
             return DeepAnalysisResult(configured=False)
@@ -50,10 +72,10 @@ class DeepAnalysisService:
 
         # Cabeçalho da instância
         sections.append(
-            f"## Instância\n"
+            f"## Instance\n"
             f"- Engine: {instance.db_type}\n"
-            f"- Versão: {instance.engine_version or 'desconhecida'}\n"
-            f"- Criticidade: {instance.criticality}\n"
+            f"- Version: {instance.engine_version or 'unknown'}\n"
+            f"- Criticality: {instance.criticality}\n"
         )
 
         # 1. Índices não utilizados
@@ -62,9 +84,9 @@ class DeepAnalysisService:
             if unused:
                 data_collected.append("unused_indexes")
                 rows = sorted(unused, key=lambda x: x.index_size_bytes, reverse=True)[:15]
-                lines = ["## Índices Não Utilizados (scans desde último reset de estatísticas)",
-                         "| Schema | Tabela | Índice | Tamanho (MB) | Scans |",
-                         "|--------|--------|--------|-------------|-------|"]
+                lines = ["## Unused Indexes (scans since last statistics reset)",
+                         "| Schema | Table | Index | Size (MB) | Scans |",
+                         "|--------|-------|-------|-----------|-------|"]
                 for r in rows:
                     mb = r.index_size_bytes / 1_048_576
                     lines.append(f"| {r.schema_name} | {r.table_name} | {r.index_name} | {mb:.1f} | {r.idx_scan} |")
@@ -78,12 +100,12 @@ class DeepAnalysisService:
             if table_io:
                 data_collected.append("table_io_stats")
                 rows = sorted(table_io, key=lambda x: x.seq_scan, reverse=True)[:15]
-                lines = ["## I/O de Tabelas (ordenado por seq_scan — alto = candidato a novo índice)",
-                         "| Schema | Tabela | Seq Scans | Idx Scans | Live Tuples | Dead Tuples | Último VACUUM |",
-                         "|--------|--------|-----------|-----------|-------------|-------------|---------------|"]
+                lines = ["## Table I/O Stats (sorted by seq_scan — high = missing index candidate)",
+                         "| Schema | Table | Seq Scans | Idx Scans | Live Tuples | Dead Tuples | Last VACUUM |",
+                         "|--------|-------|-----------|-----------|-------------|-------------|-------------|"]
                 for r in rows:
                     last_vac = r.last_autovacuum or r.last_vacuum
-                    vac_label = last_vac.strftime("%Y-%m-%d") if last_vac else "nunca"
+                    vac_label = last_vac.strftime("%Y-%m-%d") if last_vac else "never"
                     dead_pct = (r.n_dead_tup * 100 / max(r.n_live_tup + r.n_dead_tup, 1))
                     lines.append(
                         f"| {r.schema_name} | {r.table_name} | {r.seq_scan:,} | {r.idx_scan:,} "
@@ -99,9 +121,9 @@ class DeepAnalysisService:
             if qstats:
                 data_collected.append("query_stats_snapshot")
                 rows = sorted(qstats, key=lambda x: (x.total_exec_time / max(x.calls, 1)), reverse=True)[:10]
-                lines = ["## Top Queries por Tempo Médio de Execução (acumulativo desde último reset)",
-                         "| Query (truncada) | Chamadas | Tempo Médio (ms) | Tempo Total (s) |",
-                         "|------------------|----------|-----------------|-----------------|"]
+                lines = ["## Top Queries by Average Execution Time (cumulative since last reset)",
+                         "| Query (truncated) | Calls | Avg Time (ms) | Total Time (s) |",
+                         "|-------------------|-------|---------------|----------------|"]
                 for r in rows:
                     avg_ms = r.total_exec_time / max(r.calls, 1)
                     total_s = r.total_exec_time / 1000
@@ -117,11 +139,11 @@ class DeepAnalysisService:
             if missing:
                 data_collected.append("missing_index_suggestions")
                 rows = sorted(missing, key=lambda x: (x.impact_score or 0), reverse=True)[:10]
-                lines = ["## Sugestões de Índice Ausente",
-                         "| Tabela | Banco | Sugestão | Score de Impacto |",
-                         "|--------|-------|----------|-----------------|"]
+                lines = ["## Missing Index Suggestions",
+                         "| Table | Database | Suggestion | Impact Score |",
+                         "|-------|----------|------------|--------------|"]
                 for r in rows:
-                    score = f"{r.impact_score:.0f}" if r.impact_score else "—"
+                    score = f"{r.impact_score:.0f}" if r.impact_score else "-"
                     suggestion = r.suggestion[:100].replace("|", "\\|")
                     lines.append(f"| {r.table_name} | {r.database_name or '—'} | {suggestion} | {score} |")
                 sections.append("\n".join(lines))
@@ -129,10 +151,9 @@ class DeepAnalysisService:
             logger.debug("collect_missing_index_suggestions falhou: %s", exc)
 
         if not data_collected:
-            # Nenhum dado disponível — engine não suporta nenhuma das queries ou está inacessível
             return DeepAnalysisResult(
                 configured=True,
-                narrative="Nenhum dado de diagnóstico disponível para este engine ou instância.",
+                narrative=None,
                 data_collected=[],
                 tokens_consumed=0,
             )
@@ -140,8 +161,8 @@ class DeepAnalysisService:
         user_content = "\n\n".join(sections)
         result: AiAnalysis = await self._advisor.analyze_prompt(
             user_content=user_content,
-            system_prompt=_SYSTEM_PROMPT,
-            max_tokens=1500,
+            system_prompt=_build_system_prompt(locale),
+            max_tokens=2500,
         )
 
         return DeepAnalysisResult(
