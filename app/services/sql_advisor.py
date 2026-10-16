@@ -23,6 +23,7 @@ class AdvisorFinding:
     severity: Severity
     description: str
     suggestion: str
+    params: dict | None = None
 
 
 def analyze_sql(sql_text: str, db_type: str = "sqlserver") -> list[AdvisorFinding]:
@@ -180,6 +181,7 @@ def analyze_sql(sql_text: str, db_type: str = "sqlserver") -> list[AdvisorFindin
                 "Consider decomposing into CTEs or temp tables. "
                 "Queries with many JOINs tend to have unstable plans with cardinality variance."
             ),
+            params={"joinCount": join_count},
         ))
 
     # R012 — CURSOR

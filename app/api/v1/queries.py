@@ -1317,6 +1317,7 @@ class SqlFindingResponse(BaseModel):
     severity: str
     description: str
     suggestion: str
+    params: dict[str, str | int | float] | None = None
 
 
 class PlanFindingResponse(BaseModel):
@@ -1326,6 +1327,7 @@ class PlanFindingResponse(BaseModel):
     suggestion: str
     operator: str | None = None
     object_name: str | None = None
+    params: dict[str, str | int | float] | None = None
 
 
 class AiAnalysisResponse(BaseModel):
@@ -1400,6 +1402,7 @@ async def get_query_recommendations(
             severity=f.severity,
             description=f.description,
             suggestion=f.suggestion,
+            params=f.params,
         )
         for f in raw_sql_findings
     ]
@@ -1423,6 +1426,7 @@ async def get_query_recommendations(
                 suggestion=f.suggestion,
                 operator=f.operator,
                 object_name=f.object_name,
+                params=f.params,
             )
             for f in raw_plan_findings
         ]

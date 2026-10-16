@@ -32,6 +32,7 @@ class PlanFinding:
     suggestion: str
     operator: str | None = None
     object_name: str | None = None
+    params: dict | None = None
 
 
 @dataclass
@@ -247,6 +248,7 @@ def analyze_plan(plan_xml: str) -> list[PlanFinding]:
                     "a suitable ordered index."
                 ),
                 operator="Sort",
+                params={"pct": pct_str},
             ))
 
         # P003 — Table Scan ou Clustered Index Scan com custo alto
@@ -262,6 +264,7 @@ def analyze_plan(plan_xml: str) -> list[PlanFinding]:
                 ),
                 operator=op,
                 object_name=node.object_name,
+                params={"op": op, "pct": pct_str},
             ))
 
         # P004 — Erro de estimativa de linhas (só planos actual)
@@ -283,6 +286,12 @@ def analyze_plan(plan_xml: str) -> list[PlanFinding]:
                     ),
                     operator=op or None,
                     object_name=node.object_name,
+                    params={
+                        "estimateRows": int(node.estimate_rows),
+                        "actualRows": int(node.actual_rows),
+                        "direction": direction,
+                        "ratio": int(abs(ratio)),
+                    },
                 ))
 
         # P005 — SpillToTempDb (grant de memória insuficiente)
@@ -344,6 +353,7 @@ def analyze_plan(plan_xml: str) -> list[PlanFinding]:
                         "— use OPTION (HASH JOIN) or OPTION (MERGE JOIN) to compare."
                     ),
                     operator="Nested Loops",
+                    params={"outerRows": int(outer_rows)},
                 ))
 
     # Ordena: critical → warning → info
@@ -407,6 +417,7 @@ def analyze_plan_postgresql_json(plan_json_text: str) -> list[PlanFinding]:
                 ),
                 operator="Seq Scan",
                 object_name=relation,
+                params={"relation": relation or "", "pct": f"{cost_pct:.0%}", "planRows": int(plan_rows)},
             ))
 
         # PG02 — Sort sem índice com custo alto
@@ -424,6 +435,7 @@ def analyze_plan_postgresql_json(plan_json_text: str) -> list[PlanFinding]:
                     "Check work_mem if the sort is spilling to disk."
                 ),
                 operator="Sort",
+                params={"pct": f"{cost_pct:.0%}", "sortKey": sort_key or "unknown"},
             ))
 
         # PG03 — Hash Join ou Hash com linhas altas (pressão de memória)
@@ -439,6 +451,7 @@ def analyze_plan_postgresql_json(plan_json_text: str) -> list[PlanFinding]:
                     "to allow Merge Join (which does not need an in-memory hash table)."
                 ),
                 operator=ntype,
+                params={"ntype": ntype, "planRows": int(plan_rows)},
             ))
 
         # PG04 — Erro de estimativa de cardinalidade (plano real com ANALYZE)
@@ -459,6 +472,12 @@ def analyze_plan_postgresql_json(plan_json_text: str) -> list[PlanFinding]:
                     ),
                     operator=ntype or None,
                     object_name=relation,
+                    params={
+                        "planRows": int(plan_rows),
+                        "actualRows": int(actual_rows),
+                        "direction": direction,
+                        "ratio": int(abs(ratio)),
+                    },
                 ))
 
         # PG05 — Nested Loop com muitas linhas no outer
@@ -478,6 +497,7 @@ def analyze_plan_postgresql_json(plan_json_text: str) -> list[PlanFinding]:
                         "test with SET enable_nestloop = off."
                     ),
                     operator="Nested Loop",
+                    params={"outerRows": int(outer_rows)},
                 ))
 
     _order = {"critical": 0, "warning": 1, "info": 2}
@@ -545,6 +565,7 @@ def analyze_plan_mysql_json(plan_json_text: str) -> list[PlanFinding]:
                 ),
                 operator="ALL",
                 object_name=table_name,
+                params={"tableName": table_name or "", "rows": rows, "filtered": int(filtered)},
             ))
 
         # MY02 — Filesort (ordenação sem índice)
@@ -561,6 +582,7 @@ def analyze_plan_mysql_json(plan_json_text: str) -> list[PlanFinding]:
                 ),
                 operator="filesort",
                 object_name=table_name,
+                params={"tableName": table_name or ""},
             ))
 
         # MY03 — Tabela temporária
@@ -594,6 +616,7 @@ def analyze_plan_mysql_json(plan_json_text: str) -> list[PlanFinding]:
                 ),
                 operator="range",
                 object_name=table_name,
+                params={"tableName": table_name or "", "rows": rows},
             ))
 
     _order = {"critical": 0, "warning": 1, "info": 2}
@@ -645,6 +668,7 @@ def analyze_plan_oracle_text(plan_text: str) -> list[PlanFinding]:
                 ),
                 operator="TABLE ACCESS FULL",
                 object_name=obj,
+                params={"obj": obj or "table", "cost": cost, "rowsEst": rows_est},
             ))
 
         # OR02 — Sort
@@ -661,6 +685,7 @@ def analyze_plan_oracle_text(plan_text: str) -> list[PlanFinding]:
                     "Monitor V$SORT_USAGE and tune PGA_AGGREGATE_TARGET if there is a spill."
                 ),
                 operator="SORT",
+                params={"cost": cost},
             ))
 
         # OR03 — Nested Loops com muitas linhas
@@ -677,6 +702,7 @@ def analyze_plan_oracle_text(plan_text: str) -> list[PlanFinding]:
                     "For large volumes, consider HASH JOIN via hint /*+ USE_HASH */."
                 ),
                 operator="NESTED LOOPS",
+                params={"rowsEst": rows_est},
             ))
 
         # OR04 — Partition Full Scan (pode ser intencional mas merece atenção)
@@ -694,6 +720,7 @@ def analyze_plan_oracle_text(plan_text: str) -> list[PlanFinding]:
                 ),
                 operator="PARTITION FULL",
                 object_name=obj,
+                params={"obj": obj or "object"},
             ))
 
     _order = {"critical": 0, "warning": 1, "info": 2}
