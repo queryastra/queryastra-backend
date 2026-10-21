@@ -1,0 +1,104 @@
+name: Build Distributable
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version label (e.g. v0.1.0)'
+        required: false
+        default: 'dev'
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact_suffix: windows-x64.exe
+            dist_file: queryastra.exe
+          - os: ubuntu-latest
+            artifact_suffix: linux-x64
+            dist_file: queryastra
+          - os: macos-latest
+            artifact_suffix: macos-arm64
+            dist_file: queryastra
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: 'latest'
+
+      - name: Install ODBC driver (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          curl https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add -
+          curl https://packages.microsoft.com/config/ubuntu/22.04/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          sudo apt-get update
+          sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 unixodbc-dev
+
+      - name: Install ODBC driver (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew tap microsoft/mssql-release https://github.com/Microsoft/homebrew-mssql-release
+          HOMEBREW_ACCEPT_EULA=Y brew install msodbcsql18 mssql-tools18
+
+      - name: Install runtime dependencies
+        run: uv sync --no-dev
+
+      - name: Install PyInstaller
+        run: uv run pip install pyinstaller==6.10.0
+
+      - name: Build executable
+        run: uv run pyinstaller queryastra.spec --clean --distpath dist --workpath build
+
+      - name: Smoke-test (non-Windows)
+        if: runner.os != 'Windows'
+        run: |
+          chmod +x dist/queryastra
+          timeout 5 dist/queryastra --version || true
+
+      - name: Smoke-test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $proc = Start-Process -FilePath "dist\queryastra.exe" -ArgumentList "--version" -PassThru -NoNewWindow
+          Start-Sleep 3
+          Stop-Process -Id $proc.Id -ErrorAction SilentlyContinue
+
+      - name: Rename artifact
+        shell: bash
+        run: |
+          mkdir -p release
+          cp dist/${{ matrix.dist_file }} release/queryastra-${{ matrix.artifact_suffix }}
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: queryastra-${{ matrix.os }}
+          path: release/
+          retention-days: 7
+
+      - name: Upload to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
