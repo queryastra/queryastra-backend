@@ -121,7 +121,7 @@ class InstancesRepository(BaseRepository):
         instance.polling_interval_seconds = polling_interval_seconds
         instance.encrypted_credential_ref = encrypted_credential_ref
         instance.cloud_provider = cloud_provider
-        instance.updated_at = datetime.now(UTC)
+        instance.updated_at = datetime.now(UTC).replace(tzinfo=None)
         await self._session.commit()
         await self._session.refresh(instance)
         return instance
