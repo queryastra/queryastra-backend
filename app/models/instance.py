@@ -14,6 +14,7 @@ from datetime import datetime, time
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
+    DateTime,
     ForeignKey,
     Integer,
     SmallInteger,
@@ -93,7 +94,7 @@ class Instance(Base):
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
     created_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)
-    deleted_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     maintenance_windows: Mapped[list[InstanceMaintenanceWindow]] = relationship(
         back_populates="instance", cascade="all, delete-orphan"
