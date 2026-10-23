@@ -583,3 +583,63 @@ class NormalizedTableIoStats(BaseModel):
     last_autoanalyze: datetime | None
     last_vacuum: datetime | None
     last_autovacuum: datetime | None
+
+
+class NormalizedSchemaHealthItem(BaseModel):
+    """Item de saude do schema — duplicatas de indice, tabelas sem PK, FKs sem indice.
+
+    Categoria:
+    - duplicate_index: dois indices na mesma tabela com as mesmas colunas lideres
+    - missing_pk: tabela sem chave primaria
+    - fk_without_index: FK sem indice de suporte (causa seq scan no lado filho)
+
+    PostgreSQL: detecta as tres categorias. SQL Server: detecta missing_pk e duplicate_index."""
+
+    category: Literal["duplicate_index", "missing_pk", "fk_without_index"]
+    schema_name: str
+    table_name: str
+    object_name: str | None = None  # nome do indice ou FK
+    detail: dict[str, Any] = Field(default_factory=dict)
+    severity: Literal["warning", "info"] = "warning"
+
+
+class NormalizedBufferTableStats(BaseModel):
+    """Estatisticas de cache de buffer por tabela — PostgreSQL only.
+
+    Fonte: pg_statio_user_tables. heap_blks_hit/read indicam eficiencia do shared_buffers;
+    hit_ratio proximo de 1.0 e o ideal."""
+
+    schema_name: str
+    table_name: str
+    heap_blks_read: int
+    heap_blks_hit: int
+    hit_ratio: float
+    idx_blks_read: int
+    idx_blks_hit: int
+    idx_hit_ratio: float
+
+
+class NormalizedTempfileStats(BaseModel):
+    """Estatisticas de arquivos temporarios por banco — PostgreSQL only.
+
+    temp_files e temp_bytes sao acumulativos desde o ultimo stats reset. Valores altos
+    indicam que sort/hash operations estao transbordando para disco (work_mem insuficiente)."""
+
+    database_name: str
+    temp_files: int
+    temp_bytes: int
+
+
+class NormalizedFileIoStats(BaseModel):
+    """Estatisticas de I/O de arquivo — SQL Server only.
+
+    Fonte: sys.dm_io_virtual_file_stats. io_stall alto indica pressao de disco."""
+
+    database_name: str
+    file_name: str
+    io_stall_read_ms: int
+    io_stall_write_ms: int
+    num_of_reads: int
+    num_of_writes: int
+    avg_read_ms: float
+    avg_write_ms: float

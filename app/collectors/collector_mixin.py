@@ -19,10 +19,12 @@ from app.normalizers.models import (
     NormalizedAutovacuumWorker,
     NormalizedBackupStatus,
     NormalizedBgwriterStats,
+    NormalizedBufferTableStats,
     NormalizedConfirmedTransactionError,
     NormalizedConfigComplianceItem,
     NormalizedConnectionConsumer,
     NormalizedDbSize,
+    NormalizedFileIoStats,
     NormalizedQueryStatsSnapshot,
     NormalizedDeadlockEvent,
     NormalizedIdleInTransactionSession,
@@ -32,8 +34,10 @@ from app.normalizers.models import (
     NormalizedPlanCompileTimeoutFinding,
     NormalizedPlanSnapshot,
     NormalizedReplicationSlot,
+    NormalizedSchemaHealthItem,
     NormalizedTableIoStats,
     NormalizedTempDbStats,
+    NormalizedTempfileStats,
     NormalizedUnusedIndex,
     NormalizedUserFunction,
     NormalizedVacuumTableStats,
@@ -118,3 +122,14 @@ class CollectorNoOpMixin:
 
     async def collect_table_io_stats(self) -> list[NormalizedTableIoStats]:
         return []
+
+    async def collect_schema_health(self) -> list[NormalizedSchemaHealthItem]:
+        return []
+
+    async def collect_buffer_cache_stats(
+        self,
+    ) -> tuple[list[NormalizedBufferTableStats], list[NormalizedTempfileStats], list[NormalizedFileIoStats]]:
+        return [], [], []
+
+    async def explain_plan_for_hash(self, sql_text: str) -> dict | None:
+        return None

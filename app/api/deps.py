@@ -20,7 +20,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_session
+from app.repositories.system_license_repository import SystemLicenseRepository
 from app.services.auth_service import decode_token
+from app.services.plan_service import PlanConfig, PlanService
 
 DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 500
@@ -30,6 +32,20 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
     """Dependency FastAPI que entrega uma `AsyncSession` por request."""
     async for session in get_session():
         yield session
+
+
+async def get_plan_service(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> PlanService:
+    """Dependency FastAPI: resolve o plano efetivo do sistema a partir de `system_license`."""
+    repo = SystemLicenseRepository(session)
+    license_row = await repo.get_or_create()
+    await session.commit()
+    return PlanService(
+        trial_started_at=license_row.trial_started_at,
+        plan_id=license_row.plan_id,
+        subscription_expires_at=license_row.subscription_expires_at,
+    )
 
 
 class PaginationParams(BaseModel):

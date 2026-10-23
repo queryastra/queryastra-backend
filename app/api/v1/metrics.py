@@ -20,9 +20,11 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import (
+    PlanService,
     check_instance_access,
     get_current_user,
     get_db_session,
+    get_plan_service,
     resolve_time_window,
 )
 from app.core.config import get_settings
@@ -164,6 +166,7 @@ async def get_metric_series(
     target_type: Literal["server", "instance"],
     target_id: UUID,
     repository: Annotated[MetricSamplesRepository, Depends(get_metric_samples_repository)],
+    plan: Annotated[PlanService, Depends(get_plan_service)],
     metric_name: Annotated[list[str] | None, Query()] = None,
     since: Annotated[datetime | None, Query(alias="from")] = None,
     until: Annotated[datetime | None, Query(alias="to")] = None,
@@ -172,12 +175,13 @@ async def get_metric_series(
 
     `metric_name` e repetivel (`?metric_name=a&metric_name=b`); omitido devolve todas as
     metricas do alvo no periodo. Sem `from`/`to`, olha `API_READ_DEFAULT_LOOKBACK_SECONDS` para
-    tras a partir de agora.
+    tras a partir de agora. O historico e limitado ao plano efetivo do sistema.
     """
     settings = get_settings()
     resolved_since, resolved_until = resolve_time_window(
         since, until, timedelta(seconds=settings.api_read_default_lookback_seconds)
     )
+    resolved_since = plan.clamp_from(resolved_since)
     rows = await repository.list_series(
         target_type,
         target_id,
