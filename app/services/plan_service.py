@@ -21,8 +21,8 @@ class PlanConfig:
 PLANS: dict[str, PlanConfig] = {
     "trial": PlanConfig("trial", "Trial", max_instances=None, history_days=30, trial_days=30),
     "free":  PlanConfig("free",  "Free",  max_instances=1,    history_days=14, trial_days=None),
-    "pro":   PlanConfig("pro",   "Pro",   max_instances=5,    history_days=90, trial_days=None),
-    "team":  PlanConfig("team",  "Team",  max_instances=20,   history_days=365, trial_days=None),
+    "pro":   PlanConfig("pro",   "Pro",   max_instances=5,    history_days=60,  trial_days=None),
+    "team":  PlanConfig("team",  "Team",  max_instances=20,   history_days=90,  trial_days=None),
 }
 
 
