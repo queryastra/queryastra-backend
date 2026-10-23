@@ -48,7 +48,7 @@ def _to_response(
     effective = plan_svc.effective_plan()
     masked = None
     if row_license_key:
-        masked = row_license_key[:4] + "-****-****-****-" + row_license_key[-4:]
+        masked = row_license_key[:3] + "-****-****-****-" + row_license_key[-4:]
     return LicenseStatusResponse(
         plan_id=row_plan_id,
         effective_plan_id=effective.plan_id,
