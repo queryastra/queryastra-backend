@@ -96,6 +96,7 @@ class InstancesRepository(BaseRepository):
                 Instance.deleted_at.is_not(None),
                 Instance.deleted_at >= cutoff,
             )
+            .options(selectinload(Instance.maintenance_windows))
             .order_by(Instance.deleted_at.desc())
             .limit(1)
         )
