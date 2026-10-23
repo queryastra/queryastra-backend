@@ -21,6 +21,7 @@ from app.api.v1 import (
     health_stats,
     hosts,
     instances,
+    license,
     metrics,
     missing_index,
     queries,
@@ -37,6 +38,7 @@ from app.api.v1 import (
 api_v1_router = APIRouter()
 
 api_v1_router.include_router(auth.router, prefix="/auth", tags=["auth"])
+api_v1_router.include_router(license.router, prefix="/license", tags=["license"])
 api_v1_router.include_router(audit_log.router, prefix="/audit-log", tags=["audit-log"])
 api_v1_router.include_router(instances.router, prefix="/instances", tags=["instances"])
 api_v1_router.include_router(hosts.router, prefix="/hosts", tags=["hosts"])

@@ -311,6 +311,11 @@ class Settings(BaseSettings):
         default=3600, alias="QUERY_STATS_CHECK_INTERVAL_SECONDS"
     )
 
+    # Supabase — usado exclusivamente para verificar chaves de licença (tabela `licenses`).
+    # Vazio/None = validação de licença desabilitada (modo offline: só aceita plano trial/free).
+    supabase_url: str | None = Field(default=None, alias="SUPABASE_URL")
+    supabase_service_key: str | None = Field(default=None, alias="SUPABASE_SERVICE_KEY")
+
     # Defaults gravados no banco na primeira inicializacao (system_settings seed no lifespan de
     # app/main.py). Altere os valores em producao pelo app (tela Configuracoes -> Geral) — o
     # seed so e aplicado uma vez (INSERT ON CONFLICT DO NOTHING), entao uma linha ja existente
