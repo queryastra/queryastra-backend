@@ -96,6 +96,7 @@ class InstancesRepository(BaseRepository):
                 Instance.deleted_at.is_not(None),
                 Instance.deleted_at >= cutoff,
             )
+            .options(selectinload(Instance.maintenance_windows))
             .order_by(Instance.deleted_at.desc())
             .limit(1)
         )
@@ -120,27 +121,24 @@ class InstancesRepository(BaseRepository):
         instance.polling_interval_seconds = polling_interval_seconds
         instance.encrypted_credential_ref = encrypted_credential_ref
         instance.cloud_provider = cloud_provider
-        instance.updated_at = datetime.now(UTC)
+        instance.updated_at = datetime.now(UTC).replace(tzinfo=None)
         await self._session.commit()
         await self._session.refresh(instance)
         return instance
 
     async def purge_expired_soft_deleted(self) -> int:
         """Hard-delete de instâncias cujo período de carência (30 dias) expirou.
-        Deve ser chamado periodicamente (ex.: job diário no startup). Retorna quantas foram purgadas."""
+        Usa DELETE direto (não ORM) para evitar lazy-load de relacionamentos em AsyncSession.
+        O FK ondelete=CASCADE na tabela instance_maintenance_windows cuida do cascade no banco."""
         cutoff = datetime.now(UTC) - timedelta(days=_SOFT_DELETE_GRACE_DAYS)
         result = await self._session.execute(
-            select(Instance).where(
+            sa.delete(Instance).where(
                 Instance.deleted_at.is_not(None),
                 Instance.deleted_at < cutoff,
             )
         )
-        expired = list(result.scalars().all())
-        for inst in expired:
-            await self._session.delete(inst)
-        if expired:
-            await self._session.commit()
-        return len(expired)
+        await self._session.commit()
+        return cast(sa.CursorResult, result).rowcount or 0
 
     async def update_settings(
         self,
