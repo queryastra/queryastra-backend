@@ -29,6 +29,8 @@ from app.models.system_settings import SYSTEM_SETTINGS_SINGLETON_ID, SystemSetti
 from app.repositories.instance_database_sleeping_overrides_repository import (
     InstanceDatabaseSleepingOverridesRepository,
 )
+from app.repositories.instances_repository import InstancesRepository
+from app.repositories.system_license_repository import SystemLicenseRepository
 from app.repositories.users_repository import UsersRepository
 from app.services.auth_service import hash_password
 from app.workers.alerting_worker import AlertingWorker, EmailSettings
@@ -94,6 +96,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             settings.blocking_min_duration_ms,
             settings.sleeping_min_duration_ms,
         )
+
+    # Purge de instâncias soft-deletadas cujo período de carência (30 dias) expirou.
+    async with async_session_factory() as session:
+        purged = await InstancesRepository(session).purge_expired_soft_deleted()
+        if purged:
+            logger.info("Purge de instancias soft-deletadas expiradas: %s removidas", purged)
+
+    # Seed: garante que a linha de licenca do sistema existe (singleton).
+    # ON CONFLICT nao aplicavel aqui — `get_or_create` faz o INSERT apenas se necessario.
+    async with async_session_factory() as session:
+        license_repo = SystemLicenseRepository(session)
+        await license_repo.get_or_create()
+        await session.commit()
+        logger.info("system_license seed verificado")
 
     supervisor: PollingSupervisor | None = None
     supervisor_task: asyncio.Task[None] | None = None

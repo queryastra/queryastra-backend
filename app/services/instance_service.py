@@ -105,6 +105,21 @@ class InstanceService:
         if payload.auth_method == "encrypted_fallback":
             encrypted_ref = encrypt_credential(payload.username or "", payload.password or "")
 
+        # Verifica se existe instância soft-deletada com mesmo endpoint — se sim, restaura o UUID
+        # original para que o histórico TimescaleDB fique acessível sem gaps de UUID.
+        existing = await self._repository.find_soft_deleted(
+            payload.host, payload.port, payload.db_type
+        )
+        if existing is not None:
+            return await self._repository.restore(
+                existing,
+                name=payload.name,
+                criticality=payload.criticality,
+                polling_interval_seconds=payload.polling_interval_seconds,
+                encrypted_credential_ref=encrypted_ref,
+                cloud_provider=payload.cloud_provider,
+            )
+
         instance = Instance(
             name=payload.name,
             db_type=payload.db_type,

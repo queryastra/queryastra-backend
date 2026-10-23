@@ -6,15 +6,18 @@ persistencia.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import cast
 from uuid import UUID
 
 import sqlalchemy as sa
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import selectinload
 
 from app.models.instance import Instance
 from app.repositories.base import BaseRepository
+
+_SOFT_DELETE_GRACE_DAYS = 30
 
 
 class InstancesRepository(BaseRepository):
@@ -25,20 +28,34 @@ class InstancesRepository(BaseRepository):
         # relacao depois de fechar o `await` (ex.: `PollingWorker._is_within_maintenance_window`)
         # dispararia um lazy-load sincrono incompativel com `AsyncSession`
         # (`sqlalchemy.exc.MissingGreenlet`), confirmado rodando o smoke test real desta feature.
-        return await self._session.get(
-            Instance, instance_id, options=[selectinload(Instance.maintenance_windows)]
+        result = await self._session.execute(
+            select(Instance)
+            .where(Instance.id == instance_id, Instance.deleted_at.is_(None))
+            .options(selectinload(Instance.maintenance_windows))
         )
+        return result.scalar_one_or_none()
+
+    async def count(self) -> int:
+        """Conta instancias nao-deletadas (ativas e inativas) — usado para checar limite do plano."""
+        result = await self._session.execute(
+            select(func.count()).select_from(Instance).where(Instance.deleted_at.is_(None))
+        )
+        return result.scalar_one()
 
     async def list_active(self) -> list[Instance]:
-        result = await self._session.execute(select(Instance).where(Instance.active.is_(True)))
+        result = await self._session.execute(
+            select(Instance).where(Instance.active.is_(True), Instance.deleted_at.is_(None))
+        )
         return list(result.scalars().all())
 
     async def list_all(self) -> list[Instance]:
-        """Todas as instancias cadastradas, ativas ou nao — usada pela listagem da UI
-        (`GET /instances`), diferente de `list_active()` (usada pelos workers/supervisors, que
-        so devem agir sobre instancias ativas). Sem isso, pausar o monitoramento de uma
+        """Todas as instancias cadastradas (nao-deletadas), ativas ou nao — usada pela listagem
+        da UI (`GET /instances`), diferente de `list_active()` (usada pelos workers/supervisors,
+        que so devem agir sobre instancias ativas). Sem isso, pausar o monitoramento de uma
         instancia (`set_active(..., False)`) a faria sumir da tela sem jeito de reativar."""
-        result = await self._session.execute(select(Instance).order_by(Instance.name))
+        result = await self._session.execute(
+            select(Instance).where(Instance.deleted_at.is_(None)).order_by(Instance.name)
+        )
         return list(result.scalars().all())
 
     async def set_active(self, instance_id: UUID, active: bool) -> Instance | None:
@@ -55,13 +72,75 @@ class InstancesRepository(BaseRepository):
         return instance
 
     async def delete(self, instance_id: UUID) -> bool:
-        """Remove uma instância e os dados dependentes protegidos por cascade."""
+        """Soft-delete: marca deleted_at, para a coleta e mantém o UUID por 30 dias.
+        Permite restaurar a instância (e ver o histórico) se recadastrada no período de carência.
+        Hard-delete real é feito por `purge_expired_soft_deleted()`."""
         instance = await self.get_by_id(instance_id)
         if instance is None:
             return False
-        await self._session.delete(instance)
+        instance.deleted_at = datetime.now(UTC)
+        instance.active = False
         await self._session.commit()
         return True
+
+    async def find_soft_deleted(self, host: str, port: int, db_type: str) -> Instance | None:
+        """Busca instância soft-deletada com mesmo host+porta+engine dentro do período de carência.
+        Usada pelo fluxo de recadastro para restaurar o UUID original e recuperar o histórico."""
+        cutoff = datetime.now(UTC) - timedelta(days=_SOFT_DELETE_GRACE_DAYS)
+        result = await self._session.execute(
+            select(Instance)
+            .where(
+                Instance.host == host,
+                Instance.port == port,
+                Instance.db_type == db_type,
+                Instance.deleted_at.is_not(None),
+                Instance.deleted_at >= cutoff,
+            )
+            .order_by(Instance.deleted_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    async def restore(
+        self,
+        instance: Instance,
+        *,
+        name: str,
+        criticality: str,
+        polling_interval_seconds: int,
+        encrypted_credential_ref: str | None,
+        cloud_provider: str | None,
+    ) -> Instance:
+        """Restaura instância soft-deletada: limpa deleted_at, reativa coleta e atualiza campos
+        mutáveis com os valores do novo cadastro (nome, credencial, intervalo, criticidade)."""
+        instance.deleted_at = None
+        instance.active = True
+        instance.name = name
+        instance.criticality = criticality
+        instance.polling_interval_seconds = polling_interval_seconds
+        instance.encrypted_credential_ref = encrypted_credential_ref
+        instance.cloud_provider = cloud_provider
+        instance.updated_at = datetime.now(UTC)
+        await self._session.commit()
+        await self._session.refresh(instance)
+        return instance
+
+    async def purge_expired_soft_deleted(self) -> int:
+        """Hard-delete de instâncias cujo período de carência (30 dias) expirou.
+        Deve ser chamado periodicamente (ex.: job diário no startup). Retorna quantas foram purgadas."""
+        cutoff = datetime.now(UTC) - timedelta(days=_SOFT_DELETE_GRACE_DAYS)
+        result = await self._session.execute(
+            select(Instance).where(
+                Instance.deleted_at.is_not(None),
+                Instance.deleted_at < cutoff,
+            )
+        )
+        expired = list(result.scalars().all())
+        for inst in expired:
+            await self._session.delete(inst)
+        if expired:
+            await self._session.commit()
+        return len(expired)
 
     async def update_settings(
         self,
