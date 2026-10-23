@@ -29,8 +29,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import CurrentUser, get_current_user, get_db_session, require_admin
+from app.api.deps import CurrentUser, PlanService, get_current_user, get_db_session, get_plan_service, require_admin
+from app.repositories.instances_repository import InstancesRepository
 from app.repositories.password_reset_tokens_repository import PasswordResetTokensRepository
+from app.repositories.system_license_repository import SystemLicenseRepository
+from app.services.plan_service import PLANS
 from app.repositories.user_instance_access_repository import UserInstanceAccessRepository
 from app.repositories.users_repository import UsersRepository
 from app.services.audit_service import record_audit
@@ -132,6 +135,25 @@ class UserPatchRequest(BaseModel):
     is_active: bool | None = None
 
 
+class PlanInfoResponse(BaseModel):
+    """Informacoes do plano atual do sistema."""
+
+    plan_id: str
+    label: str
+    max_instances: int | None
+    history_days: int
+    trial_days_remaining: int | None
+    instance_count: int
+    is_trial: bool
+
+
+class UpdatePlanRequest(BaseModel):
+    """Corpo do PUT /plan — atualiza o plano do sistema."""
+
+    plan_id: str = Field(pattern="^(free|pro|team)$")
+    subscription_expires_at: datetime | None = None
+
+
 # ---------------------------------------------------------------------------
 # Dependency providers
 # ---------------------------------------------------------------------------
@@ -205,6 +227,68 @@ async def me(
         user_id=current_user.user_id,
         username=current_user.username,
         role=current_user.role,
+    )
+
+
+@router.get("/plan", response_model=PlanInfoResponse)
+async def get_plan_info(
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    plan: Annotated[PlanService, Depends(get_plan_service)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> PlanInfoResponse:
+    """Retorna o plano atual do sistema com limites e contagem de instancias."""
+    effective = plan.effective_plan()
+    instances_repo = InstancesRepository(session)
+    instance_count = await instances_repo.count()
+    return PlanInfoResponse(
+        plan_id=effective.plan_id,
+        label=effective.label,
+        max_instances=effective.max_instances,
+        history_days=effective.history_days,
+        trial_days_remaining=plan.trial_days_remaining(),
+        instance_count=instance_count,
+        is_trial=effective.plan_id == "trial",
+    )
+
+
+@router.put("/plan", response_model=PlanInfoResponse)
+async def update_plan(
+    payload: UpdatePlanRequest,
+    _admin: Annotated[CurrentUser, Depends(require_admin)],
+    plan: Annotated[PlanService, Depends(get_plan_service)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> PlanInfoResponse:
+    """Atualiza o plano do sistema (admin only).
+
+    - `plan_id`: "free" | "pro" | "team"
+    - `subscription_expires_at`: data de expiracao da assinatura (null = sem expiracao)
+
+    Nao aceita "trial" — o trial e definido automaticamente na instalacao.
+    """
+    if payload.plan_id not in PLANS:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Plano desconhecido: {payload.plan_id}")
+    repo = SystemLicenseRepository(session)
+    await repo.update_plan(payload.plan_id, payload.subscription_expires_at)
+    await session.commit()
+    # Re-resolve o plano apos o update para retornar o estado atualizado
+    updated_license = await repo.get()
+    assert updated_license is not None
+    updated_plan = PlanService(
+        trial_started_at=updated_license.trial_started_at,
+        plan_id=updated_license.plan_id,
+        subscription_expires_at=updated_license.subscription_expires_at,
+    )
+    effective = updated_plan.effective_plan()
+    instances_repo = InstancesRepository(session)
+    instance_count = await instances_repo.count()
+    return PlanInfoResponse(
+        plan_id=effective.plan_id,
+        label=effective.label,
+        max_instances=effective.max_instances,
+        history_days=effective.history_days,
+        trial_days_remaining=updated_plan.trial_days_remaining(),
+        instance_count=instance_count,
+        is_trial=effective.plan_id == "trial",
     )
 
 

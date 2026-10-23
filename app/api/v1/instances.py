@@ -15,9 +15,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import (
     CurrentUser,
+    PlanConfig,
+    PlanService,
     check_instance_access,
     get_current_user,
     get_db_session,
+    get_plan_service,
     require_admin,
 )
 from app.collectors.base import CapabilityResult
@@ -273,8 +276,21 @@ async def create_instance(
     service: Annotated[InstanceService, Depends(get_instance_service)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
     current_admin: Annotated[CurrentUser, Depends(require_admin)],
+    plan: Annotated[PlanService, Depends(get_plan_service)],
 ) -> InstanceDetailResponse:
     """Testa a conexao e, se as capacidades mandatorias estiverem OK, cadastra a instancia."""
+    effective = plan.effective_plan()
+    if effective.max_instances is not None:
+        instances_repo = InstancesRepository(session)
+        total = await instances_repo.count()
+        if total >= effective.max_instances:
+            raise HTTPException(
+                status_code=status.HTTP_402_PAYMENT_REQUIRED,
+                detail=(
+                    f"Limite do plano atingido: o plano atual permite até {effective.max_instances} instância(s). "
+                    "Acesse Settings → License para fazer upgrade."
+                ),
+            )
     ip = request.client.host if request.client else None
     password = payload.password.get_secret_value() if payload.password is not None else None
     register_input = RegisterInstanceInput(

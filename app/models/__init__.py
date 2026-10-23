@@ -17,6 +17,7 @@ from app.models.missing_index_suggestion import MissingIndexSuggestion
 from app.models.password_reset_token import PasswordResetToken
 from app.models.query_plan_snapshot import QueryPlanSnapshot
 from app.models.server import InstanceServer, Server
+from app.models.system_license import SystemLicense
 from app.models.system_settings import SystemSettings
 from app.models.transaction_event import TransactionEvent
 from app.models.user import User
@@ -37,6 +38,7 @@ __all__ = [
     "BlockingIncident",
     "DeadlockEvent",
     "QueryPlanSnapshot",
+    "SystemLicense",
     "SystemSettings",
     "User",
     "PasswordResetToken",

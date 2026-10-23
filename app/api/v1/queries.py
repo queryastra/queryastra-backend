@@ -52,7 +52,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import check_instance_access, get_db_session, resolve_time_window
+from app.api.deps import PlanService, check_instance_access, get_db_session, get_plan_service, resolve_time_window
 from app.core.config import get_settings
 from app.repositories.instances_repository import InstancesRepository
 from app.repositories.query_plan_snapshots_repository import QueryPlanSnapshotsRepository
@@ -1050,6 +1050,7 @@ async def list_timeslice(
     instance_id: UUID,
     _access: Annotated[None, Depends(check_instance_access)],
     repository: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
+    plan: Annotated[PlanService, Depends(get_plan_service)],
     since: Annotated[datetime, Query(alias="from")],
     until: Annotated[datetime, Query(alias="to")],
     dimension: Annotated[
@@ -1078,6 +1079,7 @@ async def list_timeslice(
     `from`/`to` são OBRIGATÓRIOS aqui (diferente das demais rotas deste arquivo, que caem pro
     lookback padrão) — a "Fatia de Tempo" sempre ancora num período já escolhido pelo usuário
     (a hora/bucket clicado no nível anterior do drill-down), nunca "os últimos N segundos"."""
+    since = plan.clamp_from(since)
     repository_method_name, label_column = _TIMESLICE_DIMENSIONS[dimension]
     repository_method = getattr(repository, repository_method_name)
     settings = get_settings()
