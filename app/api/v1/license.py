@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, get_current_user, get_db_session, get_plan_service, require_admin
 from app.core.config import get_settings
+from app.repositories.instances_repository import InstancesRepository
 from app.repositories.system_license_repository import SystemLicenseRepository
 from app.services.plan_service import PLANS, PlanService
 
@@ -36,6 +37,7 @@ class LicenseStatusResponse(BaseModel):
     license_key_masked: str | None
     max_instances: int | None
     history_days: int
+    paused_instance_count: int = 0
 
 
 def _to_response(
@@ -44,6 +46,7 @@ def _to_response(
     row_subscription_expires_at: datetime | None,
     row_license_key: str | None,
     plan_svc: PlanService,
+    paused_instance_count: int = 0,
 ) -> LicenseStatusResponse:
     effective = plan_svc.effective_plan()
     masked = None
@@ -58,6 +61,7 @@ def _to_response(
         license_key_masked=masked,
         max_instances=effective.max_instances,
         history_days=effective.history_days,
+        paused_instance_count=paused_instance_count,
     )
 
 
@@ -171,10 +175,24 @@ async def activate_license(
         plan_id=row.plan_id,
         subscription_expires_at=row.subscription_expires_at,
     )
+    new_effective = new_plan_svc.effective_plan()
+    paused_count = 0
+    if new_effective.max_instances is not None:
+        instances_repo = InstancesRepository(session)
+        active = await instances_repo.list_active()
+        excess = len(active) - new_effective.max_instances
+        if excess > 0:
+            to_pause = sorted(active, key=lambda i: i.created_at, reverse=True)[:excess]
+            for inst in to_pause:
+                inst.active = False
+            await session.commit()
+            paused_count = excess
+
     return _to_response(
         row.plan_id,
         row.trial_started_at,
         row.subscription_expires_at,
         row.license_key,
         new_plan_svc,
+        paused_instance_count=paused_count,
     )
