@@ -1,7 +1,8 @@
 """Endpoints on-demand de saude do banco — Fase 5 (T55, T57, T58, T59, T61, T62, T63, T64, T65, T68, T69).
 
 Todos os endpoints consultam diretamente o servidor monitorado a cada requisicao (sem
-persistencia), exceto T62 que agrega dados do `query_samples` local.
+persistencia), exceto T62 e os novos endpoints locais que agregam dados do `query_samples`/
+`blocking_events`/`metric_samples` local.
 
 T55: index bloat (PostgreSQL only)
 T57: bgwriter/checkpoints (PostgreSQL only)
@@ -12,6 +13,12 @@ T62: wait events heatmap (PostgreSQL + SQL Server; agrega query_samples local)
 T63: database sizes (PostgreSQL + SQL Server)
 T64: config compliance (PostgreSQL + SQL Server)
 T65: connection consumers (PostgreSQL + SQL Server)
+schema-health: indices duplicados, tabelas sem PK, FKs sem indice (PostgreSQL + SQL Server)
+buffer-cache: cache de buffer por tabela + tempfiles + file I/O (PostgreSQL/SQL Server)
+hot-objects: objetos mais bloqueados por total_wait_ms (local, blocking_events)
+concurrency-trend: tendencia de sessoes ativas por hora (local, metric_samples)
+workload-classification: distribuicao OLTP/analytics/maintenance/other (local, query_samples)
+explain-plan: EXPLAIN (FORMAT JSON) sob demanda (PostgreSQL only)
 """
 
 from __future__ import annotations
@@ -22,6 +29,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import check_instance_access, get_db_session
@@ -594,3 +602,373 @@ async def get_table_io_stats(
         await collector.close()
 
     return [TableIoStatsResponse(**e.model_dump()) for e in entries]
+
+
+# ── Schema Health ──────────────────────────────────────────────────────────────
+
+
+class SchemaHealthItemResponse(BaseModel):
+    category: str
+    schema_name: str
+    table_name: str
+    object_name: str | None = None
+    detail: dict = {}
+    severity: str
+
+
+@router.get("/{instance_id}/schema-health", response_model=list[SchemaHealthItemResponse])
+async def get_schema_health(
+    instance_id: UUID,
+    _access: Annotated[None, Depends(check_instance_access)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    credential_resolver: CredentialResolver = Depends(CredentialResolver),  # noqa: B008
+) -> list[SchemaHealthItemResponse]:
+    """Saude do schema: indices duplicados, tabelas sem PK, FKs sem indice.
+
+    PostgreSQL: detecta as tres categorias. SQL Server: missing_pk e duplicate_index.
+    Consulta on-demand no servidor monitorado."""
+    collector = await _build_collector(instance_id, session, credential_resolver)
+    try:
+        items = await collector.collect_schema_health()
+    except Exception as exc:
+        logger.exception("Erro ao coletar schema health para instance_id=%s", instance_id)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Erro ao consultar schema health na instancia.",
+        ) from exc
+    finally:
+        await collector.close()
+
+    return [SchemaHealthItemResponse(**i.model_dump()) for i in items]
+
+
+# ── Buffer Cache ───────────────────────────────────────────────────────────────
+
+
+class BufferTableStatsResponse(BaseModel):
+    schema_name: str
+    table_name: str
+    heap_blks_read: int
+    heap_blks_hit: int
+    hit_ratio: float
+    idx_blks_read: int
+    idx_blks_hit: int
+    idx_hit_ratio: float
+
+
+class TempfileStatsResponse(BaseModel):
+    database_name: str
+    temp_files: int
+    temp_bytes: int
+
+
+class FileIoStatsResponse(BaseModel):
+    database_name: str
+    file_name: str
+    io_stall_read_ms: int
+    io_stall_write_ms: int
+    num_of_reads: int
+    num_of_writes: int
+    avg_read_ms: float
+    avg_write_ms: float
+
+
+class BufferCacheResponse(BaseModel):
+    table_stats: list[BufferTableStatsResponse]
+    tempfile_stats: list[TempfileStatsResponse]
+    file_io_stats: list[FileIoStatsResponse]
+
+
+@router.get("/{instance_id}/buffer-cache", response_model=BufferCacheResponse)
+async def get_buffer_cache(
+    instance_id: UUID,
+    _access: Annotated[None, Depends(check_instance_access)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    credential_resolver: CredentialResolver = Depends(CredentialResolver),  # noqa: B008
+) -> BufferCacheResponse:
+    """Cache de buffer por tabela, tempfiles e file I/O stats.
+
+    PostgreSQL: table_stats e tempfile_stats preenchidos; file_io_stats vazio.
+    SQL Server: file_io_stats preenchido; table_stats e tempfile_stats vazios.
+    Consulta on-demand no servidor monitorado."""
+    collector = await _build_collector(instance_id, session, credential_resolver)
+    try:
+        table_stats, tempfile_stats, file_io_stats = await collector.collect_buffer_cache_stats()
+    except Exception as exc:
+        logger.exception("Erro ao coletar buffer cache stats para instance_id=%s", instance_id)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Erro ao consultar buffer cache stats na instancia.",
+        ) from exc
+    finally:
+        await collector.close()
+
+    return BufferCacheResponse(
+        table_stats=[BufferTableStatsResponse(**t.model_dump()) for t in table_stats],
+        tempfile_stats=[TempfileStatsResponse(**t.model_dump()) for t in tempfile_stats],
+        file_io_stats=[FileIoStatsResponse(**f.model_dump()) for f in file_io_stats],
+    )
+
+
+# ── Hot Objects ────────────────────────────────────────────────────────────────
+
+
+class HotObjectResponse(BaseModel):
+    object_name: str
+    incident_count: int
+    total_wait_ms: int
+
+
+@router.get("/{instance_id}/hot-objects", response_model=list[HotObjectResponse])
+async def get_hot_objects(
+    instance_id: UUID,
+    _access: Annotated[None, Depends(check_instance_access)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    window: int = Query(default=24, ge=1, le=168, description="Janela em horas (1-168)"),
+) -> list[HotObjectResponse]:
+    """Top 20 objetos mais bloqueados por total_wait_ms na janela especificada.
+
+    Consulta a hypertable local `blocking_events` — nao conecta ao servidor monitorado.
+    PostgreSQL + SQL Server."""
+    stmt = text("""
+        SELECT blocked_object, COUNT(*) AS incident_count, SUM(wait_time_ms) AS total_wait_ms
+        FROM blocking_events
+        WHERE instance_id = :instance_id
+          AND time > NOW() - INTERVAL ':window hours'
+          AND blocked_object IS NOT NULL
+        GROUP BY blocked_object
+        ORDER BY total_wait_ms DESC
+        LIMIT 20
+    """.replace(":window", str(window)))
+
+    try:
+        result = await session.execute(stmt, {"instance_id": str(instance_id)})
+        rows = result.fetchall()
+    except Exception as exc:
+        logger.exception("Erro ao consultar hot objects para instance_id=%s", instance_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erro ao consultar hot objects.",
+        ) from exc
+
+    return [
+        HotObjectResponse(
+            object_name=str(row.blocked_object),
+            incident_count=int(row.incident_count),
+            total_wait_ms=int(row.total_wait_ms),
+        )
+        for row in rows
+    ]
+
+
+# ── Concurrency Trend ──────────────────────────────────────────────────────────
+
+
+class ConcurrencyPointResponse(BaseModel):
+    bucket: str
+    max_sessions: int
+    avg_sessions: float
+    min_sessions: int
+
+
+@router.get("/{instance_id}/concurrency-trend", response_model=list[ConcurrencyPointResponse])
+async def get_concurrency_trend(
+    instance_id: UUID,
+    _access: Annotated[None, Depends(check_instance_access)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    window: int = Query(default=24, ge=1, le=168, description="Janela em horas (1-168)"),
+) -> list[ConcurrencyPointResponse]:
+    """Tendencia de sessoes ativas (metric_name='active_sessions') por hora.
+
+    Consulta a hypertable local `metric_samples` — nao conecta ao servidor monitorado.
+    PostgreSQL + SQL Server."""
+    stmt = text("""
+        SELECT time_bucket('1 hour', time) AS bucket,
+               MAX(value) AS max_sessions,
+               AVG(value) AS avg_sessions,
+               MIN(value) AS min_sessions
+        FROM metric_samples
+        WHERE target_id = :instance_id
+          AND metric_name = 'active_sessions'
+          AND time > NOW() - INTERVAL ':window hours'
+        GROUP BY bucket
+        ORDER BY bucket
+    """.replace(":window", str(window)))
+
+    try:
+        result = await session.execute(stmt, {"instance_id": str(instance_id)})
+        rows = result.fetchall()
+    except Exception as exc:
+        logger.exception("Erro ao consultar concurrency trend para instance_id=%s", instance_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erro ao consultar concurrency trend.",
+        ) from exc
+
+    return [
+        ConcurrencyPointResponse(
+            bucket=row.bucket.isoformat() if hasattr(row.bucket, "isoformat") else str(row.bucket),
+            max_sessions=int(row.max_sessions),
+            avg_sessions=float(row.avg_sessions),
+            min_sessions=int(row.min_sessions),
+        )
+        for row in rows
+    ]
+
+
+# ── Workload Classification ────────────────────────────────────────────────────
+
+
+class WorkloadClassificationResponse(BaseModel):
+    oltp_pct: float
+    analytics_pct: float
+    maintenance_pct: float
+    other_pct: float
+    oltp_count: int
+    analytics_count: int
+    maintenance_count: int
+    other_count: int
+    period_hours: int
+
+
+@router.get("/{instance_id}/workload-classification", response_model=WorkloadClassificationResponse)
+async def get_workload_classification(
+    instance_id: UUID,
+    _access: Annotated[None, Depends(check_instance_access)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    window: int = Query(default=24, ge=1, le=168, description="Janela em horas (1-168)"),
+) -> WorkloadClassificationResponse:
+    """Distribuicao do workload em OLTP / analytics / maintenance / other.
+
+    Classifica amostras de `query_samples` locais — nao conecta ao servidor monitorado.
+    Regras: oltp = duration_ms < 1000 sem wait ou CPU wait; analytics = duration_ms >= 5000
+    ou wait I/O; maintenance = wait Lock ou programa com 'maintenance'/'backup'/'vacuum'.
+    PostgreSQL + SQL Server."""
+    stmt = text("""
+        SELECT
+            SUM(CASE WHEN COALESCE(duration_ms, 0) < 1000 AND wait_type NOT IN ('Lock','IO') THEN 1 ELSE 0 END) AS oltp_count,
+            SUM(CASE WHEN COALESCE(duration_ms, 0) >= 5000 OR wait_type = 'IO' THEN 1 ELSE 0 END) AS analytics_count,
+            SUM(CASE WHEN wait_type = 'Lock' OR lower(program) LIKE ANY(ARRAY['%maintenance%','%backup%','%vacuum%']) THEN 1 ELSE 0 END) AS maintenance_count,
+            COUNT(*) AS total_count
+        FROM query_samples
+        WHERE instance_id = :instance_id
+          AND time > NOW() - INTERVAL ':window hours'
+    """.replace(":window", str(window)))
+
+    try:
+        result = await session.execute(stmt, {"instance_id": str(instance_id)})
+        row = result.fetchone()
+    except Exception as exc:
+        logger.exception("Erro ao classificar workload para instance_id=%s", instance_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erro ao classificar workload.",
+        ) from exc
+
+    if row is None or int(row.total_count or 0) == 0:
+        return WorkloadClassificationResponse(
+            oltp_pct=0.0, analytics_pct=0.0, maintenance_pct=0.0, other_pct=0.0,
+            oltp_count=0, analytics_count=0, maintenance_count=0, other_count=0,
+            period_hours=window,
+        )
+
+    total = int(row.total_count)
+    oltp = int(row.oltp_count or 0)
+    analytics = int(row.analytics_count or 0)
+    maintenance = int(row.maintenance_count or 0)
+    other = max(0, total - oltp - analytics - maintenance)
+
+    def pct(n: int) -> float:
+        return round(n / total * 100, 2) if total > 0 else 0.0
+
+    return WorkloadClassificationResponse(
+        oltp_pct=pct(oltp),
+        analytics_pct=pct(analytics),
+        maintenance_pct=pct(maintenance),
+        other_pct=pct(other),
+        oltp_count=oltp,
+        analytics_count=analytics,
+        maintenance_count=maintenance,
+        other_count=other,
+        period_hours=window,
+    )
+
+
+# ── Explain Plan ───────────────────────────────────────────────────────────────
+
+
+class ExplainPlanResponse(BaseModel):
+    engine: str
+    sql_hash: str
+    plan: dict | None = None
+    cached_plan_available: bool
+
+
+@router.get("/{instance_id}/explain-plan", response_model=ExplainPlanResponse)
+async def get_explain_plan(
+    instance_id: UUID,
+    _access: Annotated[None, Depends(check_instance_access)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    credential_resolver: CredentialResolver = Depends(CredentialResolver),  # noqa: B008
+    sql_hash: str = Query(..., description="Hash da query (sql_hash de query_samples)"),
+) -> ExplainPlanResponse:
+    """EXPLAIN (FORMAT JSON) sob demanda para o texto mascarado associado ao sql_hash.
+
+    Busca o sql_text_masked mais recente associado ao sql_hash nos query_samples locais e
+    executa EXPLAIN contra o servidor monitorado. PostgreSQL only — SQL Server retorna
+    cached_plan_available=false. O texto mascarado e seguro pois EXPLAIN apenas planeja,
+    nunca executa o statement."""
+    # Lookup sql_text from local query_samples
+    lookup_stmt = text("""
+        SELECT sql_text_masked
+        FROM query_samples
+        WHERE instance_id = :instance_id AND sql_hash = :sql_hash
+        ORDER BY time DESC
+        LIMIT 1
+    """)
+    try:
+        lookup_result = await session.execute(
+            lookup_stmt, {"instance_id": str(instance_id), "sql_hash": sql_hash}
+        )
+        lookup_row = lookup_result.fetchone()
+    except Exception as exc:
+        logger.exception("Erro ao buscar sql_text para sql_hash=%s instance_id=%s", sql_hash, instance_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erro ao buscar texto da query.",
+        ) from exc
+
+    if lookup_row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="sql_hash nao encontrado nos query_samples desta instancia.",
+        )
+
+    sql_text_masked: str = str(lookup_row.sql_text_masked)
+
+    collector = await _build_collector(instance_id, session, credential_resolver)
+    try:
+        plan = await collector.explain_plan_for_hash(sql_text_masked)
+    except Exception as exc:
+        logger.exception("Erro ao executar EXPLAIN para instance_id=%s sql_hash=%s", instance_id, sql_hash)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Erro ao executar EXPLAIN na instancia.",
+        ) from exc
+    finally:
+        await collector.close()
+
+    # Resolve engine name from instance record
+    instance_repo_result = await session.execute(
+        text("SELECT db_type FROM instances WHERE id = :id"),
+        {"id": str(instance_id)},
+    )
+    instance_row = instance_repo_result.fetchone()
+    engine_name = str(instance_row.db_type) if instance_row else "unknown"
+
+    return ExplainPlanResponse(
+        engine=engine_name,
+        sql_hash=sql_hash,
+        plan=plan,
+        cached_plan_available=plan is not None,
+    )

@@ -90,6 +90,7 @@ from app.normalizers.models import (
     NormalizedBackupStatus,
     NormalizedBgwriterStats,
     NormalizedBlockingEvent,
+    NormalizedBufferTableStats,
     NormalizedConfirmedTransactionError,
     NormalizedConfigComplianceItem,
     NormalizedConnectionConsumer,
@@ -104,7 +105,9 @@ from app.normalizers.models import (
     NormalizedPlanSnapshot,
     NormalizedQuerySample,
     NormalizedReplicationSlot,
+    NormalizedSchemaHealthItem,
     NormalizedTableIoStats,
+    NormalizedTempfileStats,
     NormalizedTransactionEvent,
     NormalizedUnusedIndex,
     NormalizedUserFunction,
@@ -448,6 +451,88 @@ _QUERY_STATS_SNAPSHOT_QUERY = """
     WHERE calls > 0
     ORDER BY total_exec_time DESC
     LIMIT 200
+"""
+
+# Schema health — duplicate indexes, tables without PK, FKs without supporting index.
+_SCHEMA_HEALTH_DUPLICATE_INDEXES_QUERY = """
+SELECT
+    n.nspname AS schema_name,
+    t.relname AS table_name,
+    i1.relname AS index_name,
+    i2.relname AS duplicate_of,
+    pg_get_indexdef(ix1.indexrelid) AS index_def
+FROM pg_index ix1
+JOIN pg_index ix2 ON ix1.indrelid = ix2.indrelid
+    AND ix1.indexrelid < ix2.indexrelid
+    AND ix1.indkey::text = ix2.indkey::text
+JOIN pg_class i1 ON i1.oid = ix1.indexrelid
+JOIN pg_class i2 ON i2.oid = ix2.indexrelid
+JOIN pg_class t ON t.oid = ix1.indrelid
+JOIN pg_namespace n ON n.oid = t.relnamespace
+WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+ORDER BY n.nspname, t.relname
+"""
+
+_SCHEMA_HEALTH_MISSING_PK_QUERY = """
+SELECT n.nspname AS schema_name, c.relname AS table_name
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind = 'r'
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+  AND NOT EXISTS (
+      SELECT 1 FROM pg_constraint con
+      WHERE con.conrelid = c.oid AND con.contype = 'p'
+  )
+ORDER BY n.nspname, c.relname
+LIMIT 50
+"""
+
+_SCHEMA_HEALTH_FK_WITHOUT_INDEX_QUERY = """
+SELECT n.nspname AS schema_name, c.relname AS table_name,
+       con.conname AS fk_name,
+       array_to_string(ARRAY(SELECT a.attname FROM pg_attribute a
+           WHERE a.attrelid = con.conrelid AND a.attnum = ANY(con.conkey)
+           ORDER BY a.attnum), ', ') AS fk_columns
+FROM pg_constraint con
+JOIN pg_class c ON c.oid = con.conrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE con.contype = 'f'
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+  AND NOT EXISTS (
+      SELECT 1 FROM pg_index i
+      WHERE i.indrelid = con.conrelid
+        AND (i.indkey::smallint[])[0:array_length(con.conkey,1)-1] @> con.conkey::smallint[]
+  )
+ORDER BY n.nspname, c.relname
+LIMIT 50
+"""
+
+# Buffer cache stats — pg_statio_user_tables.
+_BUFFER_TABLE_STATS_QUERY = """
+SELECT n.nspname AS schema_name, c.relname AS table_name,
+       COALESCE(s.heap_blks_read, 0) AS heap_blks_read,
+       COALESCE(s.heap_blks_hit, 0) AS heap_blks_hit,
+       CASE WHEN COALESCE(s.heap_blks_read,0) + COALESCE(s.heap_blks_hit,0) > 0
+            THEN COALESCE(s.heap_blks_hit,0)::float / (COALESCE(s.heap_blks_read,0) + COALESCE(s.heap_blks_hit,0))
+            ELSE 1.0 END AS hit_ratio,
+       COALESCE(s.idx_blks_read, 0) AS idx_blks_read,
+       COALESCE(s.idx_blks_hit, 0) AS idx_blks_hit,
+       CASE WHEN COALESCE(s.idx_blks_read,0) + COALESCE(s.idx_blks_hit,0) > 0
+            THEN COALESCE(s.idx_blks_hit,0)::float / (COALESCE(s.idx_blks_read,0) + COALESCE(s.idx_blks_hit,0))
+            ELSE 1.0 END AS idx_hit_ratio
+FROM pg_statio_user_tables s
+JOIN pg_class c ON c.oid = s.relid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
+ORDER BY (COALESCE(s.heap_blks_read,0) + COALESCE(s.idx_blks_read,0)) DESC
+LIMIT 50
+"""
+
+_TEMPFILE_STATS_QUERY = """
+SELECT datname AS database_name, temp_files, temp_bytes
+FROM pg_stat_database
+WHERE datname NOT IN ('template0','template1','postgres')
+ORDER BY temp_bytes DESC
 """
 
 # Fase 5 T63 — tamanho de cada banco de dados (on-demand, nao template).
@@ -1886,6 +1971,132 @@ class PostgreSQLCollector:
             )
             for row in rows
         ]
+
+    async def collect_schema_health(self) -> list[NormalizedSchemaHealthItem]:
+        """Schema health — duplicate indexes, missing PKs, FKs without index (on-demand)."""
+        import json as _json  # noqa: PLC0415
+
+        settings = get_settings()
+        conn = await asyncio.wait_for(
+            self._connect(), timeout=self._connection_params.connect_timeout_seconds
+        )
+        results: list[NormalizedSchemaHealthItem] = []
+        try:
+            dup_rows = await asyncio.wait_for(
+                conn.fetch(_SCHEMA_HEALTH_DUPLICATE_INDEXES_QUERY),
+                timeout=settings.collection_query_timeout_seconds,
+            )
+            for row in dup_rows:
+                results.append(
+                    NormalizedSchemaHealthItem(
+                        category="duplicate_index",
+                        schema_name=str(row["schema_name"]),
+                        table_name=str(row["table_name"]),
+                        object_name=str(row["index_name"]),
+                        detail={
+                            "duplicate_of": str(row["duplicate_of"]),
+                            "index_def": str(row["index_def"]),
+                        },
+                        severity="warning",
+                    )
+                )
+
+            pk_rows = await asyncio.wait_for(
+                conn.fetch(_SCHEMA_HEALTH_MISSING_PK_QUERY),
+                timeout=settings.collection_query_timeout_seconds,
+            )
+            for row in pk_rows:
+                results.append(
+                    NormalizedSchemaHealthItem(
+                        category="missing_pk",
+                        schema_name=str(row["schema_name"]),
+                        table_name=str(row["table_name"]),
+                        severity="warning",
+                    )
+                )
+
+            fk_rows = await asyncio.wait_for(
+                conn.fetch(_SCHEMA_HEALTH_FK_WITHOUT_INDEX_QUERY),
+                timeout=settings.collection_query_timeout_seconds,
+            )
+            for row in fk_rows:
+                results.append(
+                    NormalizedSchemaHealthItem(
+                        category="fk_without_index",
+                        schema_name=str(row["schema_name"]),
+                        table_name=str(row["table_name"]),
+                        object_name=str(row["fk_name"]),
+                        detail={"fk_columns": str(row["fk_columns"])},
+                        severity="warning",
+                    )
+                )
+        finally:
+            await conn.close()
+
+        return results
+
+    async def collect_buffer_cache_stats(
+        self,
+    ) -> tuple[list[NormalizedBufferTableStats], list[NormalizedTempfileStats], list]:
+        """Buffer cache e tempfile stats — PostgreSQL only (on-demand)."""
+        settings = get_settings()
+        conn = await asyncio.wait_for(
+            self._connect(), timeout=self._connection_params.connect_timeout_seconds
+        )
+        try:
+            buf_rows = await asyncio.wait_for(
+                conn.fetch(_BUFFER_TABLE_STATS_QUERY),
+                timeout=settings.collection_query_timeout_seconds,
+            )
+            tmp_rows = await asyncio.wait_for(
+                conn.fetch(_TEMPFILE_STATS_QUERY),
+                timeout=settings.collection_query_timeout_seconds,
+            )
+        finally:
+            await conn.close()
+
+        table_stats = [
+            NormalizedBufferTableStats(
+                schema_name=str(r["schema_name"]),
+                table_name=str(r["table_name"]),
+                heap_blks_read=int(r["heap_blks_read"] or 0),
+                heap_blks_hit=int(r["heap_blks_hit"] or 0),
+                hit_ratio=float(r["hit_ratio"] or 1.0),
+                idx_blks_read=int(r["idx_blks_read"] or 0),
+                idx_blks_hit=int(r["idx_blks_hit"] or 0),
+                idx_hit_ratio=float(r["idx_hit_ratio"] or 1.0),
+            )
+            for r in buf_rows
+        ]
+        tempfile_stats = [
+            NormalizedTempfileStats(
+                database_name=str(r["database_name"]),
+                temp_files=int(r["temp_files"] or 0),
+                temp_bytes=int(r["temp_bytes"] or 0),
+            )
+            for r in tmp_rows
+        ]
+        return table_stats, tempfile_stats, []
+
+    async def explain_plan_for_hash(self, sql_text: str) -> dict | None:
+        """Executa EXPLAIN (FORMAT JSON) no texto mascarado — PostgreSQL only (on-demand)."""
+        import json as _json  # noqa: PLC0415
+
+        try:
+            conn = await asyncio.wait_for(
+                self._connect(), timeout=self._connection_params.connect_timeout_seconds
+            )
+            try:
+                rows = await conn.fetch(
+                    f"EXPLAIN (FORMAT JSON, VERBOSE true, COSTS true) {sql_text}"
+                )
+            finally:
+                await conn.close()
+            if rows:
+                return _json.loads(rows[0][0])
+        except Exception:
+            return None
+        return None
 
     async def close(self) -> None:
         """Sem estado persistente entre chamadas (cada `check_capabilities` fecha sua conexao)."""

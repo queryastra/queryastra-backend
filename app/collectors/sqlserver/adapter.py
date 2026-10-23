@@ -96,18 +96,22 @@ from app.normalizers.metric_names import (
 from app.normalizers.models import (
     NormalizedBackupStatus,
     NormalizedBlockingEvent,
+    NormalizedBufferTableStats,
     NormalizedConfirmedTransactionError,
     NormalizedConfigComplianceItem,
     NormalizedConnectionConsumer,
     NormalizedDbSize,
     NormalizedDeadlockEvent,
+    NormalizedFileIoStats,
     NormalizedIdleInTransactionSession,
     NormalizedMetricSample,
     NormalizedMissingIndexSuggestion,
     NormalizedPlanCompileTimeoutFinding,
     NormalizedPlanSnapshot,
     NormalizedQuerySample,
+    NormalizedSchemaHealthItem,
     NormalizedTempDbStats,
+    NormalizedTempfileStats,
     NormalizedTransactionEvent,
 )
 from app.normalizers.wait_taxonomy import map_wait_event
@@ -1420,6 +1424,47 @@ GROUP BY name
 ORDER BY size_bytes DESC
 """
 
+_SS_SCHEMA_HEALTH_MISSING_PK_QUERY = """
+SELECT s.name AS schema_name, t.name AS table_name
+FROM sys.tables t
+JOIN sys.schemas s ON s.schema_id = t.schema_id
+WHERE OBJECTPROPERTY(t.object_id, 'TableHasPrimaryKey') = 0
+  AND t.is_ms_shipped = 0
+ORDER BY s.name, t.name
+"""
+
+_SS_SCHEMA_HEALTH_DUPLICATE_INDEXES_QUERY = """
+SELECT s.name AS schema_name, t.name AS table_name,
+       i1.name AS index_name, i2.name AS overlaps_with
+FROM sys.indexes i1
+JOIN sys.indexes i2 ON i1.object_id = i2.object_id AND i1.index_id < i2.index_id
+JOIN sys.tables t ON t.object_id = i1.object_id
+JOIN sys.schemas s ON s.schema_id = t.schema_id
+WHERE i1.is_disabled = 0 AND i2.is_disabled = 0
+  AND i1.index_id > 0 AND i2.index_id > 0
+  AND (SELECT STRING_AGG(CAST(ic1.column_id AS VARCHAR), ',')
+       WITHIN GROUP (ORDER BY ic1.key_ordinal)
+       FROM sys.index_columns ic1 WHERE ic1.object_id = i1.object_id AND ic1.index_id = i1.index_id AND ic1.is_included_column = 0) =
+      (SELECT STRING_AGG(CAST(ic2.column_id AS VARCHAR), ',')
+       WITHIN GROUP (ORDER BY ic2.key_ordinal)
+       FROM sys.index_columns ic2 WHERE ic2.object_id = i2.object_id AND ic2.index_id = i2.index_id AND ic2.is_included_column = 0)
+"""
+
+_SS_FILE_IO_STATS_QUERY = """
+SELECT DB_NAME(fs.database_id) AS database_name,
+       mf.physical_name AS file_name,
+       fs.io_stall_read AS io_stall_read_ms,
+       fs.io_stall_write AS io_stall_write_ms,
+       fs.num_of_reads,
+       fs.num_of_writes,
+       CASE WHEN fs.num_of_reads > 0 THEN fs.io_stall_read * 1.0 / fs.num_of_reads ELSE 0 END AS avg_read_ms,
+       CASE WHEN fs.num_of_writes > 0 THEN fs.io_stall_write * 1.0 / fs.num_of_writes ELSE 0 END AS avg_write_ms
+FROM sys.dm_io_virtual_file_stats(NULL, NULL) fs
+JOIN sys.master_files mf ON mf.database_id = fs.database_id AND mf.file_id = fs.file_id
+WHERE DB_NAME(fs.database_id) IS NOT NULL
+ORDER BY (fs.io_stall_read + fs.io_stall_write) DESC
+"""
+
 
 def _connect_and_collect_tempdb_stats(
     connection: ConnectionParams,
@@ -1492,6 +1537,92 @@ def _connect_and_collect_db_sizes_ss(
         NormalizedDbSize(
             database_name=str(r["database_name"]),
             size_bytes=int(r["size_bytes"]),
+        )
+        for r in rows
+    ]
+
+
+def _connect_and_collect_schema_health_ss(
+    connection: ConnectionParams,
+    query_timeout_seconds: float,
+) -> list[NormalizedSchemaHealthItem]:
+    """Helper sincrono — schema health (missing PK + duplicate indexes) para SQL Server."""
+    login_timeout_seconds = int(connection.connect_timeout_seconds)
+    conn = pymssql.connect(
+        server=connection.host,
+        port=str(connection.port),
+        user=connection.username,
+        password=connection.secret_value,
+        timeout=int(query_timeout_seconds),
+        login_timeout=login_timeout_seconds,
+    )
+    results: list[NormalizedSchemaHealthItem] = []
+    try:
+        cursor = conn.cursor(as_dict=True)
+
+        cursor.execute(_SS_SCHEMA_HEALTH_MISSING_PK_QUERY)
+        for row in cursor.fetchall():
+            results.append(
+                NormalizedSchemaHealthItem(
+                    category="missing_pk",
+                    schema_name=str(row["schema_name"]),
+                    table_name=str(row["table_name"]),
+                    severity="warning",
+                )
+            )
+
+        cursor.execute(_SS_SCHEMA_HEALTH_DUPLICATE_INDEXES_QUERY)
+        for row in cursor.fetchall():
+            results.append(
+                NormalizedSchemaHealthItem(
+                    category="duplicate_index",
+                    schema_name=str(row["schema_name"]),
+                    table_name=str(row["table_name"]),
+                    object_name=str(row["index_name"]),
+                    detail={"overlaps_with": str(row["overlaps_with"])},
+                    severity="warning",
+                )
+            )
+
+        cursor.close()
+    finally:
+        conn.close()
+
+    return results
+
+
+def _connect_and_collect_file_io_stats_ss(
+    connection: ConnectionParams,
+    query_timeout_seconds: float,
+) -> list[NormalizedFileIoStats]:
+    """Helper sincrono — file I/O stats para SQL Server."""
+    login_timeout_seconds = int(connection.connect_timeout_seconds)
+    conn = pymssql.connect(
+        server=connection.host,
+        port=str(connection.port),
+        user=connection.username,
+        password=connection.secret_value,
+        timeout=int(query_timeout_seconds),
+        login_timeout=login_timeout_seconds,
+    )
+    try:
+        cursor = conn.cursor(as_dict=True)
+        cursor.execute(_SS_FILE_IO_STATS_QUERY)
+        rows: list[dict] = cursor.fetchall()
+        cursor.close()
+    finally:
+        conn.close()
+
+    return [
+        NormalizedFileIoStats(
+            database_name=str(r["database_name"]),
+            file_name=str(r["file_name"]),
+            io_stall_read_ms=int(r["io_stall_read_ms"] or 0),
+            io_stall_write_ms=int(r["io_stall_write_ms"] or 0),
+            num_of_reads=int(r["num_of_reads"] or 0),
+            num_of_writes=int(r["num_of_writes"] or 0),
+            avg_read_ms=float(r["avg_read_ms"] or 0.0),
+            avg_write_ms=float(r["avg_write_ms"] or 0.0),
         )
         for r in rows
     ]
@@ -3099,6 +3230,47 @@ class SQLServerCollector:
             ),
             timeout=overall_timeout,
         )
+
+    async def collect_schema_health(self) -> list[NormalizedSchemaHealthItem]:
+        """Schema health — missing PKs + duplicate indexes (SQL Server, on-demand)."""
+        settings = get_settings()
+        overall_timeout = (
+            self._connection_params.connect_timeout_seconds
+            + settings.collection_query_timeout_seconds * 2
+        )
+        return await asyncio.wait_for(
+            run_in_instance_executor(
+                self._instance_id,
+                _connect_and_collect_schema_health_ss,
+                self._connection_params,
+                settings.collection_query_timeout_seconds,
+            ),
+            timeout=overall_timeout,
+        )
+
+    async def collect_buffer_cache_stats(
+        self,
+    ) -> tuple[list[NormalizedBufferTableStats], list[NormalizedTempfileStats], list[NormalizedFileIoStats]]:
+        """File I/O stats — SQL Server only (on-demand). Buffer/tempfile fields are empty."""
+        settings = get_settings()
+        overall_timeout = (
+            self._connection_params.connect_timeout_seconds
+            + settings.collection_query_timeout_seconds
+        )
+        file_io = await asyncio.wait_for(
+            run_in_instance_executor(
+                self._instance_id,
+                _connect_and_collect_file_io_stats_ss,
+                self._connection_params,
+                settings.collection_query_timeout_seconds,
+            ),
+            timeout=overall_timeout,
+        )
+        return [], [], file_io
+
+    async def explain_plan_for_hash(self, sql_text: str) -> dict | None:
+        """SQL Server nao expoe o plano cached via SQL de forma portatil — retorna None."""
+        return None
 
     async def close(self) -> None:
         """Sem estado persistente entre chamadas (cada `check_capabilities` fecha sua conexao)."""
