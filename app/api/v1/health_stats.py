@@ -789,7 +789,7 @@ async def get_concurrency_trend(
                MIN(value) AS min_sessions
         FROM metric_samples
         WHERE target_id = :instance_id
-          AND metric_name = 'active_sessions'
+          AND metric_name LIKE '%active_session_count'
           AND time > NOW() - INTERVAL ':window hours'
         GROUP BY bucket
         ORDER BY bucket

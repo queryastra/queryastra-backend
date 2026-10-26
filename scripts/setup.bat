@@ -86,7 +86,7 @@ REM ── Criar .env ───────────────────�
     echo ADMIN_PASSWORD=!ADMIN_PASS!
     echo NEXT_PUBLIC_API_BASE_URL=!API_URL!
     echo NEXT_PUBLIC_WS_URL=!WS_URL!
-    echo FRONTEND_URL=http://localhost:3000
+    echo FRONTEND_URL=http://localhost:3001
     echo ENVIRONMENT=production
     echo LOG_LEVEL=INFO
 ) > "%ROOT%\.env"
@@ -133,7 +133,7 @@ echo.
 echo   ============================================================
 echo     QueryAstra esta no ar!
 echo.
-echo     Frontend:  http://localhost:3000
+echo     Frontend:  http://localhost:3001
 echo     Backend:   http://localhost:8000
 echo     API Docs:  http://localhost:8000/docs
 echo   ============================================================
