@@ -69,7 +69,7 @@ ADMIN_USERNAME=admin
 ADMIN_PASSWORD=$adminPass
 NEXT_PUBLIC_API_BASE_URL=$apiUrl
 NEXT_PUBLIC_WS_URL=$wsUrl
-FRONTEND_URL=http://localhost:3000
+FRONTEND_URL=http://localhost:3001
 ENVIRONMENT=production
 LOG_LEVEL=INFO
 "@ | Set-Content -Encoding utf8 -Path $envFile
@@ -107,7 +107,7 @@ Write-Host ""
 Write-Host "  ============================================================" -ForegroundColor Magenta
 Write-Host "    QueryAstra está no ar!                                    " -ForegroundColor Magenta
 Write-Host "                                                              " -ForegroundColor Magenta
-Write-Host "    Frontend:  http://localhost:3000                          " -ForegroundColor Magenta
+Write-Host "    Frontend:  http://localhost:3001                          " -ForegroundColor Magenta
 Write-Host "    Backend:   http://localhost:8000                          " -ForegroundColor Magenta
 Write-Host "    API Docs:  http://localhost:8000/docs                     " -ForegroundColor Magenta
 Write-Host "  ============================================================" -ForegroundColor Magenta

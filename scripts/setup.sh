@@ -69,7 +69,7 @@ ADMIN_USERNAME=admin
 ADMIN_PASSWORD=$ADMIN_PASS
 NEXT_PUBLIC_API_BASE_URL=$API_URL
 NEXT_PUBLIC_WS_URL=$WS_URL
-FRONTEND_URL=http://localhost:3000
+FRONTEND_URL=http://localhost:3001
 ENVIRONMENT=production
 LOG_LEVEL=INFO
 EOF
@@ -107,7 +107,7 @@ echo ""
 echo "  ╔══════════════════════════════════════════════════════════╗"
 echo "  ║  QueryAstra está no ar!                                  ║"
 echo "  ║                                                          ║"
-echo "  ║  Frontend:  http://localhost:3000                        ║"
+echo "  ║  Frontend:  http://localhost:3001                        ║"
 echo "  ║  Backend:   http://localhost:8000                        ║"
 echo "  ║  API Docs:  http://localhost:8000/docs                   ║"
 echo "  ╚══════════════════════════════════════════════════════════╝"
