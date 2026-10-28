@@ -316,6 +316,16 @@ class Settings(BaseSettings):
     supabase_url: str | None = Field(default=None, alias="SUPABASE_URL")
     supabase_service_key: str | None = Field(default=None, alias="SUPABASE_SERVICE_KEY")
 
+    # Auto-update — verifica GitHub Releases periodicamente e exibe banner para admin.
+    # Habilitado por default (true); desative com UPDATE_CHECK_ENABLED=false se o servidor
+    # nao tiver acesso a internet ou se a politica de seguranca proibir chamadas externas.
+    update_check_enabled: bool = Field(default=True, alias="UPDATE_CHECK_ENABLED")
+    # Intervalo (segundos) entre verificacoes. Default 86400s (1 dia) — sobrescreva com
+    # UPDATE_CHECK_INTERVAL_SECONDS para ambientes onde se prefere verificar com mais frequencia.
+    update_check_interval_seconds: int = Field(
+        default=86400, alias="UPDATE_CHECK_INTERVAL_SECONDS"
+    )
+
     # Defaults gravados no banco na primeira inicializacao (system_settings seed no lifespan de
     # app/main.py). Altere os valores em producao pelo app (tela Configuracoes -> Geral) — o
     # seed so e aplicado uma vez (INSERT ON CONFLICT DO NOTHING), entao uma linha ja existente

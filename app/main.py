@@ -44,6 +44,7 @@ from app.workers.polling_supervisor import PollingSupervisor
 from app.workers.problem_events_retention_worker import ProblemEventsRetentionWorker
 from app.workers.query_stats_supervisor import QueryStatsSupervisor
 from app.workers.report_worker import ReportWorker
+from app.workers.update_checker import UpdateChecker
 from app.workers.transaction_error_supervisor import TransactionErrorSupervisor
 
 logger = get_logger(__name__)
@@ -135,6 +136,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     query_stats_task: asyncio.Task[None] | None = None
     report_worker: ReportWorker | None = None
     report_worker_task: asyncio.Task[None] | None = None
+    update_checker: UpdateChecker | None = None
+    update_checker_task: asyncio.Task[None] | None = None
 
     if settings.polling_supervisor_enabled:
         supervisor = PollingSupervisor(
@@ -315,6 +318,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     else:
         logger.info("ReportWorker desabilitado (REPORT_WORKER_ENABLED=false)")
 
+    if settings.update_check_enabled:
+        update_checker = UpdateChecker(settings.update_check_interval_seconds)
+        update_checker_task = asyncio.create_task(update_checker.run())
+        logger.info(
+            "UpdateChecker habilitado (check_interval=%ss)",
+            settings.update_check_interval_seconds,
+        )
+    else:
+        logger.info("UpdateChecker desabilitado (UPDATE_CHECK_ENABLED=false)")
+
     yield
 
     if supervisor is not None and supervisor_task is not None:
@@ -353,6 +366,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if report_worker is not None and report_worker_task is not None:
         report_worker.stop()
         await report_worker_task
+    if update_checker is not None and update_checker_task is not None:
+        update_checker.stop()
+        await update_checker_task
     executor.shutdown(wait=False, cancel_futures=True)
     instance_executors.shutdown_all()
     logger.info("Lifespan finalizado")

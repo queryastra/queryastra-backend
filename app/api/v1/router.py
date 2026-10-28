@@ -30,6 +30,7 @@ from app.api.v1 import (
     status,
     topology,
     transactions,
+    update,
     vacuum,
     waits_blocking,
     websocket,
@@ -60,6 +61,7 @@ api_v1_router.include_router(topology.router, prefix="/topology", tags=["topolog
 api_v1_router.include_router(capacity.router, prefix="/capacity", tags=["capacity"])
 api_v1_router.include_router(reports.router, prefix="/reports", tags=["reports"])
 api_v1_router.include_router(status.router, prefix="/status", tags=["status"])
+api_v1_router.include_router(update.router, prefix="/update", tags=["update"])
 api_v1_router.include_router(vacuum.router, prefix="/instances", tags=["vacuum"])
 api_v1_router.include_router(health_stats.router, prefix="/instances", tags=["health-stats"])
 api_v1_router.include_router(ai_deep_analysis.router, prefix="/instances", tags=["ai-deep-analysis"])
