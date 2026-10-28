@@ -319,6 +319,23 @@ _BGWRITER_STATS_QUERY = """
     FROM pg_stat_bgwriter
 """
 
+# PG17+ split checkpoint columns para pg_stat_checkpointer; buffers_backend removido tbm.
+_BGWRITER_STATS_QUERY_PG17 = """
+    SELECT
+        c.num_timed        AS checkpoints_timed,
+        c.num_requested    AS checkpoints_req,
+        c.write_time       AS checkpoint_write_time,
+        c.sync_time        AS checkpoint_sync_time,
+        c.buffers_written  AS buffers_checkpoint,
+        b.buffers_clean,
+        b.maxwritten_clean,
+        0                  AS buffers_backend,
+        0                  AS buffers_backend_fsync,
+        b.buffers_alloc,
+        b.stats_reset
+    FROM pg_stat_bgwriter b CROSS JOIN pg_stat_checkpointer c
+"""
+
 # Fase 5 T58 — funcoes PL/pgSQL por tempo total. So retorna dados se track_functions != 'none'.
 _USER_FUNCTIONS_QUERY = """
     SELECT
@@ -350,7 +367,7 @@ _REPLICATION_SLOTS_QUERY = """
         END AS lag_bytes,
         CAST(NULL AS text) AS wal_status
     FROM pg_replication_slots rs
-    LEFT JOIN pg_database d ON d.oid = rs.database
+    LEFT JOIN pg_database d ON d.oid = rs.datoid
     ORDER BY CASE WHEN rs.restart_lsn IS NOT NULL
                   THEN (pg_current_wal_lsn() - rs.restart_lsn)::bigint
                   ELSE 0
@@ -373,7 +390,7 @@ _REPLICATION_SLOTS_QUERY_PG13 = """
         END AS lag_bytes,
         rs.wal_status
     FROM pg_replication_slots rs
-    LEFT JOIN pg_database d ON d.oid = rs.database
+    LEFT JOIN pg_database d ON d.oid = rs.datoid
     ORDER BY CASE WHEN rs.restart_lsn IS NOT NULL
                   THEN (pg_current_wal_lsn() - rs.restart_lsn)::bigint
                   ELSE 0
@@ -1739,8 +1756,10 @@ class PostgreSQLCollector:
             self._connect(), timeout=self._connection_params.connect_timeout_seconds
         )
         try:
+            version_num = await self._fetch_version(conn, settings.collection_query_timeout_seconds)
+            query = _BGWRITER_STATS_QUERY_PG17 if version_num >= _PG17_VERSION_NUM else _BGWRITER_STATS_QUERY
             row = await asyncio.wait_for(
-                conn.fetchrow(_BGWRITER_STATS_QUERY),
+                conn.fetchrow(query),
                 timeout=settings.collection_query_timeout_seconds,
             )
         finally:
