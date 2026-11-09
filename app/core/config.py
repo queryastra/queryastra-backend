@@ -316,6 +316,10 @@ class Settings(BaseSettings):
     supabase_url: str | None = Field(default=None, alias="SUPABASE_URL")
     supabase_service_key: str | None = Field(default=None, alias="SUPABASE_SERVICE_KEY")
 
+    # Stripe — usado para criar sessões do Customer Portal (gerenciar/cancelar assinatura).
+    # Vazio/None = funcionalidade desabilitada (botão não aparece na tela de licença).
+    stripe_secret_key: str | None = Field(default=None, alias="STRIPE_SECRET_KEY")
+
     # Auto-update — verifica GitHub Releases periodicamente e exibe banner para admin.
     # Habilitado por default (true); desative com UPDATE_CHECK_ENABLED=false se o servidor
     # nao tiver acesso a internet ou se a politica de seguranca proibir chamadas externas.

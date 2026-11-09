@@ -65,6 +65,52 @@ def _to_response(
     )
 
 
+class BillingPortalResponse(BaseModel):
+    url: str
+
+
+@router.get("/billing-portal", response_model=BillingPortalResponse)
+async def get_billing_portal(
+    return_url: str,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    _: Annotated[CurrentUser, Depends(require_admin)],
+) -> BillingPortalResponse:
+    cfg = get_settings()
+    if not cfg.stripe_secret_key:
+        raise HTTPException(status_code=503, detail="Stripe não configurado neste servidor.")
+    if not cfg.supabase_url or not cfg.supabase_service_key:
+        raise HTTPException(status_code=503, detail="Supabase não configurado.")
+
+    repo = SystemLicenseRepository(session)
+    row = await repo.get_or_create()
+    if not row.license_key:
+        raise HTTPException(status_code=404, detail="Nenhuma licença ativa para gerenciar.")
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        sup = await client.get(
+            f"{cfg.supabase_url}/rest/v1/licenses",
+            params={"key": f"eq.{row.license_key}", "select": "stripe_customer_id", "limit": "1"},
+            headers={"apikey": cfg.supabase_service_key, "Authorization": f"Bearer {cfg.supabase_service_key}"},
+        )
+    if sup.status_code != 200 or not sup.json():
+        raise HTTPException(status_code=404, detail="Licença não encontrada no servidor de licenças.")
+
+    stripe_customer_id = sup.json()[0].get("stripe_customer_id")
+    if not stripe_customer_id:
+        raise HTTPException(status_code=404, detail="Assinatura Stripe não encontrada para esta licença.")
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        portal = await client.post(
+            "https://api.stripe.com/v1/billing_portal/sessions",
+            data={"customer": stripe_customer_id, "return_url": return_url},
+            auth=(cfg.stripe_secret_key, ""),
+        )
+    if not portal.is_success:
+        raise HTTPException(status_code=502, detail="Erro ao criar sessão do portal Stripe.")
+
+    return BillingPortalResponse(url=portal.json()["url"])
+
+
 @router.get("/", response_model=LicenseStatusResponse)
 async def get_license_status(
     session: Annotated[AsyncSession, Depends(get_db_session)],
