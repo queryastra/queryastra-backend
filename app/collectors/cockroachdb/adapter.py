@@ -27,10 +27,18 @@ from app.collectors.capabilities import (
     POSTGRESQL_SESSION_TERMINATION,
     POSTGRESQL_TOP_SQL,
 )
-from app.collectors.connection import ConnectionParams
+from app.collectors.cockroachdb import maintenance as crdb_maintenance
 from app.collectors.postgresql.pg_backed import PostgreSQLBackedCollector
 from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.normalizers.models import (
+    NormalizedCompressionReport,
+    NormalizedIndexHealthReport,
+    NormalizedMemoryGrantReport,
+    NormalizedPartitionReport,
+    NormalizedScanMeta,
+    NormalizedStatisticsHealthReport,
+)
 
 logger = get_logger(__name__)
 
@@ -199,6 +207,33 @@ class CockroachDBCollector(PostgreSQLBackedCollector):
         if self._crdb_version is not None:
             result = dataclasses.replace(result, engine_version=self._crdb_version)
         return result
+
+    # ── Varreduras de manutencao (catalogos crdb_internal — `cockroachdb/maintenance.py`) ──
+
+    async def list_databases(self) -> list[str]:
+        return await crdb_maintenance.list_databases(self._pg._connect_db)
+
+    async def collect_index_health(self, database: str | None = None) -> NormalizedIndexHealthReport:
+        return await crdb_maintenance.crdb_index_health(self._pg._connect_db, database)
+
+    async def collect_statistics_health(
+        self, database: str | None = None
+    ) -> NormalizedStatisticsHealthReport:
+        return await crdb_maintenance.crdb_statistics(self._pg._connect_db, database)
+
+    async def collect_memory_grants(self) -> NormalizedMemoryGrantReport:
+        return await crdb_maintenance.crdb_memory_grants(self._pg._connect_db)
+
+    async def estimate_compression(
+        self, database: str | None, compression: str, max_objects: int
+    ) -> NormalizedCompressionReport:
+        # Pebble comprime todos os blocos SST (snappy/zstd) por padrao — nao ha escolha por tabela.
+        return NormalizedCompressionReport(
+            meta=NormalizedScanMeta(supported=False, notes=["compression_inventory_only"])
+        )
+
+    async def collect_partitions(self, database: str | None = None) -> NormalizedPartitionReport:
+        return await crdb_maintenance.crdb_partitions(self._pg._connect_db, database)
 
 
 async def _try_query(

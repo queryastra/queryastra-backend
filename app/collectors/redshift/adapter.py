@@ -9,15 +9,21 @@ Porta padrão Redshift: 5439. Database padrão: "dev".
 
 from __future__ import annotations
 
-from uuid import UUID
-
 from app.collectors.base import CapabilityResult, CapabilityStatus
 from app.collectors.capabilities import REDSHIFT_SESSION_ACTIVITY
-from app.collectors.connection import ConnectionParams
 from app.collectors.postgresql.pg_backed import PostgreSQLBackedCollector
+from app.collectors.redshift import maintenance as rs_maintenance
 from app.core.config import get_settings
 from app.core.logging import get_logger
-from app.normalizers.models import NormalizedPlanSnapshot
+from app.normalizers.models import (
+    NormalizedCompressionReport,
+    NormalizedIndexHealthReport,
+    NormalizedMemoryGrantReport,
+    NormalizedPartitionReport,
+    NormalizedPlanSnapshot,
+    NormalizedScanMeta,
+    NormalizedStatisticsHealthReport,
+)
 
 logger = get_logger(__name__)
 
@@ -79,3 +85,32 @@ class RedshiftCollector(PostgreSQLBackedCollector):
     ) -> list[NormalizedPlanSnapshot]:
         # Redshift não suporta EXPLAIN FORMAT JSON — retorna lista vazia sem tentar conectar.
         return []
+
+    # ── Varreduras de manutencao (`redshift/maintenance.py`) ────────────────────────────────
+
+    async def list_databases(self) -> list[str]:
+        return await rs_maintenance.list_fn(self._pg._connect_db)()
+
+    async def collect_index_health(self, database: str | None = None) -> NormalizedIndexHealthReport:
+        # Sem indices no Redshift (sort keys / dist keys).
+        return NormalizedIndexHealthReport(
+            meta=NormalizedScanMeta(supported=False, notes=["no_indexes_concept"])
+        )
+
+    async def collect_statistics_health(
+        self, database: str | None = None
+    ) -> NormalizedStatisticsHealthReport:
+        return await rs_maintenance.redshift_statistics(self._pg._connect_db, database)
+
+    async def collect_memory_grants(self) -> NormalizedMemoryGrantReport:
+        return await rs_maintenance.redshift_memory_grants(self._pg._connect_db)
+
+    async def estimate_compression(
+        self, database: str | None, compression: str, max_objects: int
+    ) -> NormalizedCompressionReport:
+        return await rs_maintenance.redshift_compression(
+            self._pg._connect_db, database, max_objects
+        )
+
+    async def collect_partitions(self, database: str | None = None) -> NormalizedPartitionReport:
+        return NormalizedPartitionReport(meta=NormalizedScanMeta(supported=False))

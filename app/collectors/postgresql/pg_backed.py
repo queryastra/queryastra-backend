@@ -24,12 +24,17 @@ from app.collectors.connection import ConnectionParams
 from app.collectors.postgresql.adapter import PostgreSQLCollector
 from app.normalizers.models import (
     NormalizedBackupStatus,
+    NormalizedCompressionReport,
     NormalizedConfirmedTransactionError,
     NormalizedDeadlockEvent,
+    NormalizedIndexHealthReport,
+    NormalizedMemoryGrantReport,
     NormalizedMetricSample,
     NormalizedMissingIndexSuggestion,
+    NormalizedPartitionReport,
     NormalizedPlanCompileTimeoutFinding,
     NormalizedPlanSnapshot,
+    NormalizedStatisticsHealthReport,
 )
 
 
@@ -107,3 +112,28 @@ class PostgreSQLBackedCollector:
         self, queries: list[tuple[str, str]]
     ) -> list[NormalizedPlanSnapshot]:
         return await self._pg.explain_queries(queries)
+
+    # Varreduras de manutencao: Aurora PostgreSQL usa a implementacao PostgreSQL integral;
+    # CockroachDB/Redshift sobrescrevem (catalogos diferentes).
+
+    async def list_databases(self) -> list[str]:
+        return await self._pg.list_databases()
+
+    async def collect_index_health(self, database: str | None = None) -> NormalizedIndexHealthReport:
+        return await self._pg.collect_index_health(database)
+
+    async def collect_statistics_health(
+        self, database: str | None = None
+    ) -> NormalizedStatisticsHealthReport:
+        return await self._pg.collect_statistics_health(database)
+
+    async def collect_memory_grants(self) -> NormalizedMemoryGrantReport:
+        return await self._pg.collect_memory_grants()
+
+    async def estimate_compression(
+        self, database: str | None, compression: str, max_objects: int
+    ) -> NormalizedCompressionReport:
+        return await self._pg.estimate_compression(database, compression, max_objects)
+
+    async def collect_partitions(self, database: str | None = None) -> NormalizedPartitionReport:
+        return await self._pg.collect_partitions(database)

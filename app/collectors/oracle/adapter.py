@@ -29,13 +29,14 @@ from uuid import UUID
 import oracledb
 
 from app.collectors.base import CapabilityResult, CapabilityStatus, CollectionResult
-from app.collectors.collector_mixin import CollectorNoOpMixin
 from app.collectors.capabilities import (
     CONNECTIVITY,
     ORACLE_QUERY_STATS,
     ORACLE_SESSION_ACTIVITY,
 )
+from app.collectors.collector_mixin import CollectorNoOpMixin
 from app.collectors.connection import ConnectionParams
+from app.collectors.oracle import maintenance as oracle_maintenance
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.masking.sql_masking import mask_sql_literals, mask_sql_literals_for_display
@@ -47,16 +48,15 @@ from app.normalizers.metric_names import (
     ORACLE_SGA_TOTAL_BYTES,
 )
 from app.normalizers.models import (
-    NormalizedBackupStatus,
     NormalizedBlockingEvent,
-    NormalizedConfirmedTransactionError,
-    NormalizedDeadlockEvent,
+    NormalizedCompressionReport,
+    NormalizedIndexHealthReport,
+    NormalizedMemoryGrantReport,
     NormalizedMetricSample,
-    NormalizedMissingIndexSuggestion,
-    NormalizedPlanCompileTimeoutFinding,
+    NormalizedPartitionReport,
     NormalizedPlanSnapshot,
     NormalizedQuerySample,
-    NormalizedTransactionEvent,
+    NormalizedStatisticsHealthReport,
 )
 from app.normalizers.wait_taxonomy import map_wait_event
 
@@ -492,6 +492,44 @@ class OracleCollector(CollectorNoOpMixin):
                 pass
 
         return results
+
+    # ── Varreduras de manutencao on-demand (app/collectors/oracle/maintenance.py) ─────────
+    # Uma conexao = um banco/PDB: `list_databases` vazio e `database` e ignorado.
+
+    async def _with_connection(self, call):  # noqa: ANN001, ANN202
+        conn = await asyncio.wait_for(
+            self._connect(), timeout=self._connection_params.connect_timeout_seconds
+        )
+        try:
+            return await call(conn)
+        finally:
+            await conn.close()
+
+    async def list_databases(self) -> list[str]:
+        return []
+
+    async def collect_index_health(
+        self, database: str | None = None
+    ) -> NormalizedIndexHealthReport:
+        return await self._with_connection(oracle_maintenance.collect_index_health)
+
+    async def collect_statistics_health(
+        self, database: str | None = None
+    ) -> NormalizedStatisticsHealthReport:
+        return await self._with_connection(oracle_maintenance.collect_statistics_health)
+
+    async def collect_memory_grants(self) -> NormalizedMemoryGrantReport:
+        return await self._with_connection(oracle_maintenance.collect_memory_grants)
+
+    async def estimate_compression(
+        self, database: str | None, compression: str, max_objects: int
+    ) -> NormalizedCompressionReport:
+        return await self._with_connection(
+            lambda conn: oracle_maintenance.estimate_compression(conn, max_objects)
+        )
+
+    async def collect_partitions(self, database: str | None = None) -> NormalizedPartitionReport:
+        return await self._with_connection(oracle_maintenance.collect_partitions)
 
     async def close(self) -> None:
         logger.info("close chamado para instância oracle (instance_id=%s)", self._instance_id)

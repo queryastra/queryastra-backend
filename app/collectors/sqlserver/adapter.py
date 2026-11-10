@@ -74,6 +74,7 @@ from app.collectors.capabilities import (
     SQLSERVER_TABLE_READ_ACCESS,
 )
 from app.collectors.connection import ConnectionParams
+from app.collectors.sqlserver import maintenance as ss_maintenance
 from app.collectors.transaction_flagging import compute_flag_reason
 from app.core.config import get_settings
 from app.core.instance_executors import run_in_instance_executor
@@ -97,19 +98,24 @@ from app.normalizers.models import (
     NormalizedBackupStatus,
     NormalizedBlockingEvent,
     NormalizedBufferTableStats,
-    NormalizedConfirmedTransactionError,
+    NormalizedCompressionReport,
     NormalizedConfigComplianceItem,
+    NormalizedConfirmedTransactionError,
     NormalizedConnectionConsumer,
     NormalizedDbSize,
     NormalizedDeadlockEvent,
     NormalizedFileIoStats,
     NormalizedIdleInTransactionSession,
+    NormalizedIndexHealthReport,
+    NormalizedMemoryGrantReport,
     NormalizedMetricSample,
     NormalizedMissingIndexSuggestion,
+    NormalizedPartitionReport,
     NormalizedPlanCompileTimeoutFinding,
     NormalizedPlanSnapshot,
     NormalizedQuerySample,
     NormalizedSchemaHealthItem,
+    NormalizedStatisticsHealthReport,
     NormalizedTempDbStats,
     NormalizedTempfileStats,
     NormalizedTransactionEvent,
@@ -3271,6 +3277,109 @@ class SQLServerCollector:
     async def explain_plan_for_hash(self, sql_text: str) -> dict | None:
         """SQL Server nao expoe o plano cached via SQL de forma portatil — retorna None."""
         return None
+
+    # ── Varreduras de manutencao on-demand (logica em `sqlserver/maintenance.py`) ──────────
+
+    def _maintenance_timeout(self) -> float:
+        settings = get_settings()
+        return (
+            self._connection_params.connect_timeout_seconds
+            + settings.maintenance_scan_timeout_seconds
+        )
+
+    async def list_databases(self) -> list[str]:
+        settings = get_settings()
+        return await asyncio.wait_for(
+            run_in_instance_executor(
+                self._instance_id,
+                ss_maintenance.list_databases,
+                self._connection_params,
+                settings.collection_query_timeout_seconds,
+                settings.maintenance_max_databases,
+            ),
+            timeout=self._connection_params.connect_timeout_seconds
+            + settings.collection_query_timeout_seconds * 2,
+        )
+
+    async def collect_index_health(
+        self, database: str | None = None
+    ) -> NormalizedIndexHealthReport:
+        settings = get_settings()
+        return await asyncio.wait_for(
+            run_in_instance_executor(
+                self._instance_id,
+                ss_maintenance.collect_index_health,
+                self._connection_params,
+                database,
+                settings.maintenance_per_database_timeout_seconds,
+                settings.maintenance_max_databases,
+                settings.maintenance_max_rows,
+                settings.maintenance_fragmentation_min_pages,
+            ),
+            timeout=self._maintenance_timeout(),
+        )
+
+    async def collect_statistics_health(
+        self, database: str | None = None
+    ) -> NormalizedStatisticsHealthReport:
+        settings = get_settings()
+        return await asyncio.wait_for(
+            run_in_instance_executor(
+                self._instance_id,
+                ss_maintenance.collect_statistics_health,
+                self._connection_params,
+                database,
+                settings.maintenance_per_database_timeout_seconds,
+                settings.maintenance_max_databases,
+                settings.maintenance_max_rows,
+            ),
+            timeout=self._maintenance_timeout(),
+        )
+
+    async def collect_memory_grants(self) -> NormalizedMemoryGrantReport:
+        settings = get_settings()
+        return await asyncio.wait_for(
+            run_in_instance_executor(
+                self._instance_id,
+                ss_maintenance.collect_memory_grants,
+                self._connection_params,
+                settings.maintenance_per_database_timeout_seconds,
+            ),
+            timeout=self._maintenance_timeout(),
+        )
+
+    async def estimate_compression(
+        self, database: str | None, compression: str, max_objects: int
+    ) -> NormalizedCompressionReport:
+        settings = get_settings()
+        return await asyncio.wait_for(
+            run_in_instance_executor(
+                self._instance_id,
+                ss_maintenance.estimate_compression,
+                self._connection_params,
+                database,
+                compression,
+                max_objects,
+                settings.maintenance_per_database_timeout_seconds,
+                settings.maintenance_max_databases,
+            ),
+            timeout=self._maintenance_timeout(),
+        )
+
+    async def collect_partitions(self, database: str | None = None) -> NormalizedPartitionReport:
+        settings = get_settings()
+        return await asyncio.wait_for(
+            run_in_instance_executor(
+                self._instance_id,
+                ss_maintenance.collect_partitions,
+                self._connection_params,
+                database,
+                settings.maintenance_per_database_timeout_seconds,
+                settings.maintenance_max_databases,
+                settings.maintenance_max_rows,
+            ),
+            timeout=self._maintenance_timeout(),
+        )
 
     async def close(self) -> None:
         """Sem estado persistente entre chamadas (cada `check_capabilities` fecha sua conexao)."""

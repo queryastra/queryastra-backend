@@ -42,7 +42,7 @@ class AlertRule(Base):
         ),
         CheckConstraint(
             "rule_type IN ('threshold', 'anomaly', 'custom_sql', 'blocking_recurrence', "
-            "'plan_compile_timeout')",
+            "'plan_compile_timeout', 'seasonal_anomaly')",
             name="ck_alert_rules_rule_type",
         ),
         CheckConstraint(

@@ -540,6 +540,20 @@ class AlertingWorker:
                 override_email_recipients=level.email_recipients,
             )
 
+    async def send_notification(
+        self,
+        alerts_repo: AlertsRepository,
+        alert: Alert,
+        rule: AlertRule,
+        *,
+        kind: NotificationKind,
+        value: float,
+    ) -> None:
+        """Canais de notificacao (webhook/e-mail, respeitando silenciamento) para alertas
+        criados por outros workers — ex.: `AnomalyDetectionWorker` (rule_type
+        `seasonal_anomaly`, que este worker nao avalia)."""
+        await self._send_notification(alerts_repo, alert, rule, kind=kind, value=value)
+
     def _publish_alert_event(self, alert: Alert, *, kind: NotificationKind) -> None:
         """Publica no `event_bus` (push via `/ws/live`) sempre que um `Alert` e criado ou
         atualizado — independente de silenciamento/falha de envio dos canais de notificacao, que

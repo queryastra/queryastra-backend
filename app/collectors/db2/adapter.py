@@ -26,13 +26,14 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from app.collectors.base import CapabilityResult, CapabilityStatus, CollectionResult
-from app.collectors.collector_mixin import CollectorNoOpMixin
 from app.collectors.capabilities import (
     CONNECTIVITY,
     DB2_QUERY_STATS,
     DB2_SESSION_ACTIVITY,
 )
+from app.collectors.collector_mixin import CollectorNoOpMixin
 from app.collectors.connection import ConnectionParams
+from app.collectors.db2 import maintenance as db2_maintenance
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.masking.sql_masking import mask_sql_literals, mask_sql_literals_for_display
@@ -43,16 +44,13 @@ from app.normalizers.metric_names import (
     DB2_LOCK_WAITS_TOTAL,
 )
 from app.normalizers.models import (
-    NormalizedBackupStatus,
-    NormalizedBlockingEvent,
-    NormalizedConfirmedTransactionError,
-    NormalizedDeadlockEvent,
+    NormalizedCompressionReport,
+    NormalizedIndexHealthReport,
+    NormalizedMemoryGrantReport,
     NormalizedMetricSample,
-    NormalizedMissingIndexSuggestion,
-    NormalizedPlanCompileTimeoutFinding,
-    NormalizedPlanSnapshot,
+    NormalizedPartitionReport,
     NormalizedQuerySample,
-    NormalizedTransactionEvent,
+    NormalizedStatisticsHealthReport,
 )
 from app.normalizers.wait_taxonomy import map_wait_event
 
@@ -377,6 +375,50 @@ class DB2Collector(CollectorNoOpMixin):
             return float(next(iter(rows[0].values())))
         except (TypeError, ValueError, StopIteration):
             return None
+
+    # ── Varreduras de manutencao on-demand (app/collectors/db2/maintenance.py) ────────────
+    # Uma conexao = um banco: `list_databases` vazio e `database` e ignorado.
+
+    async def _with_runner(self, call):  # noqa: ANN001, ANN202
+        conn = await self._connect()
+        runner = db2_maintenance.Db2Runner(
+            conn, get_settings().maintenance_per_database_timeout_seconds
+        )
+        _host, db_name = _parse_db2_host(self._connection_params)
+        try:
+            return await call(runner, db_name)
+        finally:
+            await asyncio.get_running_loop().run_in_executor(
+                None, functools.partial(_close_sync, conn)
+            )
+
+    async def list_databases(self) -> list[str]:
+        return []
+
+    async def collect_index_health(
+        self, database: str | None = None
+    ) -> NormalizedIndexHealthReport:
+        return await self._with_runner(db2_maintenance.collect_index_health)
+
+    async def collect_statistics_health(
+        self, database: str | None = None
+    ) -> NormalizedStatisticsHealthReport:
+        return await self._with_runner(db2_maintenance.collect_statistics_health)
+
+    async def collect_memory_grants(self) -> NormalizedMemoryGrantReport:
+        return await self._with_runner(db2_maintenance.collect_memory_grants)
+
+    async def estimate_compression(
+        self, database: str | None, compression: str, max_objects: int
+    ) -> NormalizedCompressionReport:
+        return await self._with_runner(
+            lambda runner, db_name: db2_maintenance.estimate_compression(
+                runner, db_name, compression, max_objects
+            )
+        )
+
+    async def collect_partitions(self, database: str | None = None) -> NormalizedPartitionReport:
+        return await self._with_runner(db2_maintenance.collect_partitions)
 
     async def close(self) -> None:
         logger.info("close chamado para instância db2 (instance_id=%s)", self._instance_id)

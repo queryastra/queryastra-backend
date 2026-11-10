@@ -59,6 +59,7 @@ from app.collectors.capabilities import (
     POSTGRESQL_TOP_SQL,
 )
 from app.collectors.connection import ConnectionParams
+from app.collectors.postgresql import maintenance as pg_maintenance
 from app.collectors.transaction_flagging import compute_flag_reason
 from app.core.config import get_settings
 from app.core.logging import get_logger
@@ -91,21 +92,27 @@ from app.normalizers.models import (
     NormalizedBgwriterStats,
     NormalizedBlockingEvent,
     NormalizedBufferTableStats,
-    NormalizedConfirmedTransactionError,
+    NormalizedCompressionReport,
     NormalizedConfigComplianceItem,
+    NormalizedConfirmedTransactionError,
     NormalizedConnectionConsumer,
     NormalizedDbSize,
-    NormalizedQueryStatsSnapshot,
     NormalizedDeadlockEvent,
     NormalizedIdleInTransactionSession,
     NormalizedIndexBloatEntry,
+    NormalizedIndexHealthReport,
+    NormalizedMemoryGrantReport,
     NormalizedMetricSample,
     NormalizedMissingIndexSuggestion,
+    NormalizedPartitionReport,
     NormalizedPlanCompileTimeoutFinding,
     NormalizedPlanSnapshot,
     NormalizedQuerySample,
+    NormalizedQueryStatsSnapshot,
     NormalizedReplicationSlot,
+    NormalizedScanMeta,
     NormalizedSchemaHealthItem,
+    NormalizedStatisticsHealthReport,
     NormalizedTableIoStats,
     NormalizedTempfileStats,
     NormalizedTransactionEvent,
@@ -715,6 +722,8 @@ class PostgreSQLCollector:
         self._instance_id = instance_id
         self.skip_blocking_queries = False
         self.skip_pg_catalog_metrics = False
+        # Banco usado para listar os demais nas varreduras de manutencao (Redshift: "dev").
+        self.maintenance_bootstrap_db = "postgres"
 
     async def check_capabilities(self) -> list[CapabilityResult]:
         """Conecta e checa roles (`pg_has_role`) e extensao `pg_stat_statements`.
@@ -1993,7 +2002,6 @@ class PostgreSQLCollector:
 
     async def collect_schema_health(self) -> list[NormalizedSchemaHealthItem]:
         """Schema health — duplicate indexes, missing PKs, FKs without index (on-demand)."""
-        import json as _json  # noqa: PLC0415
 
         settings = get_settings()
         conn = await asyncio.wait_for(
@@ -2116,6 +2124,88 @@ class PostgreSQLCollector:
         except Exception:
             return None
         return None
+
+    # ── Varreduras de manutencao on-demand (logica em `postgresql/maintenance.py`) ─────────
+
+    async def _connect_db(self, database: str) -> asyncpg.Connection:
+        return await asyncio.wait_for(
+            self._connect(database), timeout=self._connection_params.connect_timeout_seconds
+        )
+
+    async def _maintenance_version(self) -> int:
+        conn = await self._connect_db(self.maintenance_bootstrap_db)
+        try:
+            return await self._fetch_version(conn, get_settings().collection_query_timeout_seconds)
+        finally:
+            await conn.close()
+
+    async def list_databases(self) -> list[str]:
+        return await pg_maintenance.list_databases(self._connect_db, self.maintenance_bootstrap_db)
+
+    async def collect_index_health(self, database: str | None = None) -> NormalizedIndexHealthReport:
+        version = await self._maintenance_version()
+        outcome = await pg_maintenance.scan_databases(
+            self._connect_db,
+            self.maintenance_bootstrap_db,
+            database,
+            lambda conn, db: pg_maintenance.pg_index_health_for_db(conn, db, version),
+        )
+        outcome.meta.method = (
+            "pg_stat_user_indexes+btree_estimate"
+            if "fragmentation_estimated" in outcome.meta.notes
+            else "pg_stat_user_indexes+pgstatindex"
+        )
+        return NormalizedIndexHealthReport(
+            items=pg_maintenance.sort_index_items(outcome.items), meta=outcome.meta
+        )
+
+    async def collect_statistics_health(
+        self, database: str | None = None
+    ) -> NormalizedStatisticsHealthReport:
+        outcome = await pg_maintenance.scan_databases(
+            self._connect_db,
+            self.maintenance_bootstrap_db,
+            database,
+            pg_maintenance.pg_statistics_for_db,
+            method="pg_stat_user_tables.n_mod_since_analyze",
+        )
+        return NormalizedStatisticsHealthReport(
+            items=pg_maintenance.sort_statistics(outcome.items), meta=outcome.meta
+        )
+
+    async def collect_memory_grants(self) -> NormalizedMemoryGrantReport:
+        version = await self._maintenance_version()
+        return await pg_maintenance.pg_memory_grants(
+            self._connect_db, self.maintenance_bootstrap_db, version
+        )
+
+    async def estimate_compression(
+        self, database: str | None, compression: str, max_objects: int
+    ) -> NormalizedCompressionReport:
+        # PAGE/ROW (SQL Server) nao se aplica: inventario de compressao TOAST por coluna.
+        version = await self._maintenance_version()
+        outcome = await pg_maintenance.scan_databases(
+            self._connect_db,
+            self.maintenance_bootstrap_db,
+            database,
+            lambda conn, db: pg_maintenance.pg_compression_for_db(conn, db, version, max_objects),
+            method="pg_attribute.attcompression+toast_size",
+        )
+        items = sorted(outcome.items, key=lambda i: -(i.current_size_kb or 0))
+        return NormalizedCompressionReport(items=items, meta=outcome.meta)
+
+    async def collect_partitions(self, database: str | None = None) -> NormalizedPartitionReport:
+        version = await self._maintenance_version()
+        if version < 100000:
+            return NormalizedPartitionReport(meta=NormalizedScanMeta(supported=False))
+        outcome = await pg_maintenance.scan_databases(
+            self._connect_db,
+            self.maintenance_bootstrap_db,
+            database,
+            pg_maintenance.pg_partitions_for_db,
+            method="pg_partitioned_table+pg_inherits",
+        )
+        return NormalizedPartitionReport(items=outcome.items, meta=outcome.meta)
 
     async def close(self) -> None:
         """Sem estado persistente entre chamadas (cada `check_capabilities` fecha sua conexao)."""

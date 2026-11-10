@@ -8,6 +8,7 @@ chave/valor documentado ali), primeira preferência global editável pelo usuár
 """
 
 from app.models.alert import Alert, AlertNotification, AlertRule, AlertSilence
+from app.models.anomaly import AnomalyEvent, AnomalyMetricHourly, AnomalyMetricStatus
 from app.models.audit_log import AuditLog
 from app.models.backup_status import BackupStatus
 from app.models.blocking_incident import BlockingIncident
@@ -32,6 +33,9 @@ __all__ = [
     "Alert",
     "AlertNotification",
     "AlertSilence",
+    "AnomalyEvent",
+    "AnomalyMetricHourly",
+    "AnomalyMetricStatus",
     "MissingIndexSuggestion",
     "BackupStatus",
     "TransactionEvent",

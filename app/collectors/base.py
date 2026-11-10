@@ -25,20 +25,25 @@ from app.normalizers.models import (
     NormalizedBackupStatus,
     NormalizedBgwriterStats,
     NormalizedBlockingEvent,
-    NormalizedConfirmedTransactionError,
+    NormalizedCompressionReport,
     NormalizedConfigComplianceItem,
+    NormalizedConfirmedTransactionError,
     NormalizedConnectionConsumer,
     NormalizedDbSize,
-    NormalizedQueryStatsSnapshot,
     NormalizedDeadlockEvent,
     NormalizedIdleInTransactionSession,
     NormalizedIndexBloatEntry,
+    NormalizedIndexHealthReport,
+    NormalizedMemoryGrantReport,
     NormalizedMetricSample,
     NormalizedMissingIndexSuggestion,
+    NormalizedPartitionReport,
     NormalizedPlanCompileTimeoutFinding,
     NormalizedPlanSnapshot,
     NormalizedQuerySample,
+    NormalizedQueryStatsSnapshot,
     NormalizedReplicationSlot,
+    NormalizedStatisticsHealthReport,
     NormalizedTableIoStats,
     NormalizedTempDbStats,
     NormalizedTransactionEvent,
@@ -392,4 +397,41 @@ class Collector(Protocol):
         On-demand. Tabelas com muitos seq_scan e poucos idx_scan sao candidatas a novos indices.
         PostgreSQL only — retorna lista vazia em engines sem suporte.
         """
+        ...
+
+    # ── Varreduras de manutencao on-demand ──────────────────────────────────────────────
+    # Todas: somente leitura, timeout por banco (`maintenance_per_database_timeout_seconds`),
+    # banco com falha vai para `meta.databases_skipped` (nunca derruba a varredura), comandos
+    # sugeridos sao so TEXTO (nunca executados). `database=None` = todos os bancos acessiveis.
+    # Engine sem suporte devolve `meta.supported=False` via `CollectorNoOpMixin`.
+
+    async def list_databases(self) -> list[str]:
+        """Bancos de usuario acessiveis (seletor da tela). `[]` = motor de banco unico."""
+        ...
+
+    async def collect_index_health(self, database: str | None = None) -> NormalizedIndexHealthReport:
+        """Fragmentacao, indices sem uso (custam escrita, nao ajudam leitura), duplicados e
+        sobrepostos (prefixo a esquerda)."""
+        ...
+
+    async def collect_statistics_health(
+        self, database: str | None = None
+    ) -> NormalizedStatisticsHealthReport:
+        """Data da ultima atualizacao + % de linhas modificadas desde entao, por tabela/estat."""
+        ...
+
+    async def collect_memory_grants(self) -> NormalizedMemoryGrantReport:
+        """Concessoes de memoria ativas/em espera + consultas historicas que mais pedem memoria
+        ou derramam para disco (spill)."""
+        ...
+
+    async def estimate_compression(
+        self, database: str | None, compression: str, max_objects: int
+    ) -> NormalizedCompressionReport:
+        """Estimativa de ganho com compressao (motores com estimador nativo) ou inventario do
+        estado atual de compressao (demais), com comando sugerido."""
+        ...
+
+    async def collect_partitions(self, database: str | None = None) -> NormalizedPartitionReport:
+        """Tabelas/indices particionados, ultimo limite criado e linhas alem dele."""
         ...

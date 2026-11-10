@@ -643,3 +643,209 @@ class NormalizedFileIoStats(BaseModel):
     num_of_writes: int
     avg_read_ms: float
     avg_write_ms: float
+
+
+# ── Varreduras de manutencao (indices, estatisticas, memoria, compressao, particoes) ──────────
+
+Severity = Literal["critical", "warning", "info"]
+
+
+class NormalizedScanMeta(BaseModel):
+    """Metadados comuns a toda varredura de manutencao on-demand.
+
+    `notes` sao CODIGOS estaveis (ex.: "pgstattuple_missing"), nunca texto livre — o frontend
+    traduz para os 11 idiomas e cai no proprio codigo quando nao conhece a chave."""
+
+    supported: bool = True
+    method: str | None = None  # como o dado foi obtido (ex.: "dm_db_index_physical_stats")
+    databases_scanned: list[str] = Field(default_factory=list)
+    databases_skipped: list[str] = Field(default_factory=list)
+    # Desde quando contadores cumulativos de uso valem (restart do motor / stats reset). Um
+    # indice "sem uso" so e confiavel se esse periodo cobre um ciclo de negocio completo.
+    usage_stats_since: datetime | None = None
+    notes: list[str] = Field(default_factory=list)
+
+
+class NormalizedIndexHealthItem(BaseModel):
+    """Problema de saude de indice: fragmentacao, sem uso, duplicado ou sobreposto.
+
+    - fragmentation: indice fragmentado (fragmentation_pct) ou com densidade/bloat ruim
+    - unused: sem leituras desde `usage_stats_since`, mas pagando custo de escrita (writes)
+    - duplicate: mesmas colunas-chave (e INCLUDE/predicado) que `duplicate_of`
+    - overlapping: chaves sao prefixo a esquerda das chaves de `duplicate_of` (redundante)"""
+
+    category: Literal["fragmentation", "unused", "duplicate", "overlapping"]
+    database_name: str | None = None
+    schema_name: str
+    table_name: str
+    index_name: str
+    index_type: str | None = None
+    size_bytes: int | None = None
+    fragmentation_pct: float | None = None
+    page_count: int | None = None
+    reads: int | None = None
+    writes: int | None = None
+    last_used: datetime | None = None
+    duplicate_of: str | None = None
+    key_columns: str | None = None
+    included_columns: str | None = None
+    is_unique: bool = False
+    is_primary_key: bool = False
+    severity: Severity = "warning"
+    # Comando sugerido (REBUILD/REORGANIZE/DROP/REINDEX...) — so texto, nunca executado.
+    recommendation: str | None = None
+    detail: dict[str, Any] = Field(default_factory=dict)
+
+
+class NormalizedIndexHealthReport(BaseModel):
+    items: list[NormalizedIndexHealthItem] = Field(default_factory=list)
+    meta: NormalizedScanMeta = Field(default_factory=NormalizedScanMeta)
+
+
+class NormalizedStatisticsHealthItem(BaseModel):
+    """Estatistica do otimizador potencialmente desatualizada.
+
+    `stats_name` None = estatistica no nivel da tabela (PostgreSQL/MySQL/Oracle/DB2);
+    SQL Server reporta cada objeto de estatistica (indice ou auto-created) separadamente."""
+
+    database_name: str | None = None
+    schema_name: str
+    table_name: str
+    stats_name: str | None = None
+    last_updated: datetime | None = None
+    row_count: int | None = None
+    modified_rows: int | None = None
+    modified_pct: float | None = None
+    days_since_update: float | None = None
+    is_stale: bool = False
+    severity: Severity = "info"
+    recommendation: str | None = None
+    detail: dict[str, Any] = Field(default_factory=dict)
+
+
+class NormalizedStatisticsHealthReport(BaseModel):
+    items: list[NormalizedStatisticsHealthItem] = Field(default_factory=list)
+    meta: NormalizedScanMeta = Field(default_factory=NormalizedScanMeta)
+
+
+class NormalizedMemoryGrantActive(BaseModel):
+    """Requisicao EM EXECUCAO consumindo (ou aguardando) memoria de trabalho.
+
+    SQL Server: concessao real (sys.dm_exec_query_memory_grants). Demais motores: area de
+    trabalho equivalente (Oracle workarea, PostgreSQL temp em uso, MySQL memoria por thread).
+    `is_waiting` = pediu memoria e ainda nao recebeu (RESOURCE_SEMAPHORE no SQL Server)."""
+
+    session_id: str
+    database_name: str | None = None
+    login_name: str | None = None
+    sql_hash: str | None = None
+    sql_text_masked: str | None = None
+    requested_kb: int | None = None
+    granted_kb: int | None = None
+    used_kb: int | None = None
+    max_used_kb: int | None = None
+    ideal_kb: int | None = None
+    wait_time_ms: int | None = None
+    is_waiting: bool = False
+    dop: int | None = None
+    spill_kb: int | None = None
+    detail: dict[str, Any] = Field(default_factory=dict)
+
+
+class NormalizedMemoryGrantTopQuery(BaseModel):
+    """Consulta (historico do cache/digest) que mais pede memoria ou mais derrama para disco."""
+
+    sql_hash: str | None = None
+    sql_text_masked: str
+    database_name: str | None = None
+    executions: int = 0
+    avg_grant_kb: float | None = None
+    max_grant_kb: float | None = None
+    avg_used_kb: float | None = None
+    max_used_kb: float | None = None
+    # Quanto da concessao ficou ocioso (pediu muito mais do que usou) — 0..100.
+    unused_grant_pct: float | None = None
+    spill_count: int | None = None
+    spill_kb: int | None = None
+    last_execution: datetime | None = None
+    severity: Severity = "info"
+    detail: dict[str, Any] = Field(default_factory=dict)
+
+
+class NormalizedMemoryGrantSummary(BaseModel):
+    granted_requests: int = 0
+    waiting_requests: int = 0
+    total_granted_kb: int | None = None
+    total_used_kb: int | None = None
+    available_kb: int | None = None
+    target_kb: int | None = None
+    # Espera cumulativa por memoria desde o restart (RESOURCE_SEMAPHORE, etc.).
+    memory_wait_ms_total: int | None = None
+    detail: dict[str, Any] = Field(default_factory=dict)
+
+
+class NormalizedMemoryGrantReport(BaseModel):
+    summary: NormalizedMemoryGrantSummary = Field(default_factory=NormalizedMemoryGrantSummary)
+    active: list[NormalizedMemoryGrantActive] = Field(default_factory=list)
+    top_queries: list[NormalizedMemoryGrantTopQuery] = Field(default_factory=list)
+    meta: NormalizedScanMeta = Field(default_factory=NormalizedScanMeta)
+
+
+class NormalizedCompressionItem(BaseModel):
+    """Estimativa (ou inventario) de compressao de uma tabela/indice/particao.
+
+    `estimated_size_kb`/`savings_pct` so vem preenchidos em motores com estimador nativo
+    (SQL Server `sp_estimate_data_compression_savings`, DB2 `ADMIN_GET_TAB_COMPRESS_INFO`);
+    nos demais o item e inventario do estado atual (`current_compression`) + tamanho."""
+
+    database_name: str | None = None
+    schema_name: str
+    table_name: str
+    index_name: str | None = None
+    index_id: int | None = None
+    partition_number: int | None = None
+    current_compression: str | None = None
+    requested_compression: str | None = None
+    current_size_kb: int | None = None
+    estimated_size_kb: int | None = None
+    savings_pct: float | None = None
+    command: str | None = None
+    detail: dict[str, Any] = Field(default_factory=dict)
+
+
+class NormalizedCompressionReport(BaseModel):
+    items: list[NormalizedCompressionItem] = Field(default_factory=list)
+    meta: NormalizedScanMeta = Field(default_factory=NormalizedScanMeta)
+
+
+class NormalizedPartitionInfo(BaseModel):
+    """Tabela/indice particionado com o ultimo limite (range) criado.
+
+    Objetivo operacional: saber se as particoes estao "acabando" — linhas caindo na particao
+    alem do ultimo limite (`rows_beyond_last_boundary` > 0) significam que novos ranges precisam
+    ser criados (sliding window atrasada)."""
+
+    database_name: str | None = None
+    schema_name: str
+    table_name: str
+    index_name: str | None = None
+    index_type: str | None = None
+    partition_method: str | None = None  # RANGE / LIST / HASH / INTERVAL ...
+    partition_scheme: str | None = None
+    partition_function: str | None = None
+    partition_key: str | None = None
+    range_type: str | None = None  # LEFT / RIGHT (SQL Server)
+    partition_count: int = 0
+    last_boundary_value: str | None = None
+    rows_beyond_last_boundary: int | None = None
+    total_rows: int | None = None
+    data_compression: str | None = None
+    severity: Severity = "info"
+    recommendation: str | None = None
+    # `partitions`: ate as 24 ultimas particoes [{number, boundary, rows, compression}].
+    detail: dict[str, Any] = Field(default_factory=dict)
+
+
+class NormalizedPartitionReport(BaseModel):
+    items: list[NormalizedPartitionInfo] = Field(default_factory=list)
+    meta: NormalizedScanMeta = Field(default_factory=NormalizedScanMeta)

@@ -24,7 +24,6 @@ from uuid import UUID
 import aiomysql
 
 from app.collectors.base import CapabilityResult, CapabilityStatus, CollectionResult
-from app.collectors.collector_mixin import CollectorNoOpMixin
 from app.collectors.capabilities import (
     CONNECTIVITY,
     MYSQL_PERFORMANCE_SCHEMA,
@@ -32,20 +31,22 @@ from app.collectors.capabilities import (
     MYSQL_SESSION_ACTIVITY,
     MYSQL_WAIT_EVENTS,
 )
+from app.collectors.collector_mixin import CollectorNoOpMixin
 from app.collectors.connection import ConnectionParams
+from app.collectors.mysql import maintenance as mysql_maintenance
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.masking.sql_masking import mask_sql_literals, mask_sql_literals_for_display
 from app.normalizers.models import (
-    NormalizedBackupStatus,
     NormalizedBlockingEvent,
-    NormalizedConfirmedTransactionError,
-    NormalizedDeadlockEvent,
+    NormalizedCompressionReport,
+    NormalizedIndexHealthReport,
+    NormalizedMemoryGrantReport,
     NormalizedMetricSample,
-    NormalizedMissingIndexSuggestion,
-    NormalizedPlanCompileTimeoutFinding,
+    NormalizedPartitionReport,
     NormalizedPlanSnapshot,
     NormalizedQuerySample,
+    NormalizedStatisticsHealthReport,
     NormalizedTransactionEvent,
 )
 from app.normalizers.wait_taxonomy import map_wait_event
@@ -596,6 +597,33 @@ class MySQLCollector(CollectorNoOpMixin):
                 continue
 
         return results
+
+    # ── Varreduras de manutencao on-demand (app/collectors/mysql/maintenance.py) ──────────
+
+    async def list_databases(self) -> list[str]:
+        return await mysql_maintenance.list_databases(self._connection)
+
+    async def collect_index_health(
+        self, database: str | None = None
+    ) -> NormalizedIndexHealthReport:
+        return await mysql_maintenance.collect_index_health(self._connection, database)
+
+    async def collect_statistics_health(
+        self, database: str | None = None
+    ) -> NormalizedStatisticsHealthReport:
+        return await mysql_maintenance.collect_statistics_health(self._connection, database)
+
+    async def collect_memory_grants(self) -> NormalizedMemoryGrantReport:
+        return await mysql_maintenance.collect_memory_grants(self._connection)
+
+    async def estimate_compression(
+        self, database: str | None, compression: str, max_objects: int
+    ) -> NormalizedCompressionReport:
+        # MySQL/MariaDB nao tem estimador nativo — `compression` (PAGE/ROW) nao se aplica.
+        return await mysql_maintenance.estimate_compression(self._connection, database, max_objects)
+
+    async def collect_partitions(self, database: str | None = None) -> NormalizedPartitionReport:
+        return await mysql_maintenance.collect_partitions(self._connection, database)
 
     async def close(self) -> None:
         """Fecha a conexao."""

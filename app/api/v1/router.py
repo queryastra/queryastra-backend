@@ -13,10 +13,12 @@ from app.api.v1 import (
     ai_deep_analysis,
     ai_keys,
     alerts,
+    anomalies,
     audit_log,
     auth,
     backup_status,
     capacity,
+    db_maintenance,
     deadlocks,
     health_stats,
     hosts,
@@ -64,7 +66,12 @@ api_v1_router.include_router(status.router, prefix="/status", tags=["status"])
 api_v1_router.include_router(update.router, prefix="/update", tags=["update"])
 api_v1_router.include_router(vacuum.router, prefix="/instances", tags=["vacuum"])
 api_v1_router.include_router(health_stats.router, prefix="/instances", tags=["health-stats"])
+api_v1_router.include_router(
+    db_maintenance.router, prefix="/instances", tags=["db-maintenance"]
+)
 api_v1_router.include_router(ai_deep_analysis.router, prefix="/instances", tags=["ai-deep-analysis"])
+api_v1_router.include_router(anomalies.instance_router, prefix="/instances", tags=["anomalies"])
+api_v1_router.include_router(anomalies.router, prefix="/anomalies", tags=["anomalies"])
 api_v1_router.include_router(websocket.router, tags=["websocket"])
 
 # Endpoint de health-check do backend em si (nao confundir com health-check de instancia

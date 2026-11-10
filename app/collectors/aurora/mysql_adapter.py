@@ -20,15 +20,17 @@ from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.normalizers.models import (
     NormalizedBackupStatus,
-    NormalizedBlockingEvent,
+    NormalizedCompressionReport,
     NormalizedConfirmedTransactionError,
     NormalizedDeadlockEvent,
+    NormalizedIndexHealthReport,
+    NormalizedMemoryGrantReport,
     NormalizedMetricSample,
     NormalizedMissingIndexSuggestion,
+    NormalizedPartitionReport,
     NormalizedPlanCompileTimeoutFinding,
     NormalizedPlanSnapshot,
-    NormalizedQuerySample,
-    NormalizedTransactionEvent,
+    NormalizedStatisticsHealthReport,
 )
 
 logger = get_logger(__name__)
@@ -161,3 +163,27 @@ class AuroraMySQLCollector:
         self, queries: list[tuple[str, str]]
     ) -> list[NormalizedPlanSnapshot]:
         return await self._mysql.explain_queries(queries)
+
+    async def list_databases(self) -> list[str]:
+        return await self._mysql.list_databases()
+
+    async def collect_index_health(
+        self, database: str | None = None
+    ) -> NormalizedIndexHealthReport:
+        return await self._mysql.collect_index_health(database)
+
+    async def collect_statistics_health(
+        self, database: str | None = None
+    ) -> NormalizedStatisticsHealthReport:
+        return await self._mysql.collect_statistics_health(database)
+
+    async def collect_memory_grants(self) -> NormalizedMemoryGrantReport:
+        return await self._mysql.collect_memory_grants()
+
+    async def estimate_compression(
+        self, database: str | None, compression: str, max_objects: int
+    ) -> NormalizedCompressionReport:
+        return await self._mysql.estimate_compression(database, compression, max_objects)
+
+    async def collect_partitions(self, database: str | None = None) -> NormalizedPartitionReport:
+        return await self._mysql.collect_partitions(database)

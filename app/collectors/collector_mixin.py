@@ -20,21 +20,27 @@ from app.normalizers.models import (
     NormalizedBackupStatus,
     NormalizedBgwriterStats,
     NormalizedBufferTableStats,
-    NormalizedConfirmedTransactionError,
+    NormalizedCompressionReport,
     NormalizedConfigComplianceItem,
+    NormalizedConfirmedTransactionError,
     NormalizedConnectionConsumer,
     NormalizedDbSize,
-    NormalizedFileIoStats,
-    NormalizedQueryStatsSnapshot,
     NormalizedDeadlockEvent,
+    NormalizedFileIoStats,
     NormalizedIdleInTransactionSession,
     NormalizedIndexBloatEntry,
+    NormalizedIndexHealthReport,
+    NormalizedMemoryGrantReport,
     NormalizedMetricSample,
     NormalizedMissingIndexSuggestion,
+    NormalizedPartitionReport,
     NormalizedPlanCompileTimeoutFinding,
     NormalizedPlanSnapshot,
+    NormalizedQueryStatsSnapshot,
     NormalizedReplicationSlot,
+    NormalizedScanMeta,
     NormalizedSchemaHealthItem,
+    NormalizedStatisticsHealthReport,
     NormalizedTableIoStats,
     NormalizedTempDbStats,
     NormalizedTempfileStats,
@@ -133,3 +139,25 @@ class CollectorNoOpMixin:
 
     async def explain_plan_for_hash(self, sql_text: str) -> dict | None:
         return None
+
+    async def list_databases(self) -> list[str]:
+        return []
+
+    async def collect_index_health(self, database: str | None = None) -> NormalizedIndexHealthReport:
+        return NormalizedIndexHealthReport(meta=NormalizedScanMeta(supported=False))
+
+    async def collect_statistics_health(
+        self, database: str | None = None
+    ) -> NormalizedStatisticsHealthReport:
+        return NormalizedStatisticsHealthReport(meta=NormalizedScanMeta(supported=False))
+
+    async def collect_memory_grants(self) -> NormalizedMemoryGrantReport:
+        return NormalizedMemoryGrantReport(meta=NormalizedScanMeta(supported=False))
+
+    async def estimate_compression(
+        self, database: str | None, compression: str, max_objects: int
+    ) -> NormalizedCompressionReport:
+        return NormalizedCompressionReport(meta=NormalizedScanMeta(supported=False))
+
+    async def collect_partitions(self, database: str | None = None) -> NormalizedPartitionReport:
+        return NormalizedPartitionReport(meta=NormalizedScanMeta(supported=False))
