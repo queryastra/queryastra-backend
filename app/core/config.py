@@ -337,6 +337,48 @@ class Settings(BaseSettings):
     blocking_min_duration_ms: int = Field(default=0, alias="BLOCKING_MIN_DURATION_MS")
     sleeping_min_duration_ms: int = Field(default=0, alias="SLEEPING_MIN_DURATION_MS")
 
+    # Varreduras de manutencao on-demand (saude de indices, estatisticas, particoes, compressao).
+    # Iteram banco a banco: cada banco tem seu proprio timeout e um banco lento/sem permissao e
+    # pulado (reportado em `databases_skipped`) sem derrubar a varredura inteira.
+    maintenance_per_database_timeout_seconds: float = Field(
+        default=60.0, alias="MAINTENANCE_PER_DATABASE_TIMEOUT_SECONDS"
+    )
+    maintenance_scan_timeout_seconds: float = Field(
+        default=300.0, alias="MAINTENANCE_SCAN_TIMEOUT_SECONDS"
+    )
+    maintenance_max_databases: int = Field(default=50, alias="MAINTENANCE_MAX_DATABASES")
+    maintenance_max_rows: int = Field(default=1000, alias="MAINTENANCE_MAX_ROWS")
+    # Indices menores que isso nao entram na analise de fragmentacao (fragmentacao em indice
+    # pequeno e irrelevante e reconstrui-lo nao muda nada) — 1000 paginas de 8KB = ~8MB.
+    maintenance_fragmentation_min_pages: int = Field(
+        default=1000, alias="MAINTENANCE_FRAGMENTATION_MIN_PAGES"
+    )
+    # sp_estimate_data_compression_savings amostra dados reais — limita quantos objetos (os
+    # maiores primeiro) entram numa estimativa para nao gerar carga no servidor monitorado.
+    compression_estimate_max_objects: int = Field(
+        default=25, alias="COMPRESSION_ESTIMATE_MAX_OBJECTS"
+    )
+
+    # Worker de aviso de expiracao de trial (TrialExpiryWorker). Habilitado por default — faz
+    # sentido sempre que o SMTP de alertas estiver configurado. Desabilite com
+    # TRIAL_EXPIRY_WORKER_ENABLED=false se preferir nao receber esses avisos por e-mail.
+    trial_expiry_worker_enabled: bool = Field(default=True, alias="TRIAL_EXPIRY_WORKER_ENABLED")
+    # Intervalo (segundos) entre checagens. Default 3600s (1h) — verificar uma vez por hora e
+    # suficiente para nao perder o marco de 1 dia sem enviar mensagens em excesso.
+    trial_expiry_check_interval_seconds: int = Field(
+        default=3600, alias="TRIAL_EXPIRY_CHECK_INTERVAL_SECONDS"
+    )
+
+    # Deteccao automatica de anomalias sazonais (app/workers/anomaly_detection_worker.py):
+    # compara cada metrica com o "normal" do mesmo dia da semana e hora das ultimas N semanas.
+    anomaly_detection_enabled: bool = Field(default=True, alias="ANOMALY_DETECTION_ENABLED")
+    anomaly_detection_interval_seconds: int = Field(
+        default=300, alias="ANOMALY_DETECTION_INTERVAL_SECONDS"
+    )
+    anomaly_baseline_weeks: int = Field(default=4, alias="ANOMALY_BASELINE_WEEKS")
+    anomaly_warning_z: float = Field(default=3.0, alias="ANOMALY_WARNING_Z")
+    anomaly_critical_z: float = Field(default=4.0, alias="ANOMALY_CRITICAL_Z")
+
 
 @lru_cache
 def get_settings() -> Settings:

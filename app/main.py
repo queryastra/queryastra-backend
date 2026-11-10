@@ -34,6 +34,7 @@ from app.repositories.system_license_repository import SystemLicenseRepository
 from app.repositories.users_repository import UsersRepository
 from app.services.auth_service import hash_password
 from app.workers.alerting_worker import AlertingWorker, EmailSettings
+from app.workers.anomaly_detection_worker import AnomalyDetectionWorker
 from app.workers.backup_status_supervisor import BackupStatusSupervisor
 from app.workers.deadlock_supervisor import DeadlockSupervisor
 from app.workers.extended_health_metrics_supervisor import ExtendedHealthMetricsSupervisor
@@ -46,6 +47,7 @@ from app.workers.query_stats_supervisor import QueryStatsSupervisor
 from app.workers.report_worker import ReportWorker
 from app.workers.update_checker import UpdateChecker
 from app.workers.transaction_error_supervisor import TransactionErrorSupervisor
+from app.workers.trial_expiry_worker import TrialExpiryWorker
 
 logger = get_logger(__name__)
 
@@ -138,6 +140,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     report_worker_task: asyncio.Task[None] | None = None
     update_checker: UpdateChecker | None = None
     update_checker_task: asyncio.Task[None] | None = None
+    trial_expiry_worker: TrialExpiryWorker | None = None
+    trial_expiry_task: asyncio.Task[None] | None = None
+    anomaly_worker: AnomalyDetectionWorker | None = None
+    anomaly_task: asyncio.Task[None] | None = None
 
     if settings.polling_supervisor_enabled:
         supervisor = PollingSupervisor(
@@ -328,6 +334,37 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     else:
         logger.info("UpdateChecker desabilitado (UPDATE_CHECK_ENABLED=false)")
 
+    if settings.trial_expiry_worker_enabled:
+        trial_expiry_worker = TrialExpiryWorker(
+            async_session_factory,
+            settings,
+            settings.trial_expiry_check_interval_seconds,
+        )
+        trial_expiry_task = asyncio.create_task(trial_expiry_worker.run())
+        logger.info(
+            "TrialExpiryWorker habilitado (check_interval=%ss)",
+            settings.trial_expiry_check_interval_seconds,
+        )
+    else:
+        logger.info("TrialExpiryWorker desabilitado (TRIAL_EXPIRY_WORKER_ENABLED=false)")
+
+    if settings.anomaly_detection_enabled:
+        anomaly_worker = AnomalyDetectionWorker(
+            async_session_factory,
+            settings.anomaly_detection_interval_seconds,
+            baseline_weeks=settings.anomaly_baseline_weeks,
+            warning_z=settings.anomaly_warning_z,
+            critical_z=settings.anomaly_critical_z,
+            notifier=alerting_worker.send_notification if alerting_worker is not None else None,
+        )
+        anomaly_task = asyncio.create_task(anomaly_worker.run())
+        logger.info(
+            "AnomalyDetectionWorker habilitado (interval=%ss)",
+            settings.anomaly_detection_interval_seconds,
+        )
+    else:
+        logger.info("AnomalyDetectionWorker desabilitado (ANOMALY_DETECTION_ENABLED=false)")
+
     yield
 
     if supervisor is not None and supervisor_task is not None:
@@ -369,6 +406,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if update_checker is not None and update_checker_task is not None:
         update_checker.stop()
         await update_checker_task
+    if trial_expiry_worker is not None and trial_expiry_task is not None:
+        trial_expiry_worker.stop()
+        await trial_expiry_task
+    if anomaly_worker is not None and anomaly_task is not None:
+        anomaly_worker.stop()
+        await anomaly_task
     executor.shutdown(wait=False, cancel_futures=True)
     instance_executors.shutdown_all()
     logger.info("Lifespan finalizado")
