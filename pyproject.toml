@@ -1,6 +1,6 @@
 [project]
 name = "queryastra-backend"
-version = "0.1.0"
+version = "0.1.2"
 description = "QueryAstra backend (FastAPI) — observabilidade agentless de PostgreSQL e SQL Server"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
