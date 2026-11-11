@@ -43,6 +43,7 @@ from app.normalizers.models import (
     NormalizedIndexHealthReport,
     NormalizedMemoryGrantReport,
     NormalizedMetricSample,
+    NormalizedMissingIndexSuggestion,
     NormalizedPartitionReport,
     NormalizedPlanSnapshot,
     NormalizedQuerySample,
@@ -530,6 +531,11 @@ class MySQLCollector(CollectorNoOpMixin):
         except Exception as exc:
             logger.warning("Erro ao obter Uptime MySQL: %s", exc)
         return None
+
+    async def collect_missing_index_suggestions(self) -> list[NormalizedMissingIndexSuggestion]:
+        return await mysql_maintenance.collect_missing_index_suggestions(
+            self._connection, self._instance_id
+        )
 
     async def run_scalar_query(self, sql: str, timeout_seconds: float) -> float | None:
         """Executa query escalar e retorna o primeiro valor como float."""

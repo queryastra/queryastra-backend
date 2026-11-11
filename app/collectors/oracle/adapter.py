@@ -53,6 +53,7 @@ from app.normalizers.models import (
     NormalizedIndexHealthReport,
     NormalizedMemoryGrantReport,
     NormalizedMetricSample,
+    NormalizedMissingIndexSuggestion,
     NormalizedPartitionReport,
     NormalizedPlanSnapshot,
     NormalizedQuerySample,
@@ -530,6 +531,17 @@ class OracleCollector(CollectorNoOpMixin):
 
     async def collect_partitions(self, database: str | None = None) -> NormalizedPartitionReport:
         return await self._with_connection(oracle_maintenance.collect_partitions)
+
+    async def collect_missing_index_suggestions(self) -> list[NormalizedMissingIndexSuggestion]:
+        if self._instance_id is None:
+            return []
+        instance_id = self._instance_id
+        return await self._with_connection(
+            lambda conn: oracle_maintenance.collect_missing_index_suggestions(conn, instance_id)
+        )
+
+    async def get_engine_start_time(self) -> datetime | None:
+        return await self._with_connection(oracle_maintenance.get_engine_start_time)
 
     async def close(self) -> None:
         logger.info("close chamado para instância oracle (instance_id=%s)", self._instance_id)

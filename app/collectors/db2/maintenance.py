@@ -1,4 +1,4 @@
-"""Varreduras de manutencao on-demand — IBM Db2 (LUW).
+﻿"""Varreduras de manutencao on-demand — IBM Db2 (LUW).
 
 Escopo = o banco da conexao (`database_scope_current_only`). O driver `ibm_db_dbi` e sincrono:
 cada query roda no executor com timeout proprio (`Db2Runner`), mesmo padrao do adaptador.
@@ -15,6 +15,7 @@ import hashlib
 from collections import defaultdict
 from datetime import UTC, date, datetime
 from typing import Any
+from uuid import UUID
 
 from app.collectors.mysql.maintenance_helpers import (
     IndexDefinition,
@@ -37,6 +38,7 @@ from app.normalizers.models import (
     NormalizedMemoryGrantReport,
     NormalizedMemoryGrantSummary,
     NormalizedMemoryGrantTopQuery,
+    NormalizedMissingIndexSuggestion,
     NormalizedPartitionInfo,
     NormalizedPartitionReport,
     NormalizedScanMeta,
@@ -773,3 +775,67 @@ async def collect_partitions(runner: Db2Runner, db_name: str) -> NormalizedParti
         items=items[: settings.maintenance_max_rows],
         meta=_meta("syscat.datapartitions", db_name, ["partition_rows_estimated"]),
     )
+
+
+async def collect_missing_index_suggestions(
+    runner: Db2Runner, db_name: str, instance_id: "UUID | None"
+) -> "list[NormalizedMissingIndexSuggestion]":
+    """Heuristica de indice ausente: tabelas sem nenhum indice com alto numero de linhas.
+
+    Usa syscat.tables LEFT JOIN syscat.indexes. Nao indica coluna especifica."""
+    if instance_id is None:
+        return []
+    from app.core.config import get_settings as _gs
+    settings = _gs()
+    min_rows = 1000
+    rows = await runner.try_fetch(
+        f"""
+        SELECT t.TABSCHEMA, t.TABNAME, t.CARD
+        FROM   SYSCAT.TABLES t
+        WHERE  {schema_filter("t.TABSCHEMA")}
+          AND  t.TYPE = 'T'
+          AND  t.CARD > {min_rows}
+          AND  NOT EXISTS (
+                 SELECT 1 FROM SYSCAT.INDEXES i
+                 WHERE  i.TABSCHEMA = t.TABSCHEMA
+                   AND  i.TABNAME   = t.TABNAME
+               )
+        ORDER  BY t.CARD DESC
+        """
+    )
+    if not rows:
+        return []
+    suggestions: list[NormalizedMissingIndexSuggestion] = []
+    for row in rows[: settings.collection_max_rows]:
+        schema = str(row.get("tabschema") or "").strip()
+        table = str(row.get("tabname") or "").strip()
+        card = int(row.get("card") or 0)
+        suggestions.append(
+            NormalizedMissingIndexSuggestion(
+                instance_id=instance_id,
+                database_name=db_name,
+                table_name=f"{schema}.{table}",
+                suggestion=(
+                    f"Tabela sem nenhum indice com ~{card:,} linhas: {schema}.{table}"
+                ),
+                impact_score=float(card),
+                detail={"card": card, "source": "syscat.tables", "schema": schema},
+            )
+        )
+    return suggestions
+
+
+async def get_engine_start_time(runner: Db2Runner, db_name: str) -> "datetime | None":
+    """Hora de startup do Db2 via sysibmadm.env_inst_info.db2start_time."""
+    rows = await runner.try_fetch(
+        "SELECT db2start_time FROM sysibmadm.env_inst_info FETCH FIRST 1 ROWS ONLY"
+    )
+    if rows and rows[0].get("db2start_time"):
+        val = rows[0]["db2start_time"]
+        if isinstance(val, datetime):
+            return val
+        try:
+            return datetime.fromisoformat(str(val))
+        except ValueError:
+            pass
+    return None

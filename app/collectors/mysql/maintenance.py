@@ -12,6 +12,7 @@ import hashlib
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import UUID
 
 import aiomysql
 
@@ -38,6 +39,7 @@ from app.normalizers.models import (
     NormalizedMemoryGrantReport,
     NormalizedMemoryGrantSummary,
     NormalizedMemoryGrantTopQuery,
+    NormalizedMissingIndexSuggestion,
     NormalizedPartitionInfo,
     NormalizedPartitionReport,
     NormalizedScanMeta,
@@ -939,5 +941,59 @@ async def list_databases(params: ConnectionParams) -> list[str]:
     holder = _ConnHolder(params)
     try:
         return await list_schemas(holder, get_settings().collection_query_timeout_seconds)
+    finally:
+        holder.close()
+
+
+async def collect_missing_index_suggestions(
+    params: ConnectionParams, instance_id: UUID | None
+) -> list[NormalizedMissingIndexSuggestion]:
+    """Heurística de índice ausente via performance_schema.table_io_waits_summary_by_index_usage.
+
+    INDEX_NAME IS NULL = operações de full scan sem uso de índice. Requer
+    performance_schema habilitado (padrão desde MySQL 5.6)."""
+    if instance_id is None:
+        return []
+    settings = get_settings()
+    timeout = settings.collection_query_timeout_seconds
+    holder = _ConnHolder(params)
+    try:
+        rows = await _try_fetch(
+            holder,
+            """
+            SELECT OBJECT_SCHEMA AS schema_name,
+                   OBJECT_NAME   AS table_name,
+                   SUM(COUNT_FETCH) AS full_scan_count
+            FROM   performance_schema.table_io_waits_summary_by_index_usage
+            WHERE  INDEX_NAME IS NULL
+              AND  OBJECT_SCHEMA NOT IN
+                   ('mysql','sys','performance_schema','information_schema')
+              AND  COUNT_FETCH > 0
+            GROUP  BY OBJECT_SCHEMA, OBJECT_NAME
+            ORDER  BY full_scan_count DESC
+            """,
+            timeout=timeout,
+        )
+        if not rows:
+            return []
+        suggestions: list[NormalizedMissingIndexSuggestion] = []
+        for row in rows[: settings.collection_max_rows]:
+            schema = str(row["schema_name"])
+            table = str(row["table_name"])
+            count = int(row["full_scan_count"] or 0)
+            suggestions.append(
+                NormalizedMissingIndexSuggestion(
+                    instance_id=instance_id,
+                    database_name=schema,
+                    table_name=f"{schema}.{table}",
+                    suggestion=(
+                        f"Candidato a índice (heurística): {count} full scans detectados"
+                        f" na tabela {schema}.{table}"
+                    ),
+                    impact_score=float(count),
+                    detail={"full_scan_count": count, "source": "performance_schema"},
+                )
+            )
+        return suggestions
     finally:
         holder.close()
