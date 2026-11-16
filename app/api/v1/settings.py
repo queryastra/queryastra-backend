@@ -13,7 +13,7 @@ import smtplib
 from email.message import EmailMessage
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,6 +21,9 @@ from app.api.deps import CurrentUser, get_current_user, get_db_session, require_
 from app.core.config import get_settings
 from app.models.system_settings import SystemSettings
 from app.repositories.system_settings_repository import SystemSettingsRepository
+from app.repositories.users_repository import UsersRepository
+from app.services.audit_service import record_audit
+from app.services.auth_service import verify_password
 
 router = APIRouter()
 
@@ -157,6 +160,40 @@ async def test_smtp(
         return TestSmtpResponse(ok=True)
     except Exception as exc:
         return TestSmtpResponse(ok=False, error=str(exc))
+
+
+class DeleteAccountRequest(BaseModel):
+    password: str
+
+
+@router.delete("/account", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_own_account(
+    payload: DeleteAccountRequest,
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> Response:
+    """Remove a conta do usuário autenticado. Requer confirmação de senha.
+
+    Bloqueia se o usuário for o único admin ativo (evita lock-out do sistema).
+    """
+    users_repo = UsersRepository(session)
+    user = await users_repo.get_by_id(current_user.user_id)
+    if user is None or not verify_password(payload.password, user.hashed_password):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Senha incorreta.")
+
+    if user.role == "admin":
+        all_users = await users_repo.list_all()
+        active_admins = [u for u in all_users if u.role == "admin" and u.is_active and u.id != user.id]
+        if not active_admins:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Não é possível remover a conta: você é o único administrador ativo.",
+            )
+
+    await record_audit(session, actor=user.username, action="account.deleted")
+    await users_repo.delete(current_user.user_id)
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.patch("", response_model=SystemSettingsResponse)
