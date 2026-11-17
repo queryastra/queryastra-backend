@@ -3363,17 +3363,18 @@ class SQLServerCollector:
         )
 
     async def list_databases(self) -> list[str]:
+        # Timeout de manutencao, nao o de polling: HAS_DBACCESS percorre cada banco e, com
+        # centenas deles, a listagem passa facilmente dos 5s de uma consulta de coleta.
         settings = get_settings()
         return await asyncio.wait_for(
             run_in_instance_executor(
                 self._instance_id,
                 ss_maintenance.list_databases,
                 self._connection_params,
-                settings.collection_query_timeout_seconds,
-                settings.maintenance_max_databases,
+                settings.maintenance_per_database_timeout_seconds,
             ),
             timeout=self._connection_params.connect_timeout_seconds
-            + settings.collection_query_timeout_seconds * 2,
+            + settings.maintenance_per_database_timeout_seconds * 2,
         )
 
     async def collect_index_health(

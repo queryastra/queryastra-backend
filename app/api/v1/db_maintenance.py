@@ -57,7 +57,10 @@ async def _run_scan(
         logger.warning("Timeout na varredura %s instance_id=%s", label, instance_id)
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            detail=f"Varredura de {label} excedeu {int(timeout)}s. Selecione um banco especifico.",
+            detail=(
+                f"Varredura de {label} excedeu o tempo limite na instancia. "
+                "Selecione um banco especifico ou tente novamente."
+            ),
         ) from exc
     except Exception as exc:
         logger.exception("Erro na varredura %s instance_id=%s", label, instance_id)

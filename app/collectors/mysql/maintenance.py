@@ -940,7 +940,7 @@ async def collect_partitions(
 async def list_databases(params: ConnectionParams) -> list[str]:
     holder = _ConnHolder(params)
     try:
-        return await list_schemas(holder, get_settings().collection_query_timeout_seconds)
+        return await list_schemas(holder, get_settings().maintenance_per_database_timeout_seconds)
     finally:
         holder.close()
 

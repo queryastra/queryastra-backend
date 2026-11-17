@@ -62,7 +62,7 @@ async def list_databases(connect: ConnectFn) -> list[str]:
     try:
         rows = await asyncio.wait_for(
             conn.fetch(_LIST_DATABASES_SQL),
-            timeout=get_settings().collection_query_timeout_seconds,
+            timeout=get_settings().maintenance_per_database_timeout_seconds,
         )
     finally:
         await conn.close()

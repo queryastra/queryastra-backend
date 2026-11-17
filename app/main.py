@@ -418,6 +418,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await notification_retention_task
     executor.shutdown(wait=False, cancel_futures=True)
     instance_executors.shutdown_all()
+    instance_executors.exit_if_threads_stuck(grace_seconds=5.0)
     logger.info("Lifespan finalizado")
 
 

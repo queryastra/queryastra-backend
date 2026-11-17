@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import os
 import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -88,16 +89,46 @@ async def run_in_instance_executor[T](
     return await loop.run_in_executor(executor, functools.partial(func, *args))
 
 
+_released_threads: list[threading.Thread] = []
+
+
 def shutdown_all() -> None:
     """Libera todos os executores dedicados — chamado no shutdown do lifespan do backend.
     `wait=False`: uma thread travada nunca termina sozinha (ver docstring do modulo), esperar por
     ela travaria o proprio shutdown do processo; `cancel_futures=True` so cancela tarefas ainda
     NAO iniciadas (enfileiradas), nunca uma ja em execucao."""
+    global _adhoc_executor
     with _lock:
-        for executor in _executors.values():
+        pools = list(_executors.values())
+        if _adhoc_executor is not None:
+            pools.append(_adhoc_executor)
+        for executor in pools:
+            _released_threads.extend(executor._threads)
             executor.shutdown(wait=False, cancel_futures=True)
         _executors.clear()
-        global _adhoc_executor
-        if _adhoc_executor is not None:
-            _adhoc_executor.shutdown(wait=False, cancel_futures=True)
-            _adhoc_executor = None
+        _adhoc_executor = None
+
+
+def stuck_threads() -> list[threading.Thread]:
+    return [t for t in _released_threads if t.is_alive()]
+
+
+def exit_if_threads_stuck(grace_seconds: float) -> None:
+    """`wait=False` nao basta: na saida do interpretador o `concurrent.futures` ainda faz join de
+    toda thread de pool, entao uma chamada de driver travada segura o processo para sempre (Ctrl+C
+    e o reload do uvicorn ficam pendurados). Um timer daemon encerra o processo se, passado o
+    prazo, ainda houver thread presa — desligamentos normais terminam antes e nada acontece."""
+
+    def _check() -> None:
+        stuck = stuck_threads()
+        if stuck:
+            logger.warning(
+                "%d thread(s) de instancia presa(s) em chamada de driver apos o shutdown — "
+                "encerrando o processo a forca",
+                len(stuck),
+            )
+            os._exit(0)
+
+    timer = threading.Timer(grace_seconds, _check)
+    timer.daemon = True
+    timer.start()

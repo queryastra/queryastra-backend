@@ -180,13 +180,15 @@ ORDER BY d.name
 """
 
 
-def _list_user_databases(session: _Session, max_databases: int) -> list[str]:
+def _list_user_databases(session: _Session, max_databases: int | None) -> list[str]:
+    """`max_databases=None` = sem corte (seletor da tela e varredura de um banco especifico)."""
     try:
         rows = _fetch_all(session, _LIST_DATABASES_AG_QUERY)
     except Exception:  # noqa: BLE001 - versao sem AG (2008) ou sem permissao nas DMVs de HADR
         session.reset()
         rows = _fetch_all(session, _LIST_DATABASES_SIMPLE_QUERY)
-    return [str(r["name"]) for r in rows][:max_databases]
+    names = [str(r["name"]) for r in rows]
+    return names if max_databases is None else names[:max_databases]
 
 
 def resolve_target_databases(
@@ -283,7 +285,9 @@ def _open_scan(
 ) -> _ScanContext:
     session = _Session(connection, per_database_timeout)
     info = _server_info(session)
-    available = _list_user_databases(session, max_databases)
+    # O corte so limita a varredura de "todos"; um banco pedido pelo nome nao pode ser dado como
+    # inacessivel so por estar alem dos primeiros N em ordem alfabetica.
+    available = _list_user_databases(session, max_databases if database is None else None)
     targets, missing = resolve_target_databases(available, database)
     meta = NormalizedScanMeta(method=method, databases_skipped=list(missing))
     for note in info.notes:
@@ -319,10 +323,10 @@ def _for_each_database[T](
 # ── list_databases ───────────────────────────────────────────────────────────────────────────
 
 
-def list_databases(connection: ConnectionParams, timeout: float, max_databases: int) -> list[str]:
+def list_databases(connection: ConnectionParams, timeout: float) -> list[str]:
     session = _Session(connection, timeout)
     try:
-        return _list_user_databases(session, max_databases)
+        return _list_user_databases(session, None)
     finally:
         session.close()
 
