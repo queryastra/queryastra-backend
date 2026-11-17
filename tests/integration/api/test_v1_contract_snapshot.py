@@ -12,9 +12,14 @@ implementacao.
 
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
+from app.api.deps import CurrentUser
+from app.api.v1 import websocket as websocket_module
 from app.main import app
+from app.services.auth_service import create_access_token
 
 EXPECTED_REST_PATHS = {
     "/api/v1/health",
@@ -24,6 +29,15 @@ EXPECTED_REST_PATHS = {
     "/api/v1/auth/users/{user_id}",
     "/api/v1/auth/users/{user_id}/instances",
     "/api/v1/auth/users/{user_id}/instances/{instance_id}",
+    "/api/v1/auth/me/profile",
+    "/api/v1/auth/teams",
+    "/api/v1/auth/teams/{team_id}",
+    "/api/v1/auth/teams/{team_id}/members/{user_id}",
+    "/api/v1/auth/teams/{team_id}/instances/{instance_id}",
+    "/api/v1/notifications",
+    "/api/v1/notifications/unread-count",
+    "/api/v1/notifications/read-all",
+    "/api/v1/notifications/{notification_id}/read",
     "/api/v1/instances",
     "/api/v1/instances/{instance_id}",
     "/api/v1/instances/{instance_id}/active",
@@ -81,6 +95,7 @@ EXPECTED_REST_PATHS = {
     "/api/v1/alerts/{alert_id}/close",
     "/api/v1/alerts/silences",
     "/api/v1/alerts/silences/{silence_id}",
+    "/api/v1/alerts/metric-catalog",
     "/api/v1/missing-index-suggestions/{instance_id}",
     "/api/v1/missing-index-suggestions/{instance_id}/collection-info",
     "/api/v1/backup-status/{instance_id}",
@@ -95,6 +110,15 @@ EXPECTED_REST_PATHS = {
     "/api/v1/reports/{report_id}",
     "/api/v1/reports/{report_id}/toggle",
     "/api/v1/reports/{report_id}/download",
+    # Historico por instancia (queries lentas, regressoes, deadlocks), anotacoes, visao geral e
+    # exportacao PDF de tabela.
+    "/api/v1/instances/{instance_id}/slow-queries",
+    "/api/v1/instances/{instance_id}/query-regressions",
+    "/api/v1/instances/{instance_id}/deadlock-history",
+    "/api/v1/annotations",
+    "/api/v1/annotations/{annotation_id}",
+    "/api/v1/overview/instances",
+    "/api/v1/exports/table-pdf",
 }
 
 EXPECTED_WEBSOCKET_PATH = "/api/v1/ws/live"
@@ -105,7 +129,7 @@ def test_openapi_schema_exposes_expected_rest_paths() -> None:
     assert set(schema["paths"].keys()) == EXPECTED_REST_PATHS
 
 
-def test_websocket_route_is_registered() -> None:
+def test_websocket_route_is_registered(monkeypatch: pytest.MonkeyPatch) -> None:
     # Rotas WebSocket nao aparecem no schema OpenAPI, e a versao instalada do FastAPI resolve
     # inclusao de router de forma preguicosa (introspeccao estatica de `app.router.routes` nao
     # reflete rotas incluidas via `include_router`) — a forma robusta de confirmar que o path
@@ -118,5 +142,21 @@ def test_websocket_route_is_registered() -> None:
     # thread-safe. Abrir e fechar a conexao ja e prova suficiente de que a rota esta registrada
     # e aceita o handshake; o broadcast de verdade (mesma thread/loop do worker) e coberto pelo
     # smoke test manual do backend.
-    with TestClient(app).websocket_connect(EXPECTED_WEBSOCKET_PATH):
+    #
+    # `/ws/live` exige JWT em `?token=` e confirma o usuario ativo no banco — o carregador do
+    # usuario e substituido aqui para o teste nao depender de um usuario especifico existir.
+    async def _fake_active_user(user_id: int) -> CurrentUser:
+        return CurrentUser(user_id=user_id, username="ws-test", role="admin")
+
+    monkeypatch.setattr(websocket_module, "load_active_user", _fake_active_user)
+    token = create_access_token(4242, "ws-test", "admin")
+    with TestClient(app).websocket_connect(f"{EXPECTED_WEBSOCKET_PATH}?token={token}"):
         pass
+
+
+def test_websocket_rejects_missing_or_invalid_token() -> None:
+    for path in (EXPECTED_WEBSOCKET_PATH, f"{EXPECTED_WEBSOCKET_PATH}?token=not-a-jwt"):
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            with TestClient(app).websocket_connect(path) as ws:
+                ws.receive_json()
+        assert exc_info.value.code == 1008

@@ -37,6 +37,15 @@ from app.collectors.mysql import maintenance as mysql_maintenance
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.masking.sql_masking import mask_sql_literals, mask_sql_literals_for_display
+from app.normalizers.derived_metrics import (
+    connections_used_percent,
+    logical_read_hit_ratio_percent,
+)
+from app.normalizers.metric_names import (
+    MYSQL_BUFFER_POOL_HIT_RATIO_PERCENT,
+    MYSQL_CONNECTIONS_USED_PERCENT,
+    MYSQL_MAX_CONNECTIONS,
+)
 from app.normalizers.models import (
     NormalizedBlockingEvent,
     NormalizedCompressionReport,
@@ -464,10 +473,71 @@ class MySQLCollector(CollectorNoOpMixin):
                         labels={"engine": self._engine_variant},
                     )
                 )
+            metrics.extend(
+                await self._collect_derived_metrics(conn, settings, collected_at, status_map)
+            )
         except Exception as exc:
             logger.warning("Erro ao coletar SHOW GLOBAL STATUS MySQL: %s", exc)
 
         return metrics
+
+    async def _collect_derived_metrics(
+        self,
+        conn: aiomysql.Connection,
+        settings,
+        collected_at: datetime,
+        status_map: dict[str, str],
+    ) -> list[NormalizedMetricSample]:
+        """Hit ratio do buffer pool InnoDB e % de conexoes usadas (`Threads_connected` vs a
+        variavel `max_connections`) — ver `app.normalizers.derived_metrics`. Falha ao ler
+        `max_connections` so omite as metricas de conexao."""
+        max_connections: str | None = None
+        try:
+            async with conn.cursor() as cur:
+                await asyncio.wait_for(
+                    cur.execute("SHOW GLOBAL VARIABLES LIKE 'max_connections'"),
+                    timeout=settings.collection_query_timeout_seconds,
+                )
+                row = await cur.fetchone()
+            if row is not None:
+                max_connections = row[1]
+        except Exception as exc:  # noqa: BLE001 - metrica derivada opcional
+            logger.debug("max_connections MySQL indisponivel: %s", exc)
+
+        derived: list[tuple[str, float | None]] = [
+            (
+                MYSQL_BUFFER_POOL_HIT_RATIO_PERCENT,
+                logical_read_hit_ratio_percent(
+                    status_map.get("Innodb_buffer_pool_reads"),
+                    status_map.get("Innodb_buffer_pool_read_requests"),
+                ),
+            ),
+        ]
+        if max_connections is not None:
+            try:
+                derived.append((MYSQL_MAX_CONNECTIONS, float(max_connections)))
+            except (TypeError, ValueError):
+                pass
+            derived.append(
+                (
+                    MYSQL_CONNECTIONS_USED_PERCENT,
+                    connections_used_percent(
+                        status_map.get("Threads_connected"), max_connections
+                    ),
+                )
+            )
+        return [
+            NormalizedMetricSample(
+                time=collected_at,
+                target_type="instance",
+                target_id=self._instance_id,
+                metric_name=name,
+                value=value,
+                labels={"engine": self._engine_variant},
+            )
+            for name, value in derived
+            if value is not None
+        ]
 
     async def collect_replication_lag_metrics(self) -> list[NormalizedMetricSample]:
         """Coleta lag de replicacao via SHOW REPLICA STATUS ou SHOW SLAVE STATUS."""

@@ -19,6 +19,10 @@ class User(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     username: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    # Opcional, unico quando presente — usado como destinatario de notificacoes por e-mail
+    # (alertas via time, avisos de trial para administradores). Editavel pelo admin e pelo
+    # proprio usuario (`PUT /auth/me/profile`).
+    email: Mapped[str | None] = mapped_column(String(320), unique=True, nullable=True)
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(String(32), nullable=False, default="viewer")
     # role values: "admin" | "operator" | "viewer"

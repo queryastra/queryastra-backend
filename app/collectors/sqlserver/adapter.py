@@ -84,14 +84,19 @@ from app.masking.sql_masking import (
     mask_sql_literals,
     mask_sql_literals_for_display,
 )
+from app.normalizers.derived_metrics import connections_used_percent, ratio_counter_percent
 from app.normalizers.metric_names import (
     SQLSERVER_ACTIVE_SESSION_COUNT,
+    SQLSERVER_BUFFER_CACHE_HIT_RATIO_PERCENT,
+    SQLSERVER_CONNECTIONS_USED_PERCENT,
     SQLSERVER_DEADLOCKS_TOTAL,
     SQLSERVER_INSTANCE_CPU_PERCENT,
+    SQLSERVER_MAX_CONNECTIONS,
     SQLSERVER_OS_CPU_PERCENT,
     SQLSERVER_RAW_COUNTER_TO_METRIC_NAME,
     SQLSERVER_REPLICA_LOG_SEND_QUEUE_KB,
     SQLSERVER_REPLICA_REDO_QUEUE_KB,
+    SQLSERVER_USER_CONNECTIONS,
     SQLSERVER_VOLUME_FREE_PERCENT,
 )
 from app.normalizers.models import (
@@ -345,6 +350,20 @@ _PERFORMANCE_COUNTERS_QUERY = """
           'Target Server Memory (KB)', 'Total Server Memory (KB)'
       )
       AND RTRIM(instance_name) = ''
+"""
+
+# Entradas das metricas DERIVADAS (`app.normalizers.derived_metrics`): o contador de razao
+# "Buffer cache hit ratio" so faz sentido dividido pela sua "... base"; "User Connections" vs
+# `@@MAX_CONNECTIONS` (limite efetivo do servico). Query separada e tolerante a falha.
+_DERIVED_COUNTERS_QUERY = """
+    SELECT RTRIM(counter_name) AS counter_name, cntr_value
+    FROM sys.dm_os_performance_counters
+    WHERE (RTRIM(object_name) LIKE '%:Buffer Manager'
+           AND RTRIM(counter_name) IN ('Buffer cache hit ratio', 'Buffer cache hit ratio base'))
+       OR (RTRIM(object_name) LIKE '%:General Statistics'
+           AND RTRIM(counter_name) = 'User Connections')
+    UNION ALL
+    SELECT 'Max Connections' AS counter_name, CAST(@@MAX_CONNECTIONS AS bigint) AS cntr_value
 """
 
 # Contador CUMULATIVO (nunca zera, so cresce) de deadlocks desde que o servico do SQL Server
@@ -869,6 +888,13 @@ def _connect_and_collect(
         cursor.execute(_DEADLOCK_COUNTER_QUERY)
         deadlock_counter_row = cursor.fetchone()
 
+        derived_counter_rows: list[dict] = []
+        try:
+            cursor.execute(_DERIVED_COUNTERS_QUERY)
+            derived_counter_rows = list(cursor.fetchall())
+        except Exception:  # noqa: BLE001 - metrica derivada opcional, nunca derruba a coleta
+            logger.debug("Contadores derivados indisponiveis instance_id=%s", instance_id)
+
         cursor.close()
     finally:
         conn.close()
@@ -936,6 +962,9 @@ def _connect_and_collect(
     )
     metric_samples = _build_metric_samples(
         session_rows, counter_rows, cpu_row, deadlock_counter_row, instance_id, collected_at
+    )
+    metric_samples.extend(
+        _build_derived_metric_samples(derived_counter_rows, instance_id, collected_at)
     )
     transaction_events = _build_transaction_events(
         transaction_rows,
@@ -2648,6 +2677,52 @@ def _build_metric_samples(
             )
         )
     return samples
+
+
+def _build_derived_metric_samples(
+    derived_counter_rows: list[dict], instance_id: UUID, collected_at: datetime
+) -> list[NormalizedMetricSample]:
+    """Hit ratio do buffer cache e % de conexoes usadas — ver `_DERIVED_COUNTERS_QUERY`."""
+    values: dict[str, object] = {}
+    for row in derived_counter_rows:
+        name = str(row.get("counter_name") or "").strip()
+        if name:
+            values[name] = row.get("cntr_value")
+
+    def _sample(metric_name: str, value: float | None) -> NormalizedMetricSample | None:
+        if value is None:
+            return None
+        return NormalizedMetricSample(
+            time=collected_at,
+            target_type="instance",
+            target_id=instance_id,
+            metric_name=metric_name,
+            value=float(value),
+        )
+
+    user_connections = values.get("User Connections")
+    max_connections = values.get("Max Connections")
+    candidates = [
+        _sample(
+            SQLSERVER_BUFFER_CACHE_HIT_RATIO_PERCENT,
+            ratio_counter_percent(
+                values.get("Buffer cache hit ratio"), values.get("Buffer cache hit ratio base")
+            ),
+        ),
+        _sample(
+            SQLSERVER_USER_CONNECTIONS,
+            float(user_connections) if isinstance(user_connections, int | float) else None,
+        ),
+        _sample(
+            SQLSERVER_MAX_CONNECTIONS,
+            float(max_connections) if isinstance(max_connections, int | float) else None,
+        ),
+        _sample(
+            SQLSERVER_CONNECTIONS_USED_PERCENT,
+            connections_used_percent(user_connections, max_connections),
+        ),
+    ]
+    return [c for c in candidates if c is not None]
 
 
 def _build_capability_results(

@@ -83,6 +83,39 @@ class SystemSettingsRepository(BaseRepository):
         key = get_settings().credential_encryption_key.encode()
         return Fernet(key).decrypt(row.smtp_password_encrypted.encode()).decode()
 
+    async def update_email_provider_settings(
+        self,
+        provider: str,
+        raw_brevo_api_key: str | None,
+        from_name: str | None,
+        from_address: str | None,
+    ) -> SystemSettings:
+        """Atualiza o provedor de e-mail. `raw_brevo_api_key=None` preserva a chave armazenada;
+        string vazia remove a chave."""
+        row = await self.get()
+        row.email_provider = provider
+        row.email_from_name = from_name
+        if from_address is not None:
+            row.smtp_from_address = from_address or None
+        if raw_brevo_api_key is not None:
+            if raw_brevo_api_key == "":
+                row.brevo_api_key_encrypted = None
+            else:
+                key = get_settings().credential_encryption_key.encode()
+                row.brevo_api_key_encrypted = (
+                    Fernet(key).encrypt(raw_brevo_api_key.encode()).decode()
+                )
+        await self._session.commit()
+        await self._session.refresh(row)
+        return row
+
+    def get_brevo_api_key_plain(self, row: SystemSettings) -> str | None:
+        """Decifra a chave da API Brevo armazenada. Retorna None se não configurada."""
+        if not row.brevo_api_key_encrypted:
+            return None
+        key = get_settings().credential_encryption_key.encode()
+        return Fernet(key).decrypt(row.brevo_api_key_encrypted.encode()).decode()
+
     async def update_ai_settings(
         self,
         provider: str | None,

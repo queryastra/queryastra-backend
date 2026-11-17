@@ -154,8 +154,9 @@ async def check_instance_access(
 ) -> None:
     """Dependência FastAPI: verifica acesso a uma instância específica.
 
-    Admins passam sem verificação. Para operator/viewer, exige registro em
-    `user_instance_access`. Lança 403 se o acesso não foi concedido.
+    Admins passam sem verificação. Para operator/viewer, exige concessão direta
+    (`user_instance_access`) OU via algum time do usuário (`team_instance_access`) — ver
+    `UserInstanceAccessRepository.has_access`. Lança 403 se o acesso não foi concedido.
     """
     if current_user.is_admin:
         return

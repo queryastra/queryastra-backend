@@ -64,16 +64,20 @@ from app.collectors.transaction_flagging import compute_flag_reason
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.masking.sql_masking import mask_sql_literals, mask_sql_literals_for_display
+from app.normalizers.derived_metrics import buffer_hit_ratio_percent, connections_used_percent
 from app.normalizers.metric_names import (
     PG_ACTIVE_SESSION_COUNT,
     PG_BLKS_HIT,
     PG_BLKS_READ,
+    PG_BUFFER_HIT_RATIO_PERCENT,
     PG_CHECKPOINT_BUFFERS_WRITTEN,
     PG_CHECKPOINT_SYNC_TIME_MS,
     PG_CHECKPOINT_WRITE_TIME_MS,
     PG_CHECKPOINTS_REQUESTED,
     PG_CHECKPOINTS_TIMED,
+    PG_CONNECTIONS_USED_PERCENT,
     PG_DEADLOCKS,
+    PG_MAX_CONNECTIONS,
     PG_NUMBACKENDS,
     PG_REPLICA_REPLAY_LAG_SECONDS,
     PG_TEMP_BYTES,
@@ -179,6 +183,11 @@ _DATABASE_STATS_QUERY = """
            sum(temp_bytes) AS temp_bytes
     FROM pg_stat_database
 """
+
+# Limite de conexoes do cluster — base de `postgresql_connections_used_percent`. Query separada
+# (e tolerante a falha) para nao derrubar `_DATABASE_STATS_QUERY` em engines wire-compatible que
+# nao expoem o parametro (ex.: alguns forks/servicos gerenciados).
+_MAX_CONNECTIONS_QUERY = "SELECT current_setting('max_connections')::int"
 
 _BGWRITER_QUERY = """
     SELECT checkpoints_timed, checkpoints_req, checkpoint_write_time, checkpoint_sync_time,
@@ -932,6 +941,7 @@ class PostgreSQLCollector:
                 )
                 blocked_object_rows = blocked_object_rows[: settings.collection_max_rows]
 
+            max_connections: int | None = None
             if self.skip_pg_catalog_metrics:
                 database_stats_row = None
                 checkpoint_row = None
@@ -940,6 +950,16 @@ class PostgreSQLCollector:
                     conn.fetchrow(_DATABASE_STATS_QUERY),
                     timeout=settings.collection_query_timeout_seconds,
                 )
+                try:
+                    max_connections = await asyncio.wait_for(
+                        conn.fetchval(_MAX_CONNECTIONS_QUERY),
+                        timeout=settings.collection_query_timeout_seconds,
+                    )
+                except Exception:  # noqa: BLE001 - metrica derivada opcional, nunca derruba a coleta
+                    logger.debug(
+                        "max_connections indisponivel instance_id=%s", self._instance_id
+                    )
+                    max_connections = None
 
                 if version_num >= _PG17_VERSION_NUM:
                     checkpoint_row = await asyncio.wait_for(
@@ -964,6 +984,7 @@ class PostgreSQLCollector:
             checkpoint_row,
             version_num,
             collected_at,
+            max_connections=max_connections,
         )
         transaction_events = self._build_transaction_events(
             all_session_rows,
@@ -1261,6 +1282,8 @@ class PostgreSQLCollector:
         checkpoint_row: asyncpg.Record | None,
         version_num: int,
         collected_at: datetime,
+        *,
+        max_connections: int | None = None,
     ) -> list[NormalizedMetricSample]:
         assert self._instance_id is not None  # garantido por collect()
         instance_id: UUID = self._instance_id
@@ -1298,8 +1321,27 @@ class PostgreSQLCollector:
                     sample(PG_DEADLOCKS, database_stats_row["deadlocks"]),
                     sample(PG_TEMP_FILES, database_stats_row["temp_files"]),
                     sample(PG_TEMP_BYTES, database_stats_row["temp_bytes"]),
+                    # Derivadas (gauges em %) — ver `app.normalizers.derived_metrics`.
+                    sample(
+                        PG_BUFFER_HIT_RATIO_PERCENT,
+                        buffer_hit_ratio_percent(
+                            database_stats_row["blks_hit"], database_stats_row["blks_read"]
+                        ),
+                    ),
                 ]
             )
+            if max_connections is not None:
+                candidates.extend(
+                    [
+                        sample(PG_MAX_CONNECTIONS, max_connections),
+                        sample(
+                            PG_CONNECTIONS_USED_PERCENT,
+                            connections_used_percent(
+                                database_stats_row["numbackends"], max_connections
+                            ),
+                        ),
+                    ]
+                )
 
         if checkpoint_row is not None:
             if version_num >= _PG17_VERSION_NUM:

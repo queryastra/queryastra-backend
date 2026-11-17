@@ -276,6 +276,9 @@ class PlanHistoryEntryResponse(BaseModel):
     plan_xml: str
     last_execution_time: datetime | None
     source: Literal["cached"] = "cached"
+    # sqlserver_xml | postgresql_json | mysql_json | oracle_text — usado pela comparacao de
+    # planos no frontend (diff estrutural para XML/JSON, diff de linhas para texto/JSON).
+    plan_format: str = "sqlserver_xml"
 
 
 # --- Dependency providers -------------------------------------------------------------------
@@ -1306,6 +1309,7 @@ async def get_query_plan_history(
             plan_hash=row.plan_hash,
             plan_xml=row.plan_xml_masked,
             last_execution_time=row.last_execution_time,
+            plan_format=getattr(row, "plan_format", None) or "sqlserver_xml",
         )
         for row in rows
     ]

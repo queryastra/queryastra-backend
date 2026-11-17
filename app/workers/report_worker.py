@@ -6,24 +6,18 @@ etc.): construtor recebe `(async_session_factory, check_interval_seconds)`, expo
 
 Para cada relatorio vencido:
   1. Gera o PDF em memoria.
-  2. Se houver email_recipients E SMTP configurado, envia o PDF como anexo.
+  2. Se houver email_recipients E e-mail configurado (SMTP ou Brevo), envia o PDF anexado.
   3. Atualiza `last_run_at`, `last_run_status`, `next_run_at` no banco.
 """
 
 from __future__ import annotations
 
 import asyncio
-import smtplib
 from datetime import UTC, datetime
-from email import encoders
-from email.mime.base import MIMEBase
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 
 from croniter import croniter
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.models.scheduled_report import ScheduledReport
 from app.repositories.instances_repository import (
@@ -31,7 +25,12 @@ from app.repositories.instances_repository import (
 )
 from app.repositories.report_execution_logs_repository import ReportExecutionLogsRepository
 from app.repositories.scheduled_reports_repository import ScheduledReportsRepository
-from app.repositories.system_settings_repository import SystemSettingsRepository
+from app.services.email_service import (
+    EmailAttachment,
+    OutgoingEmail,
+    resolve_email_config,
+    send_email,
+)
 from app.services.report_service import generate_report
 
 logger = get_logger(__name__)
@@ -44,42 +43,6 @@ def _compute_next_run(cron_expr: str, after: datetime) -> datetime | None:
     except Exception:
         logger.warning("Expressao cron invalida: %r", cron_expr)
         return None
-
-
-def _send_email_with_attachment(
-    host: str,
-    port: int,
-    username: str | None,
-    password: str | None,
-    sender: str,
-    recipients: list[str],
-    subject: str,
-    body: str,
-    attachment_bytes: bytes,
-    attachment_name: str,
-) -> None:
-    msg = MIMEMultipart()
-    msg["Subject"] = subject
-    msg["From"] = sender
-    msg["To"] = ", ".join(recipients)
-    msg.attach(MIMEText(body, "plain", "utf-8"))
-
-    part = MIMEBase("application", "pdf")
-    part.set_payload(attachment_bytes)
-    encoders.encode_base64(part)
-    part.add_header("Content-Disposition", f'attachment; filename="{attachment_name}"')
-    msg.attach(part)
-
-    # Porta 465 → SSL implícito (SMTP_SSL); porta 587 e demais → STARTTLS explícito.
-    use_ssl = port == 465
-    smtp_class = smtplib.SMTP_SSL if use_ssl else smtplib.SMTP
-    with smtp_class(host, port) as smtp:
-        if not use_ssl:
-            smtp.ehlo()
-            smtp.starttls()
-        if username and password:
-            smtp.login(username, password)
-        smtp.sendmail(sender, recipients, msg.as_string())
 
 
 class ReportWorker:
@@ -183,40 +146,25 @@ class ReportWorker:
     async def _try_send_email(
         self, session: AsyncSession, report: ScheduledReport, pdf_bytes: bytes
     ) -> str | None:
-        """Envia o PDF por email. Retorna a mensagem de erro em caso de falha, None se ok."""
-        # Lê config SMTP do banco (editável na UI). Fallback para .env se não configurado no banco.
-        settings_repo = SystemSettingsRepository(session)
-        db_settings = await settings_repo.get()
-        env = get_settings()
-
-        host = db_settings.smtp_host or env.alert_smtp_host
-        if not host:
-            logger.debug("SMTP nao configurado - email nao enviado para relatorio %s", report.id)
+        """Envia o PDF por email pelo provedor configurado (`app.services.email_service`).
+        Retorna a mensagem de erro em caso de falha, None se ok ou se e-mail nao configurado."""
+        config = await resolve_email_config(session)
+        if not config.is_configured:
+            logger.debug("E-mail nao configurado - relatorio %s nao enviado", report.id)
             return None
 
-        port = db_settings.smtp_port or env.alert_smtp_port
-        username = db_settings.smtp_username or env.alert_smtp_username
-        password = settings_repo.get_smtp_password_plain(db_settings) or env.alert_smtp_password
-        sender = db_settings.smtp_from_address or env.alert_smtp_from or "reports@queryastra.local"
-
+        filename = f"relatorio-{report.report_type}-{datetime.now(UTC).strftime('%Y%m%d')}.pdf"
+        email = OutgoingEmail(
+            recipients=list(report.email_recipients),
+            subject=f"[QueryAstra] {report.title}",
+            text_body=(
+                f"Relatório gerado automaticamente: {report.title}"
+                f"\nInstância: {report.instance_id}"
+            ),
+            attachments=[EmailAttachment(filename, pdf_bytes, "application/pdf")],
+        )
         try:
-            filename = f"relatorio-{report.report_type}-{datetime.now(UTC).strftime('%Y%m%d')}.pdf"
-            await asyncio.to_thread(
-                _send_email_with_attachment,
-                host=host,
-                port=port,
-                username=username,
-                password=password,
-                sender=sender,
-                recipients=report.email_recipients,
-                subject=f"[QueryAstra] {report.title}",
-                body=(
-                    f"Relatório gerado automaticamente: {report.title}"
-                    f"\nInstância: {report.instance_id}"
-                ),
-                attachment_bytes=pdf_bytes,
-                attachment_name=filename,
-            )
+            await send_email(config, email)
             logger.info("Email enviado para relatorio %s -> %s", report.id, report.email_recipients)
             return None
         except Exception as exc:

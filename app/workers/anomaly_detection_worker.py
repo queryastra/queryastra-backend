@@ -46,6 +46,7 @@ from app.repositories.anomaly_repository import (
     metrics_for_engine,
 )
 from app.repositories.instances_repository import InstancesRepository
+from app.services.alert_events import build_alert_event
 
 logger = get_logger(__name__)
 
@@ -423,7 +424,7 @@ class AnomalyDetectionWorker:
             )
         )
         event.alert_id = alert.id
-        event_bus.publish({"type": "alert_created", "alert_id": str(alert.id), "kind": "triggered"})
+        event_bus.publish(build_alert_event(alert, kind="triggered", rule_name=rule.name))
         await self._notify(alerts_repo, alert, rule, "triggered", ev.current)
 
     async def _update_event(
@@ -458,9 +459,7 @@ class AnomalyDetectionWorker:
             alert.state = "open"
             alert.acknowledged_at = None
         await alerts_repo.update_alert(alert)
-        event_bus.publish(
-            {"type": "alert_updated", "alert_id": str(alert.id), "kind": "level_changed"}
-        )
+        event_bus.publish(build_alert_event(alert, kind="level_changed", rule_name=rule.name))
         await self._notify(alerts_repo, alert, rule, "level_changed", ev.current)
 
     async def _close_event(
@@ -481,7 +480,7 @@ class AnomalyDetectionWorker:
         alert.state = "closed"
         alert.resolved_at = now
         await alerts_repo.update_alert(alert)
-        event_bus.publish({"type": "alert_updated", "alert_id": str(alert.id), "kind": "recovered"})
+        event_bus.publish(build_alert_event(alert, kind="recovered", rule_name=rule.name))
         await self._notify(
             alerts_repo, alert, rule, "recovered", ev.current if ev.current is not None else 0.0
         )

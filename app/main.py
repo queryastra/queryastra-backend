@@ -33,7 +33,10 @@ from app.repositories.instances_repository import InstancesRepository
 from app.repositories.system_license_repository import SystemLicenseRepository
 from app.repositories.users_repository import UsersRepository
 from app.services.auth_service import hash_password
-from app.workers.alerting_worker import AlertingWorker, EmailSettings
+from app.services.email_service import load_email_config, parse_recipients
+from app.services.notification_service import NotificationService
+from app.workers.alerting_worker import AlertingWorker
+from app.workers.notification_retention_worker import NotificationRetentionWorker
 from app.workers.anomaly_detection_worker import AnomalyDetectionWorker
 from app.workers.backup_status_supervisor import BackupStatusSupervisor
 from app.workers.deadlock_supervisor import DeadlockSupervisor
@@ -145,6 +148,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     anomaly_worker: AnomalyDetectionWorker | None = None
     anomaly_task: asyncio.Task[None] | None = None
 
+    # Notificacoes in-app (sino do TopNav): assinante do event_bus + expurgo de 30 dias. Sempre
+    # ligados — sao leves e so reagem a eventos de alerta ja produzidos pelos outros workers.
+    notification_service = NotificationService(async_session_factory)
+    notification_service_task = asyncio.create_task(notification_service.run())
+    notification_retention_worker = NotificationRetentionWorker(async_session_factory)
+    notification_retention_task = asyncio.create_task(notification_retention_worker.run())
+
     if settings.polling_supervisor_enabled:
         supervisor = PollingSupervisor(
             async_session_factory,
@@ -160,26 +170,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.info("PollingSupervisor desabilitado (POLLING_SUPERVISOR_ENABLED=false)")
 
     if settings.alerting_worker_enabled:
-        email_settings: EmailSettings | None = None
-        if settings.alert_smtp_host:
-            email_settings = EmailSettings(
-                host=settings.alert_smtp_host,
-                port=settings.alert_smtp_port,
-                username=settings.alert_smtp_username,
-                password=settings.alert_smtp_password,
-                sender=settings.alert_smtp_from or "alerts@queryastra.local",
-                recipients=[
-                    address.strip()
-                    for address in (settings.alert_email_to or "").split(",")
-                    if address.strip()
-                ],
-            )
+        # E-mail: provedor (SMTP do banco com fallback .env, ou Brevo) relido a cada envio via
+        # `app.services.email_service`; destinatarios globais (fallback de regras sem
+        # notify_emails/time) continuam vindo de ALERT_EMAIL_TO.
         alerting_worker = AlertingWorker(
             async_session_factory,
             settings.alerting_evaluation_interval_seconds,
             settings.alert_critical_reminder_interval_seconds,
             webhook_url=settings.alert_webhook_url,
-            email_settings=email_settings,
+            email_config_loader=lambda: load_email_config(async_session_factory),
+            default_email_recipients=parse_recipients(settings.alert_email_to),
             custom_sql_timeout_seconds=settings.custom_sql_alert_timeout_seconds,
         )
         alerting_task = asyncio.create_task(alerting_worker.run())
@@ -412,6 +412,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if anomaly_worker is not None and anomaly_task is not None:
         anomaly_worker.stop()
         await anomaly_task
+    notification_service.stop()
+    await notification_service_task
+    notification_retention_worker.stop()
+    await notification_retention_task
     executor.shutdown(wait=False, cancel_futures=True)
     instance_executors.shutdown_all()
     logger.info("Lifespan finalizado")

@@ -50,6 +50,11 @@ class AlertRule(Base):
             "'no_reset_manual')",
             name="ck_alert_rules_reset_mode",
         ),
+        CheckConstraint(
+            "evaluation_mode IN ('value', 'rate_per_minute')",
+            name="ck_alert_rules_evaluation_mode",
+        ),
+        Index("ix_alert_rules_instance_id", "instance_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -86,6 +91,24 @@ class AlertRule(Base):
     # Item 4 (recorrencia): NULL/NULL = recorrencia desligada para esta regra (default).
     recurrence_threshold_count: Mapped[int | None] = mapped_column(nullable=True)
     recurrence_window_days: Mapped[int | None] = mapped_column(nullable=True)
+
+    # --- Escopo, modo de avaliacao e canais por regra --------------------------------------------
+    # NULL = regra global (avaliada contra todas as instancias ativas, comportamento anterior);
+    # preenchido = avaliada SO contra essa instancia. Apagar a instancia apaga a regra escopada.
+    instance_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("instances.id", ondelete="CASCADE"), nullable=True
+    )
+    # `value` = ultima amostra (default, comportamento anterior). `rate_per_minute` = delta entre
+    # as 2 ultimas amostras / minutos decorridos — para contadores cumulativos (`*_total`).
+    evaluation_mode: Mapped[str] = mapped_column(String, nullable=False, server_default="value")
+    # Destinatarios de e-mail proprios da regra (somados aos membros de `notify_team_id`). Lista
+    # vazia/NULL + sem time = cai nos destinatarios globais (ALERT_EMAIL_TO).
+    notify_emails: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    # Webhook proprio da regra; NULL = usa ALERT_WEBHOOK_URL global (se configurado).
+    webhook_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    notify_team_id: Mapped[int | None] = mapped_column(
+        ForeignKey("teams.id", ondelete="SET NULL"), nullable=True
+    )
 
 
 class Alert(Base):

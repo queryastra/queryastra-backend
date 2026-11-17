@@ -48,18 +48,28 @@ CORTES DE ESCOPO (ver tambem docstring do modulo de alertas / roadmap):
 - Sem blackout recorrente semanal (`instance_maintenance_windows`) aqui — so `alert_silences`
   pontual.
 - Avaliacao so cobre `target_type='instance'` (regras com `target_type='server'` sao ignoradas).
+
+ESCOPO, MODO DE AVALIACAO E CANAIS POR REGRA:
+- `AlertRule.instance_id` preenchido = regra avaliada SO contra essa instancia (NULL = todas).
+- `AlertRule.evaluation_mode="rate_per_minute"` (so `rule_type="threshold"`): o valor comparado
+  e `(ultima - penultima amostra) / minutos decorridos` — para contadores cumulativos
+  (`*_total`). Sem amostra anterior, intervalo nao positivo ou delta negativo (reset do contador,
+  ex. restart do servico) o ciclo e pulado (nem abre nem fecha alerta).
+- Canais (`resolve_channels`): webhook = `AlertRule.webhook_url` ou o global (ALERT_WEBHOOK_URL);
+  e-mail = `notify_emails` + e-mails dos membros de `notify_team_id`; sem nenhum dos dois cai nos
+  destinatarios globais (ALERT_EMAIL_TO). Nivel de escalonamento com `email_recipients` substitui
+  a lista so naquele envio. O transporte (SMTP do banco/.env ou Brevo) vem de
+  `app.services.email_service`, relido a cada envio (mudanca na tela vale sem restart).
 """
 
 from __future__ import annotations
 
 import asyncio
 import operator
-import smtplib
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from email.message import EmailMessage
-from typing import Literal
+from typing import Any, Literal, Protocol
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -75,10 +85,18 @@ from app.repositories.alerts_repository import AlertsRepository
 from app.repositories.blocking_incidents_repository import BlockingIncidentsRepository
 from app.repositories.instances_repository import InstancesRepository
 from app.repositories.metric_samples_repository import MetricSamplesRepository
+from app.repositories.teams_repository import TeamsRepository
 from app.security.credential_reference import (
     CredentialReference,
     CredentialResolutionError,
     CredentialResolver,
+)
+from app.services.alert_events import build_alert_event
+from app.services.email_service import (
+    EmailTransportConfig,
+    OutgoingEmail,
+    dedupe_recipients,
+    send_email,
 )
 
 logger = get_logger(__name__)
@@ -114,24 +132,61 @@ NotificationKind = Literal[
 ]
 
 
+_EmailConfigLoader = Callable[[], Awaitable[EmailTransportConfig | None]]
+_EmailSender = Callable[[EmailTransportConfig, OutgoingEmail], Awaitable[None]]
+_TeamEmailsResolver = Callable[[int], Awaitable[list[str]]]
+
+
+class _MetricPoint(Protocol):
+    time: datetime
+    value: Any
+
+
 @dataclass(frozen=True, slots=True)
-class EmailSettings:
-    """Configuracao resolvida do canal de e-mail (`app.core.config.Settings.alert_smtp_*`).
+class ResolvedChannels:
+    """Canais efetivos de UMA notificacao (ver docstring do modulo)."""
 
-    So construida pelo caller (`app/main.py`) quando `alert_smtp_host` esta preenchido — a
-    ausencia de `EmailSettings` (`None` em `AlertingWorker`) e o sinal de "canal desabilitado",
-    mesmo padrao ja usado por `webhook_url=None`.
-    """
-
-    host: str
-    port: int
-    username: str | None
-    password: str | None
-    sender: str
-    recipients: list[str]
+    webhook_url: str | None
+    email_recipients: list[str]
 
 
-_EmailSender = Callable[[dict, EmailSettings], Awaitable[None]]
+def resolve_channels(
+    rule: AlertRule,
+    *,
+    global_webhook_url: str | None,
+    global_email_recipients: Sequence[str],
+    team_emails: Sequence[str] = (),
+    override_email_recipients: Sequence[str] | None = None,
+) -> ResolvedChannels:
+    webhook_url = (rule.webhook_url or "").strip() or global_webhook_url
+    if override_email_recipients:
+        recipients = dedupe_recipients(list(override_email_recipients))
+    else:
+        recipients = dedupe_recipients(list(rule.notify_emails or []), list(team_emails))
+        if not recipients:
+            recipients = dedupe_recipients(list(global_email_recipients))
+    return ResolvedChannels(webhook_url=webhook_url, email_recipients=recipients)
+
+
+def compute_rate_per_minute(points: Sequence[_MetricPoint]) -> float | None:
+    """`(ultima - penultima) / minutos` — `points` mais recente primeiro. `None` sem amostra
+    anterior, com intervalo nao positivo ou com delta negativo (reset do contador)."""
+    if len(points) < 2:
+        return None
+    latest, previous = points[0], points[1]
+    elapsed_minutes = (latest.time - previous.time).total_seconds() / 60.0
+    if elapsed_minutes <= 0:
+        return None
+    delta = float(latest.value) - float(previous.value)
+    if delta < 0:
+        return None
+    return delta / elapsed_minutes
+
+
+def build_alert_email(payload: dict, recipients: list[str]) -> OutgoingEmail:
+    subject = f"[{str(payload['severity']).upper()}] {payload['rule_name']}"
+    body = "\n".join(f"{key}: {value}" for key, value in payload.items())
+    return OutgoingEmail(recipients=recipients, subject=subject, text_body=body)
 
 
 def _classify_severity(
@@ -164,31 +219,6 @@ async def _default_webhook_sender(url: str, payload: dict) -> None:
         response.raise_for_status()
 
 
-def _build_email_message(payload: dict, settings: EmailSettings) -> EmailMessage:
-    message = EmailMessage()
-    message["Subject"] = f"[{payload['severity'].upper()}] {payload['rule_name']}"
-    message["From"] = settings.sender
-    message["To"] = ", ".join(settings.recipients)
-    body = "\n".join(f"{key}: {value}" for key, value in payload.items())
-    message.set_content(body)
-    return message
-
-
-def _send_email_sync(payload: dict, settings: EmailSettings) -> None:
-    """Envio sincrono via `smtplib` — chamado atraves de `asyncio.to_thread` pelo sender async
-    default, ja que `smtplib` nao tem API assincrona nativa."""
-    message = _build_email_message(payload, settings)
-    with smtplib.SMTP(settings.host, settings.port, timeout=5.0) as smtp:
-        smtp.starttls()
-        if settings.username and settings.password:
-            smtp.login(settings.username, settings.password)
-        smtp.send_message(message)
-
-
-async def _default_email_sender(payload: dict, settings: EmailSettings) -> None:
-    await asyncio.to_thread(_send_email_sync, payload, settings)
-
-
 class AlertingWorker:
     """Avalia `alert_rules` ativas contra `target_type='instance'` — dispatch por `rule_type`,
     ver docstring do modulo para o desenho completo de cada tipo e dos 3 mecanismos
@@ -201,7 +231,9 @@ class AlertingWorker:
         critical_reminder_interval_seconds: int,
         *,
         webhook_url: str | None = None,
-        email_settings: EmailSettings | None = None,
+        email_config_loader: _EmailConfigLoader | None = None,
+        default_email_recipients: Sequence[str] = (),
+        team_emails_resolver: _TeamEmailsResolver | None = None,
         custom_sql_timeout_seconds: float = 5.0,
         credential_resolver: CredentialResolver | None = None,
         collector_factory: _CollectorFactory = create_collector,
@@ -214,13 +246,15 @@ class AlertingWorker:
             _BlockingIncidentsRepositoryFactory
         ) = BlockingIncidentsRepository,
         notification_sender: _NotificationSender = _default_webhook_sender,
-        email_sender: _EmailSender = _default_email_sender,
+        email_sender: _EmailSender = send_email,
     ) -> None:
         self._session_factory = session_factory
         self._interval_seconds = interval_seconds
         self._critical_reminder_interval_seconds = critical_reminder_interval_seconds
         self._webhook_url = webhook_url
-        self._email_settings = email_settings
+        self._email_config_loader = email_config_loader
+        self._default_email_recipients = list(default_email_recipients)
+        self._team_emails_resolver = team_emails_resolver or self._load_team_emails
         self._custom_sql_timeout_seconds = custom_sql_timeout_seconds
         self._credential_resolver = credential_resolver or CredentialResolver()
         self._create_collector = collector_factory
@@ -264,6 +298,8 @@ class AlertingWorker:
 
             for rule in instance_rules:
                 for instance in instances:
+                    if rule.instance_id is not None and rule.instance_id != instance.id:
+                        continue
                     try:
                         await self._evaluate_rule(
                             alerts_repo, metric_repo, blocking_repo, rule, instance
@@ -287,10 +323,19 @@ class AlertingWorker:
         if rule_type == "threshold":
             if not rule.metric_name or not rule.comparison:
                 return
-            row = await metric_repo.get_latest_value("instance", instance.id, rule.metric_name)
-            if row is None:
-                return
-            value = float(row.value)
+            if (rule.evaluation_mode or "value") == "rate_per_minute":
+                points = await metric_repo.get_latest_two_points(
+                    "instance", instance.id, rule.metric_name
+                )
+                rate = compute_rate_per_minute(points)
+                if rate is None:
+                    return
+                value = rate
+            else:
+                row = await metric_repo.get_latest_value("instance", instance.id, rule.metric_name)
+                if row is None:
+                    return
+                value = float(row.value)
             severity = _classify_severity(
                 value, rule.comparison, rule.threshold_warning, rule.threshold_critical
             )
@@ -411,7 +456,7 @@ class AlertingWorker:
             open_alert.state = "closed"
             open_alert.resolved_at = now
             await alerts_repo.update_alert(open_alert)
-            self._publish_alert_event(open_alert, kind="recovered")
+            self._publish_alert_event(open_alert, rule, kind="recovered")
             await self._send_notification(
                 alerts_repo, open_alert, rule, kind="recovered", value=value
             )
@@ -422,7 +467,7 @@ class AlertingWorker:
                 open_alert.state = "closed"
                 open_alert.resolved_at = now
                 await alerts_repo.update_alert(open_alert)
-                self._publish_alert_event(open_alert, kind="recovered")
+                self._publish_alert_event(open_alert, rule, kind="recovered")
                 await self._send_notification(
                     alerts_repo, open_alert, rule, kind="recovered", value=value
                 )
@@ -458,7 +503,7 @@ class AlertingWorker:
                 # momento da criacao (evita ruido de um alerta que nunca sera notificado).
                 return
             created = await alerts_repo.create_alert(created)
-            self._publish_alert_event(created, kind=kind)
+            self._publish_alert_event(created, rule, kind=kind)
             await self._send_notification(alerts_repo, created, rule, kind=kind, value=value)
             await self._check_escalation(alerts_repo, rule, created, value, now)
             return
@@ -485,7 +530,7 @@ class AlertingWorker:
             if due_for_reminder:
                 open_alert.last_reminder_at = now
                 await alerts_repo.update_alert(open_alert)
-                self._publish_alert_event(open_alert, kind="reminder")
+                self._publish_alert_event(open_alert, rule, kind="reminder")
                 await self._send_notification(
                     alerts_repo, open_alert, rule, kind="reminder", value=value
                 )
@@ -500,7 +545,7 @@ class AlertingWorker:
             open_alert.state = "open"
             open_alert.acknowledged_at = None
         await alerts_repo.update_alert(open_alert)
-        self._publish_alert_event(open_alert, kind="level_changed")
+        self._publish_alert_event(open_alert, rule, kind="level_changed")
         await self._send_notification(
             alerts_repo, open_alert, rule, kind="level_changed", value=value
         )
@@ -530,7 +575,7 @@ class AlertingWorker:
                 continue
             alert.last_escalation_level = level.level_number
             await alerts_repo.update_alert(alert)
-            self._publish_alert_event(alert, kind="escalated")
+            self._publish_alert_event(alert, rule, kind="escalated")
             await self._send_notification(
                 alerts_repo,
                 alert,
@@ -554,12 +599,13 @@ class AlertingWorker:
         `seasonal_anomaly`, que este worker nao avalia)."""
         await self._send_notification(alerts_repo, alert, rule, kind=kind, value=value)
 
-    def _publish_alert_event(self, alert: Alert, *, kind: NotificationKind) -> None:
-        """Publica no `event_bus` (push via `/ws/live`) sempre que um `Alert` e criado ou
-        atualizado — independente de silenciamento/falha de envio dos canais de notificacao, que
-        sao responsabilidade de `_send_notification`."""
-        event_type = "alert_created" if kind == "triggered" else "alert_updated"
-        event_bus.publish({"type": event_type, "alert_id": str(alert.id), "kind": kind})
+    def _publish_alert_event(
+        self, alert: Alert, rule: AlertRule, *, kind: NotificationKind
+    ) -> None:
+        """Publica no `event_bus` (push via `/ws/live` + notificacoes in-app) sempre que um
+        `Alert` e criado ou atualizado — independente de silenciamento/falha de envio dos canais
+        de notificacao, que sao responsabilidade de `_send_notification`."""
+        event_bus.publish(build_alert_event(alert, kind=kind, rule_name=rule.name))
 
     async def _send_notification(
         self,
@@ -597,9 +643,24 @@ class AlertingWorker:
         # configuracao) de um nunca impede o outro. So grava `AlertNotification` para o canal que
         # realmente foi enviado com sucesso (mesmo padrao ja usado pelo webhook antes deste
         # canal e-mail existir).
+        team_emails: list[str] = []
+        if rule.notify_team_id is not None:
+            try:
+                team_emails = await self._team_emails_resolver(rule.notify_team_id)
+            except Exception:  # noqa: BLE001 - falha ao resolver time nunca derruba a avaliacao
+                logger.exception(
+                    "Falha ao resolver e-mails do time team_id=%s", rule.notify_team_id
+                )
+        channels = resolve_channels(
+            rule,
+            global_webhook_url=self._webhook_url,
+            global_email_recipients=self._default_email_recipients,
+            team_emails=team_emails,
+            override_email_recipients=override_email_recipients,
+        )
         channel_results = await asyncio.gather(
-            self._try_send_webhook(payload),
-            self._try_send_email(payload, override_email_recipients),
+            self._try_send_webhook(channels.webhook_url, payload),
+            self._try_send_email(payload, channels.email_recipients),
         )
         sent_channels = [channel for channel, sent in channel_results if sent]
 
@@ -615,30 +676,39 @@ class AlertingWorker:
                 AlertNotification(alert_id=alert.id, channel=channel, payload=payload)
             )
 
-    async def _try_send_webhook(self, payload: dict) -> tuple[str | None, bool]:
-        """`(canal, enviado)` — canal `None` quando o webhook esta desabilitado (sem URL)."""
-        if self._webhook_url is None:
+    async def _load_team_emails(self, team_id: int) -> list[str]:
+        async with self._session_factory() as session:
+            return await TeamsRepository(session).list_member_emails(team_id)
+
+    async def _try_send_webhook(
+        self, webhook_url: str | None, payload: dict
+    ) -> tuple[str | None, bool]:
+        """`(canal, enviado)` — canal `None` quando nao ha webhook (nem da regra nem global)."""
+        if not webhook_url:
             return (None, False)
         try:
-            await self._notification_sender(self._webhook_url, payload)
+            await self._notification_sender(webhook_url, payload)
         except Exception:  # noqa: BLE001 - falha de notificacao nunca derruba a avaliacao
             logger.exception("Falha ao enviar webhook de alerta alert_id=%s", payload["alert_id"])
             return ("webhook", False)
         return ("webhook", True)
 
     async def _try_send_email(
-        self, payload: dict, override_recipients: list[str] | None
+        self, payload: dict, recipients: list[str]
     ) -> tuple[str | None, bool]:
-        """`(canal, enviado)` — canal `None` quando o e-mail esta desabilitado (sem SMTP host).
-        `override_recipients` (item 3, escalonamento por nivel) substitui a lista de
-        destinatarios global so para este envio, sem persistir a mudanca."""
-        if self._email_settings is None:
+        """`(canal, enviado)` — canal `None` quando o e-mail esta desabilitado (sem loader de
+        configuracao, provedor sem configuracao minima) ou nao ha destinatario resolvido."""
+        if self._email_config_loader is None or not recipients:
             return (None, False)
-        settings = self._email_settings
-        if override_recipients:
-            settings = replace(settings, recipients=override_recipients)
         try:
-            await self._email_sender(payload, settings)
+            config = await self._email_config_loader()
+        except Exception:  # noqa: BLE001
+            logger.exception("Falha ao carregar configuracao de e-mail")
+            return ("email", False)
+        if config is None or not config.is_configured:
+            return (None, False)
+        try:
+            await self._email_sender(config, build_alert_email(payload, recipients))
         except Exception:  # noqa: BLE001 - falha de notificacao nunca derruba a avaliacao
             logger.exception("Falha ao enviar e-mail de alerta alert_id=%s", payload["alert_id"])
             return ("email", False)

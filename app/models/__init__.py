@@ -8,6 +8,7 @@ chave/valor documentado ali), primeira preferência global editável pelo usuár
 """
 
 from app.models.alert import Alert, AlertNotification, AlertRule, AlertSilence
+from app.models.annotation import Annotation
 from app.models.anomaly import AnomalyEvent, AnomalyMetricHourly, AnomalyMetricStatus
 from app.models.audit_log import AuditLog
 from app.models.backup_status import BackupStatus
@@ -15,11 +16,13 @@ from app.models.blocking_incident import BlockingIncident
 from app.models.deadlock_event import DeadlockEvent
 from app.models.instance import Instance, InstanceMaintenanceWindow
 from app.models.missing_index_suggestion import MissingIndexSuggestion
+from app.models.notification import Notification
 from app.models.password_reset_token import PasswordResetToken
 from app.models.query_plan_snapshot import QueryPlanSnapshot
 from app.models.server import InstanceServer, Server
 from app.models.system_license import SystemLicense
 from app.models.system_settings import SystemSettings
+from app.models.team import Team, TeamInstanceAccess, TeamMember
 from app.models.transaction_event import TransactionEvent
 from app.models.user import User
 
@@ -33,6 +36,7 @@ __all__ = [
     "Alert",
     "AlertNotification",
     "AlertSilence",
+    "Annotation",
     "AnomalyEvent",
     "AnomalyMetricHourly",
     "AnomalyMetricStatus",
@@ -46,4 +50,8 @@ __all__ = [
     "SystemSettings",
     "User",
     "PasswordResetToken",
+    "Notification",
+    "Team",
+    "TeamMember",
+    "TeamInstanceAccess",
 ]

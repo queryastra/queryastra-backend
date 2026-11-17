@@ -8,9 +8,6 @@ valor a cada ciclo (não cacheado como `app.core.config.Settings`), sem exigir r
 
 from __future__ import annotations
 
-import asyncio
-import smtplib
-from email.message import EmailMessage
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
@@ -18,12 +15,17 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, get_current_user, get_db_session, require_admin
-from app.core.config import get_settings
 from app.models.system_settings import SystemSettings
 from app.repositories.system_settings_repository import SystemSettingsRepository
 from app.repositories.users_repository import UsersRepository
 from app.services.audit_service import record_audit
 from app.services.auth_service import verify_password
+from app.services.email_service import (
+    EmailNotConfiguredError,
+    OutgoingEmail,
+    resolve_email_config,
+    send_email,
+)
 
 router = APIRouter()
 
@@ -36,6 +38,9 @@ class SystemSettingsResponse(BaseModel):
     smtp_username: str | None
     smtp_from_address: str | None
     smtp_configured: bool
+    email_provider: str
+    email_from_name: str | None
+    brevo_configured: bool
     ai_provider: str | None
     ai_base_url: str | None
     ai_model: str | None
@@ -54,6 +59,14 @@ class SystemSettingsUpdateRequest(BaseModel):
     smtp_password: str | None = Field(default=None)
     smtp_from_address: str | None = Field(default=None)
     smtp_save: bool = Field(default=False)
+    # Provedor de e-mail — enviado em bloco quando o card "Envio de e-mail" for salvo.
+    # brevo_api_key: None preserva a chave armazenada; "" remove.
+    email_provider: str | None = Field(default=None, pattern="^(smtp|brevo)$")
+    brevo_api_key: str | None = Field(default=None)
+    email_from_name: str | None = Field(default=None, max_length=200)
+    # Remetente (vale para os dois provedores; e o mesmo `smtp_from_address`). None preserva.
+    email_from_address: str | None = Field(default=None, max_length=320)
+    email_provider_save: bool = Field(default=False)
     # IA (BYOK) — enviado em bloco quando o card de IA for salvo
     ai_provider: str | None = Field(default=None)
     ai_api_key: str | None = Field(default=None)
@@ -77,6 +90,9 @@ def _to_response(row: SystemSettings) -> SystemSettingsResponse:
         smtp_username=row.smtp_username,
         smtp_from_address=row.smtp_from_address,
         smtp_configured=bool(row.smtp_password_encrypted),
+        email_provider=row.email_provider or "smtp",
+        email_from_name=row.email_from_name,
+        brevo_configured=bool(row.brevo_api_key_encrypted),
         ai_provider=row.ai_provider,
         ai_base_url=row.ai_base_url,
         ai_model=row.ai_model,
@@ -100,66 +116,34 @@ class TestSmtpRequest(BaseModel):
 class TestSmtpResponse(BaseModel):
     ok: bool
     error: str | None = None
-
-
-def _send_test_email_sync(
-    host: str,
-    port: int,
-    username: str | None,
-    password: str | None,
-    sender: str,
-    to: str,
-) -> None:
-    msg = EmailMessage()
-    msg["Subject"] = "[QueryAstra] Teste de configuração SMTP"
-    msg["From"] = sender
-    msg["To"] = to
-    msg.set_content(
-        "Este é um e-mail de teste enviado pelo QueryAstra para verificar as configurações SMTP.\n\n"
-        "Se você recebeu esta mensagem, as configurações estão corretas."
-    )
-    use_ssl = port == 465
-    smtp_class = smtplib.SMTP_SSL if use_ssl else smtplib.SMTP
-    with smtp_class(host, port, timeout=10) as smtp:
-        if not use_ssl:
-            smtp.ehlo()
-            smtp.starttls()
-        if username and password:
-            smtp.login(username, password)
-        smtp.send_message(msg)
+    provider: str | None = None
 
 
 @router.post("/test-smtp", response_model=TestSmtpResponse)
 async def test_smtp(
     payload: TestSmtpRequest,
-    repository: Annotated[SystemSettingsRepository, Depends(get_system_settings_repository)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
     _: Annotated[CurrentUser, Depends(require_admin)],
 ) -> TestSmtpResponse:
-    row = await repository.get()
-    env = get_settings()
-
-    host = row.smtp_host or env.alert_smtp_host
-    if not host:
-        return TestSmtpResponse(ok=False, error="SMTP não configurado — defina o servidor (host) primeiro.")
-
-    port = row.smtp_port or env.alert_smtp_port
-    username = row.smtp_username or env.alert_smtp_username
-    password = repository.get_smtp_password_plain(row) or env.alert_smtp_password
-    sender = row.smtp_from_address or env.alert_smtp_from or "noreply@queryastra.local"
-
+    """Envia um e-mail de teste pelo provedor configurado (SMTP ou Brevo). O nome do endpoint
+    foi mantido por compatibilidade com o frontend; vale para os dois provedores."""
+    config = await resolve_email_config(session)
+    email = OutgoingEmail(
+        recipients=[payload.to.strip()],
+        subject="[QueryAstra] Teste de configuração de e-mail",
+        text_body=(
+            "Este é um e-mail de teste enviado pelo QueryAstra para verificar as configurações "
+            f"de envio (provedor: {config.provider}).\n\n"
+            "Se você recebeu esta mensagem, as configurações estão corretas."
+        ),
+    )
     try:
-        await asyncio.to_thread(
-            _send_test_email_sync,
-            host=host,
-            port=port,
-            username=username,
-            password=password,
-            sender=sender,
-            to=payload.to,
-        )
-        return TestSmtpResponse(ok=True)
-    except Exception as exc:
-        return TestSmtpResponse(ok=False, error=str(exc))
+        await send_email(config, email)
+        return TestSmtpResponse(ok=True, provider=config.provider)
+    except EmailNotConfiguredError as exc:
+        return TestSmtpResponse(ok=False, error=str(exc), provider=config.provider)
+    except Exception as exc:  # noqa: BLE001 - erro devolvido ao admin, nunca o segredo
+        return TestSmtpResponse(ok=False, error=str(exc), provider=config.provider)
 
 
 class DeleteAccountRequest(BaseModel):
@@ -214,6 +198,17 @@ async def update_system_settings(
             username=payload.smtp_username,
             raw_password=payload.smtp_password,
             from_address=payload.smtp_from_address,
+        )
+    if payload.email_provider_save:
+        row = await repository.update_email_provider_settings(
+            provider=payload.email_provider or "smtp",
+            raw_brevo_api_key=payload.brevo_api_key,
+            from_name=(payload.email_from_name or "").strip() or None,
+            from_address=(
+                payload.email_from_address.strip()
+                if payload.email_from_address is not None
+                else None
+            ),
         )
     if payload.ai_save:
         row = await repository.update_ai_settings(

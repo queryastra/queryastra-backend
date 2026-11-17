@@ -17,6 +17,15 @@ PG_DEADLOCKS = "postgresql_deadlocks_total"
 PG_TEMP_FILES = "postgresql_temp_files_total"
 PG_TEMP_BYTES = "postgresql_temp_bytes_total"
 
+# Metricas DERIVADAS (gauges em %, calculadas no proprio coletor a partir das entradas cruas ja
+# coletadas) — existem para que um DBA possa alertar em "buffer hit % abaixo de Y" / "conexoes
+# perto do limite" com uma regra threshold comum, e para os graficos exibirem o mesmo valor.
+# Hit ratio do PostgreSQL e CUMULATIVO desde o ultimo reset de `pg_stat_database` (mesma
+# definicao classica `blks_hit / (blks_hit + blks_read)` usada por ferramentas de mercado).
+PG_BUFFER_HIT_RATIO_PERCENT = "postgresql_buffer_hit_ratio_percent"
+PG_MAX_CONNECTIONS = "postgresql_max_connections"
+PG_CONNECTIONS_USED_PERCENT = "postgresql_connections_used_percent"
+
 PG_CHECKPOINTS_TIMED = "postgresql_checkpoints_timed_total"
 PG_CHECKPOINTS_REQUESTED = "postgresql_checkpoints_requested_total"
 PG_CHECKPOINT_WRITE_TIME_MS = "postgresql_checkpoint_write_time_ms_total"
@@ -41,6 +50,31 @@ SQLSERVER_TOTAL_SERVER_MEMORY_KB = "sqlserver_total_server_memory_kb"
 # SQL (sem view equivalente). Ambas em % (0-100).
 SQLSERVER_INSTANCE_CPU_PERCENT = "sqlserver_instance_cpu_percent"
 SQLSERVER_OS_CPU_PERCENT = "sqlserver_os_cpu_percent"
+# Derivadas (ver comentario de PG_BUFFER_HIT_RATIO_PERCENT): "Buffer cache hit ratio" /
+# "Buffer cache hit ratio base" (Buffer Manager, contador de razao — so faz sentido dividido pela
+# base), "User Connections" (General Statistics) vs `@@MAX_CONNECTIONS`.
+SQLSERVER_BUFFER_CACHE_HIT_RATIO_PERCENT = "sqlserver_buffer_cache_hit_ratio_percent"
+SQLSERVER_USER_CONNECTIONS = "sqlserver_user_connections"
+SQLSERVER_MAX_CONNECTIONS = "sqlserver_max_connections"
+SQLSERVER_CONNECTIONS_USED_PERCENT = "sqlserver_connections_used_percent"
+
+# MySQL/MariaDB derivadas: `Innodb_buffer_pool_reads` (leitura de disco) vs
+# `Innodb_buffer_pool_read_requests` (leituras logicas) e `Threads_connected` vs a variavel
+# `max_connections`.
+MYSQL_BUFFER_POOL_HIT_RATIO_PERCENT = "mysql_buffer_pool_hit_ratio_percent"
+MYSQL_MAX_CONNECTIONS = "mysql_max_connections"
+MYSQL_CONNECTIONS_USED_PERCENT = "mysql_connections_used_percent"
+
+# Catalogo de metricas derivadas, exposto em `GET /alerts/metric-catalog` para o formulario de
+# regra de alerta oferecer essas opcoes mesmo antes da primeira coleta.
+DERIVED_PERCENT_METRICS: tuple[str, ...] = (
+    PG_BUFFER_HIT_RATIO_PERCENT,
+    PG_CONNECTIONS_USED_PERCENT,
+    SQLSERVER_BUFFER_CACHE_HIT_RATIO_PERCENT,
+    SQLSERVER_CONNECTIONS_USED_PERCENT,
+    MYSQL_BUFFER_POOL_HIT_RATIO_PERCENT,
+    MYSQL_CONNECTIONS_USED_PERCENT,
+)
 
 # Fase 2, item 2 (catalogo de alertas expandido) — coletados por um worker de baixa frequencia
 # proprio (`app.workers.extended_health_supervisor`, nao o ciclo de poll rapido), ver

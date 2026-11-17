@@ -5,7 +5,7 @@ Ver `app/models/user.py` para o modelo e `app/services/auth_service.py` para has
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.models.user import User
 from app.repositories.base import BaseRepository
@@ -24,13 +24,42 @@ class UsersRepository(BaseRepository):
         result = await self._session.execute(select(User).where(User.id == user_id))
         return result.scalar_one_or_none()
 
-    async def create(self, username: str, hashed_password: str, role: str) -> User:
+    async def create(
+        self, username: str, hashed_password: str, role: str, email: str | None = None
+    ) -> User:
         """Cria um novo usuario. A sessao deve ser commitada pelo chamador."""
-        user = User(username=username, hashed_password=hashed_password, role=role)
+        user = User(username=username, hashed_password=hashed_password, role=role, email=email)
         self._session.add(user)
         await self._session.flush()
         await self._session.refresh(user)
         return user
+
+    async def get_by_email(self, email: str) -> User | None:
+        """Busca usuario pelo e-mail (case-insensitive). Retorna `None` se nao encontrado."""
+        result = await self._session.execute(
+            select(User).where(func.lower(User.email) == email.strip().lower())
+        )
+        return result.scalar_one_or_none()
+
+    async def update_email(self, user_id: int, email: str | None) -> User | None:
+        """Define (ou limpa, com `None`) o e-mail do usuario. A sessao deve ser commitada pelo
+        chamador. Unicidade e validada pelo chamador (`get_by_email`) e pela constraint."""
+        user = await self.get_by_id(user_id)
+        if user is None:
+            return None
+        user.email = email
+        await self._session.flush()
+        await self._session.refresh(user)
+        return user
+
+    async def list_active_admin_emails(self) -> list[str]:
+        """E-mails dos administradores ativos que tem e-mail cadastrado."""
+        result = await self._session.execute(
+            select(User.email).where(
+                User.role == "admin", User.is_active.is_(True), User.email.is_not(None)
+            )
+        )
+        return [email for email in result.scalars().all() if email]
 
     async def list_all(self) -> list[User]:
         """Lista todos os usuarios, ordenados por id."""

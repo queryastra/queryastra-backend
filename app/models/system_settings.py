@@ -30,7 +30,12 @@ class SystemSettings(Base):
     """Linha única (`id=1`) de preferências globais editáveis pelo usuário."""
 
     __tablename__ = "system_settings"
-    __table_args__ = (CheckConstraint("id = 1", name="ck_system_settings_singleton"),)
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_system_settings_singleton"),
+        CheckConstraint(
+            "email_provider IN ('smtp', 'brevo')", name="ck_system_settings_email_provider"
+        ),
+    )
 
     id: Mapped[int] = mapped_column(
         SmallInteger, primary_key=True, default=SYSTEM_SETTINGS_SINGLETON_ID
@@ -53,6 +58,15 @@ class SystemSettings(Base):
     smtp_username: Mapped[str | None] = mapped_column(Text, nullable=True)
     smtp_password_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     smtp_from_address: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Provedor de envio de e-mail (alertas, relatorios, avisos de trial): 'smtp' (campos smtp_*
+    # acima, com fallback para ALERT_SMTP_* do .env) ou 'brevo' (API transacional HTTP). O
+    # endereco remetente (`smtp_from_address`) e o nome (`email_from_name`) valem para ambos.
+    # brevo_api_key_encrypted: chave cifrada com Fernet (mesmo helper da senha SMTP).
+    email_provider: Mapped[str] = mapped_column(
+        Text, nullable=False, default="smtp", server_default="smtp"
+    )
+    brevo_api_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    email_from_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Configuracao de IA (BYOK) — editavel pela UI (Configuracoes → IA). ai_api_key_encrypted
     # armazena a chave cifrada com Fernet; tem precedencia sobre AI_API_KEY do .env quando
     # presente.

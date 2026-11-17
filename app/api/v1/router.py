@@ -20,16 +20,21 @@ from app.api.v1 import (
     capacity,
     db_maintenance,
     deadlocks,
+    exports,
     health_stats,
     hosts,
+    instance_history,
     instances,
     license,
     metrics,
     missing_index,
+    notifications,
+    overview,
     queries,
     reports,
     settings,
     status,
+    teams,
     topology,
     transactions,
     update,
@@ -37,10 +42,15 @@ from app.api.v1 import (
     waits_blocking,
     websocket,
 )
+from app.api.v1 import annotations as annotations_api
 
 api_v1_router = APIRouter()
 
 api_v1_router.include_router(auth.router, prefix="/auth", tags=["auth"])
+api_v1_router.include_router(teams.router, prefix="/auth/teams", tags=["teams"])
+api_v1_router.include_router(
+    notifications.router, prefix="/notifications", tags=["notifications"]
+)
 api_v1_router.include_router(license.router, prefix="/license", tags=["license"])
 api_v1_router.include_router(audit_log.router, prefix="/audit-log", tags=["audit-log"])
 api_v1_router.include_router(instances.router, prefix="/instances", tags=["instances"])
@@ -72,6 +82,14 @@ api_v1_router.include_router(
 api_v1_router.include_router(ai_deep_analysis.router, prefix="/instances", tags=["ai-deep-analysis"])
 api_v1_router.include_router(anomalies.instance_router, prefix="/instances", tags=["anomalies"])
 api_v1_router.include_router(anomalies.router, prefix="/anomalies", tags=["anomalies"])
+api_v1_router.include_router(
+    instance_history.router, prefix="/instances", tags=["instance-history"]
+)
+api_v1_router.include_router(
+    annotations_api.router, prefix="/annotations", tags=["annotations"]
+)
+api_v1_router.include_router(overview.router, prefix="/overview", tags=["overview"])
+api_v1_router.include_router(exports.router, prefix="/exports", tags=["exports"])
 api_v1_router.include_router(websocket.router, tags=["websocket"])
 
 # Endpoint de health-check do backend em si (nao confundir com health-check de instancia

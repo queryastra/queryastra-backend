@@ -12,11 +12,15 @@
 - PUT  /auth/users/{user_id}/password — troca senha diretamente (admin only, sem senha atual)
 - POST /auth/reset-password — redefine senha via token (publico)
 - PUT  /auth/me/password — troca senha do usuario autenticado
+- PUT  /auth/me/profile  — atualiza o proprio e-mail
+
+Times (`/auth/teams`) ficam em `app.api.v1.teams`.
 """
 
 from __future__ import annotations
 
 import hashlib
+import re
 import secrets
 import time
 from collections import defaultdict
@@ -34,6 +38,8 @@ from app.repositories.instances_repository import InstancesRepository
 from app.repositories.password_reset_tokens_repository import PasswordResetTokensRepository
 from app.repositories.system_license_repository import SystemLicenseRepository
 from app.services.plan_service import PLANS
+from app.models.user import User
+from app.repositories.teams_repository import TeamsRepository
 from app.repositories.user_instance_access_repository import UserInstanceAccessRepository
 from app.repositories.users_repository import UsersRepository
 from app.services.audit_service import record_audit
@@ -90,6 +96,16 @@ def _clear_login_failures(ip: str) -> None:
 
 _VALID_ROLES = ("admin", "operator", "viewer")
 
+# Validacao propositalmente simples (sem dependencia `email-validator`): algo@dominio.tld.
+EMAIL_PATTERN = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
+
+
+def _normalize_email(raw: str | None) -> str | None:
+    if raw is None:
+        return None
+    cleaned = raw.strip()
+    return cleaned or None
+
 
 # ---------------------------------------------------------------------------
 # Schemas de request/response
@@ -112,6 +128,12 @@ class MeResponse(BaseModel):
     user_id: int
     username: str
     role: str
+    email: str | None = None
+
+
+class TeamRef(BaseModel):
+    id: int
+    name: str
 
 
 class UserResponse(BaseModel):
@@ -120,19 +142,30 @@ class UserResponse(BaseModel):
     role: str
     is_active: bool
     created_at: datetime
+    email: str | None = None
+    teams: list[TeamRef] = Field(default_factory=list)
 
 
 class UserCreateRequest(BaseModel):
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=1)
     role: str = Field(pattern="^(admin|operator|viewer)$")
+    email: str | None = Field(default=None, max_length=320)
 
 
 class UserPatchRequest(BaseModel):
-    """Atualiza role e/ou desativa o usuario. Pelo menos um campo e obrigatorio."""
+    """Atualiza role, e-mail e/ou desativa o usuario. Pelo menos um campo e obrigatorio.
+    `email=""` remove o e-mail; campo ausente preserva."""
 
     role: str | None = Field(default=None, pattern="^(admin|operator|viewer)$")
     is_active: bool | None = None
+    email: str | None = Field(default=None, max_length=320)
+
+
+class ProfileUpdateRequest(BaseModel):
+    """`email=""`/`null` remove o e-mail do proprio usuario."""
+
+    email: str | None = Field(default=None, max_length=320)
 
 
 class PlanInfoResponse(BaseModel):
@@ -169,6 +202,38 @@ def get_user_instance_access_repository(
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> UserInstanceAccessRepository:
     return UserInstanceAccessRepository(session)
+
+
+async def _validate_email_available(
+    repository: UsersRepository, raw_email: str | None, *, user_id: int | None
+) -> str | None:
+    """Normaliza (`""` -> `None`), valida formato e unicidade. Levanta 422/409."""
+    email = _normalize_email(raw_email)
+    if email is None:
+        return None
+    if not re.match(EMAIL_PATTERN, email):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="E-mail invalido."
+        )
+    existing = await repository.get_by_email(email)
+    if existing is not None and existing.id != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="E-mail ja esta em uso por outro usuario.",
+        )
+    return email
+
+
+def _user_response(user: User, teams: list[TeamRef] | None = None) -> UserResponse:
+    return UserResponse(
+        id=user.id,
+        username=user.username,
+        role=user.role,
+        is_active=user.is_active,
+        created_at=user.created_at,
+        email=user.email,
+        teams=teams or [],
+    )
 
 
 def get_password_reset_tokens_repository(
@@ -221,12 +286,43 @@ async def login(
 @router.get("/me", response_model=MeResponse)
 async def me(
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    repository: Annotated[UsersRepository, Depends(get_users_repository)],
 ) -> MeResponse:
     """Dados do usuario autenticado."""
+    user = await repository.get_by_id(current_user.user_id)
     return MeResponse(
         user_id=current_user.user_id,
         username=current_user.username,
         role=current_user.role,
+        email=user.email if user is not None else None,
+    )
+
+
+@router.put("/me/profile", response_model=MeResponse)
+async def update_my_profile(
+    payload: ProfileUpdateRequest,
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    repository: Annotated[UsersRepository, Depends(get_users_repository)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> MeResponse:
+    """Atualiza o proprio e-mail (destinatario de notificacoes por e-mail)."""
+    email = await _validate_email_available(
+        repository, payload.email, user_id=current_user.user_id
+    )
+    user = await repository.update_email(current_user.user_id, email)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario nao encontrado.")
+    await record_audit(
+        session,
+        actor=current_user.username,
+        action="user.profile_updated_self",
+        target_type="user",
+        target_id=str(current_user.user_id),
+        target_name=current_user.username,
+    )
+    await session.commit()
+    return MeResponse(
+        user_id=user.id, username=user.username, role=user.role, email=user.email
     )
 
 
@@ -296,16 +392,14 @@ async def update_plan(
 async def list_users(
     _: Annotated[CurrentUser, Depends(require_admin)],
     repository: Annotated[UsersRepository, Depends(get_users_repository)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> list[UserResponse]:
-    """Lista todos os usuarios (sem hashed_password). Requer papel admin."""
+    """Lista todos os usuarios (sem hashed_password), com os times de cada um. Requer admin."""
     users = await repository.list_all()
+    teams_by_user = await TeamsRepository(session).teams_by_user([u.id for u in users])
     return [
-        UserResponse(
-            id=u.id,
-            username=u.username,
-            role=u.role,
-            is_active=u.is_active,
-            created_at=u.created_at,
+        _user_response(
+            u, [TeamRef(id=t.id, name=t.name) for t in teams_by_user.get(u.id, [])]
         )
         for u in users
     ]
@@ -325,8 +419,9 @@ async def create_user(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Username '{payload.username}' ja esta em uso.",
         )
+    email = await _validate_email_available(repository, payload.email, user_id=None)
     hashed = hash_password(payload.password)
-    user = await repository.create(payload.username, hashed, payload.role)
+    user = await repository.create(payload.username, hashed, payload.role, email=email)
     await record_audit(
         session,
         actor=current_admin.username,
@@ -337,13 +432,7 @@ async def create_user(
         detail={"role": payload.role},
     )
     await session.commit()
-    return UserResponse(
-        id=user.id,
-        username=user.username,
-        role=user.role,
-        is_active=user.is_active,
-        created_at=user.created_at,
-    )
+    return _user_response(user)
 
 
 @router.patch("/users/{user_id}", response_model=UserResponse)
@@ -354,15 +443,20 @@ async def patch_user(
     repository: Annotated[UsersRepository, Depends(get_users_repository)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> UserResponse:
-    """Muda o papel e/ou desativa um usuario. Requer papel admin."""
-    if payload.role is None and payload.is_active is None:
+    """Muda o papel, o e-mail e/ou desativa um usuario. Requer papel admin."""
+    email_sent = "email" in payload.model_fields_set
+    if payload.role is None and payload.is_active is None and not email_sent:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Informe ao menos um campo para atualizar (role ou is_active).",
+            detail="Informe ao menos um campo para atualizar (role, is_active ou email).",
         )
     user = await repository.get_by_id(user_id)
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario nao encontrado.")
+    if email_sent:
+        email = await _validate_email_available(repository, payload.email, user_id=user_id)
+        user = await repository.update_email(user_id, email)
+        assert user is not None
     if payload.role is not None:
         user = await repository.update_role(user_id, payload.role)
         assert user is not None
@@ -382,12 +476,9 @@ async def patch_user(
         detail={k: v for k, v in payload.model_dump().items() if v is not None},
     )
     await session.commit()
-    return UserResponse(
-        id=user.id,
-        username=user.username,
-        role=user.role,
-        is_active=user.is_active,
-        created_at=user.created_at,
+    teams_by_user = await TeamsRepository(session).teams_by_user([user.id])
+    return _user_response(
+        user, [TeamRef(id=t.id, name=t.name) for t in teams_by_user.get(user.id, [])]
     )
 
 

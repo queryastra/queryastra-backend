@@ -151,6 +151,29 @@ class MetricSamplesRepository(BaseRepository):
         )
         return (await self._session.execute(stmt)).first()
 
+    async def get_latest_two_points(
+        self, target_type: str, target_id: UUID, metric_name: str
+    ) -> list[sa.Row]:
+        """As 2 amostras mais recentes (`time`, `value`), mais recente primeiro — base da
+        avaliacao `rate_per_minute` de contadores cumulativos no `AlertingWorker`. Amostras com
+        labels diferentes no MESMO instante (ex.: um contador por volume) sao somadas, para que
+        os 2 pontos representem 2 ciclos de coleta distintos."""
+        stmt = (
+            sa.select(
+                metric_samples_table.c.time,
+                sa.func.sum(metric_samples_table.c.value).label("value"),
+            )
+            .where(
+                metric_samples_table.c.target_type == target_type,
+                metric_samples_table.c.target_id == target_id,
+                metric_samples_table.c.metric_name == metric_name,
+            )
+            .group_by(metric_samples_table.c.time)
+            .order_by(metric_samples_table.c.time.desc())
+            .limit(2)
+        )
+        return list((await self._session.execute(stmt)).all())
+
     async def get_baseline_stats(
         self, target_type: str, target_id: UUID, metric_name: str, since: datetime
     ) -> sa.Row | None:

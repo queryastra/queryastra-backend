@@ -9,14 +9,22 @@ uma notificacao extra num restart eventual e aceitavel dada a simplicidade).
 from __future__ import annotations
 
 import asyncio
-import smtplib
-from email.message import EmailMessage
+from collections.abc import Awaitable, Callable
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import Settings
 from app.core.logging import get_logger
 from app.repositories.system_license_repository import SystemLicenseRepository
+from app.repositories.users_repository import UsersRepository
+from app.services.email_service import (
+    EmailTransportConfig,
+    OutgoingEmail,
+    dedupe_recipients,
+    parse_recipients,
+    resolve_email_config,
+    send_email,
+)
 from app.services.plan_service import PlanService
 
 logger = get_logger(__name__)
@@ -33,7 +41,9 @@ class TrialExpiryWorker:
         session_factory: async_sessionmaker[AsyncSession],
         settings: Settings,
         interval_seconds: int = 3600,
+        email_sender: Callable[[EmailTransportConfig, OutgoingEmail], Awaitable[None]] = send_email,
     ) -> None:
+        self._email_sender = email_sender
         self._session_factory = session_factory
         self._settings = settings
         self._interval_seconds = interval_seconds
@@ -81,46 +91,52 @@ class TrialExpiryWorker:
                 await self._send_notice(days_remaining, milestone)
                 self._notified.add(milestone)
 
-    async def _send_welcome(self) -> None:
-        s = self._settings
-        if not s.alert_smtp_host or not s.alert_email_to:
-            logger.debug("TrialExpiryWorker: SMTP não configurado — welcome email ignorado")
-            return
-
-        recipients = [a.strip() for a in s.alert_email_to.split(",") if a.strip()]
-        if not recipients:
-            return
-
-        msg = EmailMessage()
-        msg["Subject"] = "Welcome to QueryAstra — your 30-day trial has started"
-        msg["From"] = s.alert_smtp_from or "noreply@queryastra.local"
-        msg["To"] = ", ".join(recipients)
-        msg.set_content(
-            "Welcome to QueryAstra! Your 30-day trial has started. "
-            "Open the app at http://localhost:8124 to get started.",
-            subtype="plain",
+    async def _resolve_delivery(self) -> tuple[EmailTransportConfig, list[str]] | None:
+        """Provedor de e-mail (banco + fallback `.env`) e destinatarios: ALERT_EMAIL_TO mais o
+        e-mail de cada administrador ativo com e-mail cadastrado. `None` = nada a enviar."""
+        async with self._session_factory() as session:
+            config = await resolve_email_config(session, self._settings)
+            admin_emails = await UsersRepository(session).list_active_admin_emails()
+        if not config.is_configured:
+            return None
+        recipients = dedupe_recipients(
+            parse_recipients(self._settings.alert_email_to), admin_emails
         )
-        msg.add_alternative(_build_welcome_html(), subtype="html")
+        if not recipients:
+            return None
+        return config, recipients
 
+    async def _send_welcome(self) -> None:
+        delivery = await self._resolve_delivery()
+        if delivery is None:
+            logger.debug("TrialExpiryWorker: e-mail não configurado — welcome email ignorado")
+            return
+        config, recipients = delivery
+        email = OutgoingEmail(
+            recipients=recipients,
+            subject="Welcome to QueryAstra — your 30-day trial has started",
+            text_body=(
+                "Welcome to QueryAstra! Your 30-day trial has started. "
+                "Open the app at http://localhost:8124 to get started."
+            ),
+            html_body=_build_welcome_html(),
+        )
         try:
-            await asyncio.to_thread(_smtp_send, msg, s)
+            await self._email_sender(config, email)
             logger.info("TrialExpiryWorker: welcome email enviado")
         except Exception:  # noqa: BLE001
             logger.exception("TrialExpiryWorker: falha ao enviar welcome email")
 
     async def _send_notice(self, days_remaining: int, milestone: int) -> None:
-        s = self._settings
-        if not s.alert_smtp_host or not s.alert_email_to:
+        delivery = await self._resolve_delivery()
+        if delivery is None:
             logger.warning(
-                "TrialExpiryWorker: SMTP nao configurado — aviso de trial nao enviado "
+                "TrialExpiryWorker: e-mail nao configurado — aviso de trial nao enviado "
                 "(days_remaining=%s)",
                 days_remaining,
             )
             return
-
-        recipients = [a.strip() for a in s.alert_email_to.split(",") if a.strip()]
-        if not recipients:
-            return
+        config, recipients = delivery
 
         if days_remaining == 0:
             subject = "QueryAstra Trial Expires Today"
@@ -129,19 +145,17 @@ class TrialExpiryWorker:
         else:
             subject = f"QueryAstra Trial Expiring in {days_remaining} Days"
 
-        msg = EmailMessage()
-        msg["Subject"] = subject
-        msg["From"] = s.alert_smtp_from or "noreply@queryastra.local"
-        msg["To"] = ", ".join(recipients)
-        msg.set_content(
-            f"Your QueryAstra trial expires in {days_remaining} day(s). "
-            "Upgrade at https://queryastra.com/pricing to keep access.",
-            subtype="plain",
+        email = OutgoingEmail(
+            recipients=recipients,
+            subject=subject,
+            text_body=(
+                f"Your QueryAstra trial expires in {days_remaining} day(s). "
+                "Upgrade at https://queryastra.com/pricing to keep access."
+            ),
+            html_body=_build_html(days_remaining),
         )
-        msg.add_alternative(_build_html(days_remaining), subtype="html")
-
         try:
-            await asyncio.to_thread(_smtp_send, msg, s)
+            await self._email_sender(config, email)
             logger.info(
                 "TrialExpiryWorker: aviso enviado (days_remaining=%s, milestone=%s)",
                 days_remaining,
@@ -151,14 +165,6 @@ class TrialExpiryWorker:
             logger.exception(
                 "TrialExpiryWorker: falha ao enviar aviso (days_remaining=%s)", days_remaining
             )
-
-
-def _smtp_send(msg: EmailMessage, s: Settings) -> None:
-    with smtplib.SMTP(s.alert_smtp_host, s.alert_smtp_port, timeout=10.0) as smtp:  # type: ignore[arg-type]
-        smtp.starttls()
-        if s.alert_smtp_username and s.alert_smtp_password:
-            smtp.login(s.alert_smtp_username, s.alert_smtp_password)
-        smtp.send_message(msg)
 
 
 def _build_welcome_html() -> str:

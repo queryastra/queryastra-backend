@@ -9,6 +9,7 @@ avaliacao de cada `rule_type`; este modulo so expoe CRUD/consulta e a validacao 
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
@@ -25,7 +26,10 @@ from app.api.deps import (
     require_operator,
 )
 from app.models.alert import AlertEscalationLevel, AlertRule, AlertSilence
+from app.normalizers.metric_names import DERIVED_PERCENT_METRICS
 from app.repositories.alerts_repository import AlertsRepository, AlertWithNames
+from app.repositories.instances_repository import InstancesRepository
+from app.repositories.teams_repository import TeamsRepository
 from app.services.custom_sql_guard import CustomSqlRejectedError, validate_custom_sql
 
 router = APIRouter()
@@ -37,6 +41,8 @@ _RESET_MODES = (
     "no_reset_every_poll",
     "no_reset_manual",
 )
+_EVALUATION_MODES = ("value", "rate_per_minute")
+_EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 class AlertEscalationLevelRequest(BaseModel):
@@ -75,9 +81,31 @@ class AlertRuleCreateRequest(BaseModel):
     recurrence_threshold_count: int | None = None
     recurrence_window_days: int | None = None
     escalation_levels: list[AlertEscalationLevelRequest] = Field(default_factory=list)
+    # NULL = todas as instancias; preenchido = regra avaliada so contra essa instancia.
+    instance_id: UUID | None = None
+    evaluation_mode: str = Field(
+        default="value", pattern="^(" + "|".join(_EVALUATION_MODES) + ")$"
+    )
+    notify_emails: list[str] | None = None
+    webhook_url: str | None = Field(default=None, max_length=2048)
+    notify_team_id: int | None = None
 
     @model_validator(mode="after")
     def _validate_rule_is_coherent(self) -> AlertRuleCreateRequest:
+        if self.evaluation_mode == "rate_per_minute" and self.rule_type != "threshold":
+            raise ValueError("evaluation_mode=rate_per_minute so se aplica a rule_type=threshold")
+        if self.notify_emails is not None:
+            cleaned = [e.strip() for e in self.notify_emails if e and e.strip()]
+            invalid = [e for e in cleaned if not _EMAIL_PATTERN.match(e)]
+            if invalid:
+                raise ValueError(f"e-mail invalido em notify_emails: {', '.join(invalid)}")
+            self.notify_emails = cleaned or None
+        if self.webhook_url is not None:
+            self.webhook_url = self.webhook_url.strip() or None
+            if self.webhook_url and not self.webhook_url.lower().startswith(
+                ("http://", "https://")
+            ):
+                raise ValueError("webhook_url deve comecar com http:// ou https://")
         if self.rule_type == "threshold" and self.metric_name is not None:
             if self.comparison is None:
                 raise ValueError("comparison e obrigatorio quando metric_name e informado")
@@ -132,6 +160,11 @@ class AlertRuleResponse(BaseModel):
     recurrence_threshold_count: int | None
     recurrence_window_days: int | None
     escalation_levels: list[AlertEscalationLevelResponse] = Field(default_factory=list)
+    instance_id: UUID | None = None
+    evaluation_mode: str = "value"
+    notify_emails: list[str] | None = None
+    webhook_url: str | None = None
+    notify_team_id: int | None = None
 
 
 class AlertResponse(BaseModel):
@@ -225,18 +258,55 @@ def _to_alert_rule_response(
         recurrence_threshold_count=rule.recurrence_threshold_count,
         recurrence_window_days=rule.recurrence_window_days,
         escalation_levels=[AlertEscalationLevelResponse.model_validate(lv) for lv in levels],
+        instance_id=rule.instance_id,
+        evaluation_mode=rule.evaluation_mode or "value",
+        notify_emails=rule.notify_emails,
+        webhook_url=rule.webhook_url,
+        notify_team_id=rule.notify_team_id,
     )
+
+
+async def _validate_references(session: AsyncSession, payload: AlertRuleCreateRequest) -> None:
+    """Escopo/time precisam existir — 422 com mensagem clara em vez de violacao de FK."""
+    if payload.instance_id is not None:
+        if await InstancesRepository(session).get_by_id(payload.instance_id) is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Instancia informada em instance_id nao existe.",
+            )
+    if payload.notify_team_id is not None:
+        if await TeamsRepository(session).get_by_id(payload.notify_team_id) is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Time informado em notify_team_id nao existe.",
+            )
+
+
+class MetricCatalogResponse(BaseModel):
+    """Metricas derivadas (gauges em %) que todo coletor suportado emite — o formulario de regra
+    as oferece mesmo antes da primeira coleta de uma instancia."""
+
+    derived_metrics: list[str]
+
+
+@router.get("/metric-catalog", response_model=MetricCatalogResponse)
+async def get_metric_catalog(
+    _: Annotated[CurrentUser, Depends(get_current_user)],
+) -> MetricCatalogResponse:
+    return MetricCatalogResponse(derived_metrics=list(DERIVED_PERCENT_METRICS))
 
 
 @router.post("/rules", response_model=AlertRuleResponse, status_code=status.HTTP_201_CREATED)
 async def create_alert_rule(
     payload: AlertRuleCreateRequest,
     repository: Annotated[AlertsRepository, Depends(get_alerts_repository)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
     _: Annotated[CurrentUser, Depends(require_admin)],
 ) -> AlertRuleResponse:
     """Cria uma regra de alerta. `custom_sql` (quando presente) ja foi validado pelo
     bloqueio por palavra-chave no `model_validator` de `AlertRuleCreateRequest` — nunca
     persistido sem passar por essa checagem."""
+    await _validate_references(session, payload)
     fields = payload.model_dump(exclude={"escalation_levels"})
     rule = await repository.create_alert_rule(AlertRule(**fields))
     levels: list[AlertEscalationLevel] = []
@@ -259,9 +329,18 @@ async def create_alert_rule(
 async def list_alert_rules(
     repository: Annotated[AlertsRepository, Depends(get_alerts_repository)],
     _: Annotated[CurrentUser, Depends(get_current_user)],
+    instance_id: UUID | None = None,
+    scope: Annotated[str | None, Query(pattern="^(all|global|instance)$")] = None,
 ) -> list[AlertRuleResponse]:
-    """Lista todas as regras de alerta, ativas ou nao."""
+    """Lista as regras de alerta, ativas ou nao. `instance_id` = so as regras que se aplicam a
+    essa instancia (escopadas a ela + globais); `scope=global|instance` filtra pelo tipo."""
     rules = await repository.list_rules()
+    if instance_id is not None:
+        rules = [r for r in rules if r.instance_id is None or r.instance_id == instance_id]
+    if scope == "global":
+        rules = [r for r in rules if r.instance_id is None]
+    elif scope == "instance":
+        rules = [r for r in rules if r.instance_id is not None]
     result: list[AlertRuleResponse] = []
     for rule in rules:
         levels = await repository.list_escalation_levels(rule.id)
@@ -290,11 +369,13 @@ async def update_alert_rule(
     rule_id: UUID,
     payload: AlertRuleCreateRequest,
     repository: Annotated[AlertsRepository, Depends(get_alerts_repository)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
     _: Annotated[CurrentUser, Depends(require_admin)],
 ) -> AlertRuleResponse:
     """Atualiza uma regra existente — mesmo shape/validacao de `POST /rules` (substituicao
     completa, nao um patch parcial: o formulario de edicao sempre manda todos os campos).
     `escalation_levels` e substituido por inteiro (`replace_escalation_levels`)."""
+    await _validate_references(session, payload)
     fields = payload.model_dump(exclude={"escalation_levels"})
     rule = await repository.update_alert_rule(rule_id, fields)
     if rule is None:
