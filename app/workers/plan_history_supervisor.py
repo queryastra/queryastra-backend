@@ -157,7 +157,7 @@ class PlanHistorySupervisor:
                     )
                     return
 
-                if instance.db_type not in ("sqlserver",) | _EXPLAIN_BASED_TYPES:
+                if instance.db_type not in {"sqlserver"} | _EXPLAIN_BASED_TYPES:
                     # db2 e outros sem suporte ainda
                     return
 
