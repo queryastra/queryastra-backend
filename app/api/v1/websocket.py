@@ -19,6 +19,7 @@ Filtro por usuario (`event_visible_to`):
 
 from __future__ import annotations
 
+import asyncio
 import time
 from uuid import UUID
 
@@ -116,7 +117,8 @@ async def live_updates(websocket: WebSocket) -> None:
     await websocket.accept()
     access = _AccessCache(active_user)
     queue = event_bus.subscribe()
-    try:
+
+    async def forward_events() -> None:
         while True:
             event = await queue.get()
             needs_access = (
@@ -125,7 +127,25 @@ async def live_updates(websocket: WebSocket) -> None:
             accessible = await access.get() if needs_access else None
             if event_visible_to(event, active_user, accessible):
                 await websocket.send_json(event)
-    except WebSocketDisconnect:
+
+    async def wait_for_disconnect() -> None:
+        # Sem ler o socket, o handler nunca ve o close do cliente nem o do shutdown do uvicorn
+        # (que espera os WebSockets terminarem) — o reload/parada travaria com uma aba aberta.
+        while (await websocket.receive())["type"] != "websocket.disconnect":
+            pass
+
+    tasks = {asyncio.create_task(forward_events()), asyncio.create_task(wait_for_disconnect())}
+    try:
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        for task in done:
+            exc = task.exception()
+            if exc is not None and not isinstance(exc, WebSocketDisconnect):
+                raise exc
         logger.info("Cliente WebSocket desconectado de /ws/live")
     finally:
+        for task in tasks:
+            task.cancel()
         event_bus.unsubscribe(queue)

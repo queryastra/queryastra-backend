@@ -19,6 +19,10 @@ LIMITE INFERIOR da duracao real, ja que ela pode ter terminado entre duas amostr
 mais curtas que o intervalo de poll podem nunca ser vistas — limitacao estrutural de amostragem
 ja documentada em `QuerySamplesRepository`.
 
+So entram runs que COMECARAM dentro da janela: requests de vida longa iniciadas antes dela (ex.:
+agentes de replicacao do SQL Server, cujo `total_elapsed_time` cresce por semanas e e herdado por
+cada statement do batch) dominariam o ranking com duracoes que nao pertencem a janela.
+
 `p95_duration_ms` e o `percentile_cont(0.95)` EXATO sobre as duracoes dos runs da janela (barato:
 o numero de runs e ordens de grandeza menor que o de amostras).
 
@@ -59,6 +63,7 @@ _RUNS_CTE = """
           {extra_filter}
         GROUP BY sql_hash, coalesce(session_id, ''),
                  round(extract(epoch FROM time) - duration_ms / 1000.0)
+        HAVING min(time - duration_ms * interval '1 millisecond') >= :since
     )
 """
 
