@@ -14,7 +14,10 @@ from typing import Annotated, Literal, TypeVar
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import distinct, select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.repositories._tables import query_samples_table
 
 from app.api.deps import check_instance_access, get_db_session
 from app.api.v1.health_stats import _build_collector
@@ -80,7 +83,20 @@ async def list_databases(
     credential_resolver: CredentialResolver = Depends(CredentialResolver),  # noqa: B008
 ) -> list[str]:
     """Bancos de usuario acessiveis — alimenta o seletor das telas de manutencao.
-    Lista vazia = motor de banco unico (Oracle PDB, DB2) ou sem suporte."""
+
+    Tenta primeiro o cache do TimescaleDB (query_samples ja coletadas — resposta imediata).
+    So vai ao servidor monitorado se nao houver historico ainda."""
+    result = await session.execute(
+        select(distinct(query_samples_table.c.database_name))
+        .where(query_samples_table.c.instance_id == instance_id)
+        .where(query_samples_table.c.database_name.isnot(None))
+        .where(query_samples_table.c.database_name != "")
+        .order_by(query_samples_table.c.database_name)
+    )
+    cached = [row[0] for row in result.fetchall()]
+    if cached:
+        return cached
+
     collector = await _build_collector(instance_id, session, credential_resolver)
     try:
         return await asyncio.wait_for(collector.list_databases(), timeout=15)
