@@ -28,7 +28,7 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-APP_VERSION = "0.1.3"
+APP_VERSION = "0.2.0"
 _GITHUB_RELEASES_URL = (
     "https://api.github.com/repos/queryastra/queryastra-backend/releases/latest"
 )
