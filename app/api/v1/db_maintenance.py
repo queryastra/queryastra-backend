@@ -81,9 +81,19 @@ async def list_databases(
 ) -> list[str]:
     """Bancos de usuario acessiveis — alimenta o seletor das telas de manutencao.
     Lista vazia = motor de banco unico (Oracle PDB, DB2) ou sem suporte."""
-    return await _run_scan(
-        instance_id, session, credential_resolver, "bancos", lambda c: c.list_databases()
-    )
+    collector = await _build_collector(instance_id, session, credential_resolver)
+    try:
+        return await asyncio.wait_for(collector.list_databases(), timeout=15)
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="Listagem de bancos excedeu o tempo limite. Digite o nome do banco manualmente.",
+        ) from exc
+    except Exception as exc:
+        logger.warning("Erro ao listar bancos instance_id=%s: %s", instance_id, exc)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Erro ao listar bancos da instancia.") from exc
+    finally:
+        await collector.close()
 
 
 @router.get("/{instance_id}/index-health", response_model=NormalizedIndexHealthReport)
