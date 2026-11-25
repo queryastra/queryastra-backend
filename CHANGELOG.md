@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.1] — 2026-11-25
+
+### Correções
+- **SQL Server — instância presa em ERR**: quando a rede cai em silêncio (sem RST/FIN), as threads do pymssql travavam e o pool da instância saturava, deixando-a em ERR até reiniciar o backend. Um watchdog agora recria o pool quando todas as threads ficam presas por mais de `INSTANCE_EXECUTOR_STUCK_THRESHOLD_SECONDS` (padrão 90s)
+- **Endpoints de saúde**: `/tempdb` em instâncias PostgreSQL e 7 endpoints em SQL Server (bloat, bgwriter, funções, replication slots, índices não usados, I/O de tabelas, vacuum) davam erro 502 em vez da resposta vazia
+- **PostgreSQL — sugestões de índice ausente**: uma falha na consulta extra ao pg_qualstats descartava todas as sugestões já coletadas
+- **Oracle — sugestões de índice ausente**: falhavam sempre por chamar uma função inexistente
+
+### Manutenção
+- Código do backend sem erros de lint e de formatação (ruff)
+
 ## [0.2.0] — 2026-11-18
 
 ### Novas funcionalidades
