@@ -107,3 +107,84 @@ async def test_shutdown_all_clears_the_registry() -> None:
     instance_executors.shutdown_all()
 
     assert instance_executors._executors == {}  # noqa: SLF001
+
+
+def _settings_with(monkeypatch, *, max_workers: int, threshold: float) -> None:
+    real = instance_executors.get_settings()
+    patched = real.model_copy(
+        update={
+            "instance_executor_max_workers": max_workers,
+            "instance_executor_stuck_threshold_seconds": threshold,
+        }
+    )
+    monkeypatch.setattr(instance_executors, "get_settings", lambda: patched)
+
+
+async def _saturate(instance_id, release_event: threading.Event, n: int) -> list[asyncio.Task]:
+    tasks = [
+        asyncio.create_task(
+            instance_executors.run_in_instance_executor(
+                instance_id, _block_until_released, release_event
+            )
+        )
+        for _ in range(n)
+    ]
+    await asyncio.sleep(0.05)  # deixa as threads comecarem a executar (`started_at`)
+    return tasks
+
+
+async def test_watchdog_recreates_executor_when_all_workers_are_stuck(monkeypatch) -> None:
+    """Rede caida em silencio: todas as threads da instancia presas alem do limite. Sem o
+    watchdog a proxima chamada ficaria na fila para sempre; com ele, roda num pool novo e as
+    chamadas antigas ainda entregam o resultado quando (se) destravarem."""
+    _settings_with(monkeypatch, max_workers=2, threshold=0.1)
+    instance_id = uuid4()
+    release_event = threading.Event()
+    old_tasks = await _saturate(instance_id, release_event, 2)
+    old_executor = instance_executors._executors[instance_id]
+    await asyncio.sleep(0.15)
+
+    result = await asyncio.wait_for(
+        instance_executors.run_in_instance_executor(instance_id, _return_immediately), timeout=1
+    )
+
+    assert result == "ok"
+    assert instance_executors._executors[instance_id] is not old_executor
+    # threads abandonadas ficam visiveis para `exit_if_threads_stuck` no shutdown
+    assert len(instance_executors.stuck_threads()) == 2
+    release_event.set()
+    assert await asyncio.gather(*old_tasks) == [None, None]
+
+
+async def test_watchdog_keeps_executor_when_not_all_workers_are_stuck(monkeypatch) -> None:
+    _settings_with(monkeypatch, max_workers=2, threshold=0.1)
+    instance_id = uuid4()
+    release_event = threading.Event()
+    old_tasks = await _saturate(instance_id, release_event, 1)
+    executor = instance_executors._executors[instance_id]
+    await asyncio.sleep(0.15)
+
+    result = await instance_executors.run_in_instance_executor(instance_id, _return_immediately)
+
+    assert result == "ok"
+    assert instance_executors._executors[instance_id] is executor
+    release_event.set()
+    await asyncio.gather(*old_tasks)
+
+
+async def test_watchdog_ignores_calls_younger_than_threshold(monkeypatch) -> None:
+    _settings_with(monkeypatch, max_workers=2, threshold=5.0)
+    instance_id = uuid4()
+    release_event = threading.Event()
+    old_tasks = await _saturate(instance_id, release_event, 2)
+    executor = instance_executors._executors[instance_id]
+
+    pending = asyncio.create_task(
+        instance_executors.run_in_instance_executor(instance_id, _return_immediately)
+    )
+    await asyncio.sleep(0.05)
+
+    assert instance_executors._executors[instance_id] is executor
+    release_event.set()
+    await asyncio.gather(*old_tasks)
+    assert await pending == "ok"

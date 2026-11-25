@@ -76,6 +76,15 @@ class Settings(BaseSettings):
     # travada consumir todas as SUAS proprias vagas e o comportamento aceito (ela para de
     # coletar sozinha, sem afetar mais ninguem).
     instance_executor_max_workers: int = Field(default=6, alias="INSTANCE_EXECUTOR_MAX_WORKERS")
+    # Watchdog de saturacao do pool dedicado: se TODAS as `instance_executor_max_workers` threads
+    # de uma instancia estao executando a mesma chamada ha mais que este limite (segundos), o pool
+    # e considerado travado (queda de rede silenciosa, sem RST/FIN) e e recriado. Deve ser maior
+    # que o timeout externo do ciclo de coleta (connect + query, ~20s). Varreduras de manutencao
+    # (ate `maintenance_scan_timeout_seconds`) podem passar disso, mas so disparam o watchdog se
+    # ocuparem todas as vagas ao mesmo tempo — e mesmo assim nao perdem resultado (ver modulo).
+    instance_executor_stuck_threshold_seconds: float = Field(
+        default=90.0, alias="INSTANCE_EXECUTOR_STUCK_THRESHOLD_SECONDS"
+    )
 
     # Liga o supervisor de coleta continua (PollingSupervisor) no lifespan do backend. Default
     # false - nunca ligar coleta real fora de um ambiente explicitamente configurado para isso.
