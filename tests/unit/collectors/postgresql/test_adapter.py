@@ -452,14 +452,25 @@ class _FakeMissingIndexConnection:
     """Fake de conexao para `collect_missing_index_suggestions()` — `fetch()` devolve linhas
     fixas conforme a query pedida (lista de bancos ou heuristica de indice ausente)."""
 
-    def __init__(self, rows: list[dict[str, Any]]) -> None:
+    def __init__(
+        self, rows: list[dict[str, Any]], qualstats_error: Exception | None = None
+    ) -> None:
         self._rows = rows
+        self._qualstats_error = qualstats_error
         self.closed = False
 
     async def fetch(self, query: str, *args: object) -> list[dict[str, Any]]:
         if "pg_database" in query or "pg_stat_user_tables" in query:
             return self._rows
         raise AssertionError(f"fetch inesperado: {query}")
+
+    async def fetchval(self, query: str, *args: object) -> bool:
+        # Checagem da extensao pg_qualstats, feita no banco de manutencao — ausente por padrao.
+        if "pg_qualstats" not in query:
+            raise AssertionError(f"fetchval inesperado: {query}")
+        if self._qualstats_error is not None:
+            raise self._qualstats_error
+        return False
 
     async def close(self) -> None:
         self.closed = True
@@ -551,6 +562,40 @@ async def test_collect_missing_index_suggestions_skips_database_that_fails_to_co
 
     assert len(suggestions) == 1
     assert suggestions[0].database_name == "db_b"
+
+
+async def test_collect_missing_index_suggestions_keeps_heuristics_when_qualstats_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A consulta extra ao pg_qualstats e best-effort: falha nela (ex.: sem permissao no banco
+    de manutencao) nunca descarta as sugestoes heuristicas ja coletadas por banco."""
+    bootstrap_conn = _FakeMissingIndexConnection(
+        rows=[{"datname": "db_a"}],
+        qualstats_error=asyncpg.InsufficientPrivilegeError("sem permissao"),
+    )
+    db_a_conn = _FakeMissingIndexConnection(
+        rows=[
+            {
+                "schemaname": "public",
+                "table_name": "pedidos",
+                "seq_scan": 500,
+                "idx_scan": 10,
+                "n_live_tup": 100_000,
+                "table_size_bytes": 50_000_000,
+            }
+        ]
+    )
+
+    async def fake_connect(**kwargs: object) -> _FakeMissingIndexConnection:
+        return bootstrap_conn if kwargs["database"] == "postgres" else db_a_conn
+
+    monkeypatch.setattr(asyncpg, "connect", fake_connect)
+
+    collector = PostgreSQLCollector(connection=_CONNECTION, instance_id=uuid4())
+    suggestions = await collector.collect_missing_index_suggestions()
+
+    assert [s.table_name for s in suggestions] == ["public.pedidos"]
+    assert bootstrap_conn.closed
 
 
 async def test_collect_missing_index_suggestions_raises_value_error_without_instance_id() -> None:

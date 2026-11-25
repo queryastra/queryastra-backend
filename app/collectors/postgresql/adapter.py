@@ -58,6 +58,7 @@ from app.collectors.capabilities import (
     POSTGRESQL_SESSION_TERMINATION,
     POSTGRESQL_TOP_SQL,
 )
+from app.collectors.collector_mixin import CollectorNoOpMixin
 from app.collectors.connection import ConnectionParams
 from app.collectors.postgresql import maintenance as pg_maintenance
 from app.collectors.transaction_flagging import compute_flag_reason
@@ -723,7 +724,7 @@ def _reduce_to_direct_edges(blocked_by_map: dict[int, set[int]]) -> dict[int, se
     return direct
 
 
-class PostgreSQLCollector:
+class PostgreSQLCollector(CollectorNoOpMixin):
     """Implementa `app.collectors.base.Collector` para instancias PostgreSQL."""
 
     def __init__(self, connection: ConnectionParams, instance_id: UUID | None = None) -> None:
@@ -1450,41 +1451,54 @@ class PostgreSQLCollector:
                     )
                 )
         # pg_qualstats — coleta adicional com indicacao de coluna especifica.
-        # Roda em banco separado (banco de manutencao); erros sao logados e ignorados.
-        qualstats_conn = await asyncio.wait_for(
+        # Roda no banco de manutencao. Qualquer falha (conexao, permissao, timeout) e logada e
+        # ignorada — nunca descarta as sugestoes heuristicas ja coletadas acima.
+        try:
+            suggestions.extend(await self._collect_qualstats_suggestions(instance_id))
+        except (OSError, asyncpg.PostgresError, TimeoutError):
+            logger.warning(
+                "Falha ao consultar pg_qualstats (instance_id=%s) - pulando", instance_id
+            )
+
+        return suggestions
+
+    async def _collect_qualstats_suggestions(
+        self, instance_id: UUID
+    ) -> list[NormalizedMissingIndexSuggestion]:
+        settings = get_settings()
+        conn = await asyncio.wait_for(
             self._connect(), timeout=self._connection_params.connect_timeout_seconds
         )
         try:
-            has_qualstats = await qualstats_conn.fetchval(
-                "SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname='pg_qualstats')"
+            has_qualstats = await asyncio.wait_for(
+                conn.fetchval(
+                    "SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname='pg_qualstats')"
+                ),
+                timeout=settings.collection_query_timeout_seconds,
             )
-            if has_qualstats:
-                try:
-                    qualstats_rows = await asyncio.wait_for(
-                        qualstats_conn.fetch(_QUALSTATS_INDEX_ADVISOR_QUERY),
-                        timeout=settings.collection_query_timeout_seconds,
-                    )
-                    for row in qualstats_rows[: settings.collection_max_rows]:
-                        attnames: list[str] = list(row["attnames"] or [])
-                        ddl: str = row["ddl"]
-                        suggestions.append(
-                            NormalizedMissingIndexSuggestion(
-                                instance_id=instance_id,
-                                database_name=None,
-                                table_name=row["table_name"],
-                                suggestion=f"pg_qualstats: {ddl}",
-                                impact_score=None,
-                                detail={"source": "pg_qualstats", "columns": attnames, "ddl": ddl},
-                            )
-                        )
-                except (asyncpg.PostgresError, TimeoutError):
-                    logger.warning(
-                        "Falha ao rodar pg_qualstats_index_advisor() (instance_id=%s) - pulando",
-                        instance_id,
-                    )
+            if not has_qualstats:
+                return []
+            rows = await asyncio.wait_for(
+                conn.fetch(_QUALSTATS_INDEX_ADVISOR_QUERY),
+                timeout=settings.collection_query_timeout_seconds,
+            )
         finally:
-            await qualstats_conn.close()
+            await conn.close()
 
+        suggestions: list[NormalizedMissingIndexSuggestion] = []
+        for row in rows[: settings.collection_max_rows]:
+            attnames: list[str] = list(row["attnames"] or [])
+            ddl: str = row["ddl"]
+            suggestions.append(
+                NormalizedMissingIndexSuggestion(
+                    instance_id=instance_id,
+                    database_name=None,
+                    table_name=row["table_name"],
+                    suggestion=f"pg_qualstats: {ddl}",
+                    impact_score=None,
+                    detail={"source": "pg_qualstats", "columns": attnames, "ddl": ddl},
+                )
+            )
         return suggestions
 
     async def get_engine_start_time(self) -> datetime | None:

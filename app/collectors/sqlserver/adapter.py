@@ -73,6 +73,7 @@ from app.collectors.capabilities import (
     SQLSERVER_SESSION_TERMINATION,
     SQLSERVER_TABLE_READ_ACCESS,
 )
+from app.collectors.collector_mixin import CollectorNoOpMixin
 from app.collectors.connection import ConnectionParams
 from app.collectors.sqlserver import maintenance as ss_maintenance
 from app.collectors.transaction_flagging import compute_flag_reason
@@ -2792,7 +2793,7 @@ def _build_capability_results(
     return results
 
 
-class SQLServerCollector:
+class SQLServerCollector(CollectorNoOpMixin):
     """Implementa `app.collectors.base.Collector` para instancias SQL Server."""
 
     def __init__(self, connection: ConnectionParams, instance_id: UUID | None = None) -> None:

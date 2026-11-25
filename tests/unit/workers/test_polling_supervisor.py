@@ -150,6 +150,19 @@ class _FakeSystemSettingsRepository:
         return _FakeSystemSettingsRow()
 
 
+class _FakeInstanceDatabaseSleepingOverridesRepository:
+    """Mesmo motivo de `_FakeSystemSettingsRepository`: as excecoes por banco do limite de
+    "sleeping" sao lidas ANTES de `collector.collect()`, e o repositorio real exige um
+    `AsyncSession` de verdade."""
+
+    def __init__(self, session: object) -> None:
+        del session
+
+    async def list_for_instance(self, instance_id):  # noqa: ANN001, ANN201 - fake
+        del instance_id
+        return []
+
+
 def _build_result(instance_id) -> CollectionResult:  # noqa: ANN001 - fake
     from datetime import UTC, datetime
 
@@ -226,6 +239,9 @@ def _make_supervisor(
         transaction_events_repository_factory=_FakeTransactionEventsRepository,
         blocking_incidents_repository_factory=_FakeBlockingIncidentsRepository,
         system_settings_repository_factory=_FakeSystemSettingsRepository,
+        instance_database_sleeping_overrides_repository_factory=(
+            _FakeInstanceDatabaseSleepingOverridesRepository
+        ),
         collector_factory=collector_factory or _FakeCollector,
         **kwargs,
     )

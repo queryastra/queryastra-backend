@@ -63,8 +63,9 @@ def test_map_wait_event_sqlserver(native_value: str, expected: WaitCategory) -> 
 
 
 def test_map_wait_event_unknown_engine_raises() -> None:
+    # Oracle passou a ser suportado (wait classes de V$SESSION) — usa um engine que nao existe.
     with pytest.raises(ValueError):
-        map_wait_event("oracle", "whatever")
+        map_wait_event("sybase", "whatever")
 
 
 @pytest.mark.parametrize(
