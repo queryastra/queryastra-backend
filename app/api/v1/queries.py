@@ -34,7 +34,8 @@ decomposta por wait nativo — mesmo padrao de "Bancos de dados", nao de "Waits"
 /users/{instance_id}`, `GET /users-by-day/{instance_id}`, `GET /users-by-hour/{instance_id}`.
 
 "Fatia de Tempo" (drill-down temporal fino DENTRO de uma janela ja estreita, equivalente ao
-"Timeslice" de ferramentas de monitoramento): `GET /timeslice/{instance_id}?dimension=X&bucket=Y` — um unico
+"Timeslice" de ferramentas de monitoramento): `GET /timeslice/{instance_id}?dimension=X&bucket=Y`
+— um unico
 endpoint parametrizado (`dimension`: database/sql/wait_type/db_user; `bucket`: ten_minutes/
 minute/ten_seconds/second), generalizando os `wait_time_by_bucket_and_*` ja existentes em vez de
 multiplicar rotas. O nivel folha (lista de queries num segundo especifico) reusa `GET /top-sql/
@@ -52,14 +53,20 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import PlanService, check_instance_access, get_db_session, get_plan_service, resolve_time_window
+from app.api.deps import (
+    PlanService,
+    check_instance_access,
+    get_db_session,
+    get_plan_service,
+    resolve_time_window,
+)
 from app.core.config import get_settings
+from app.repositories.ai_api_key_repository import AiApiKeyRepository
 from app.repositories.instances_repository import InstancesRepository
 from app.repositories.query_plan_snapshots_repository import QueryPlanSnapshotsRepository
 from app.repositories.query_samples_repository import QuerySamplesRepository
 from app.repositories.system_settings_repository import SystemSettingsRepository
 from app.security.credential_reference import CredentialResolver
-from app.repositories.ai_api_key_repository import AiApiKeyRepository
 from app.services.ai_advisor import AiAdvisor, MultiKeyAiAdvisor
 from app.services.execution_plan_service import fetch_execution_plan
 from app.services.plan_advisor import analyze_plan_by_format
@@ -1069,7 +1076,8 @@ async def list_timeslice(
     machine: Annotated[str | None, Query()] = None,
 ) -> list[BucketEntryResponse]:
     """ "Fatia de Tempo" — drill-down temporal fino DENTRO de uma janela já estreita (uma hora, um
-    intervalo de 10min, etc.). Generaliza os 4 `wait_time_by_bucket_and_*` já existentes (que hoje só
+    intervalo de 10min, etc.). Generaliza os 4 `wait_time_by_bucket_and_*` já existentes (que hoje
+    só
     aceitavam `bucket="day"/"hour"`) pras 4 granularidades sub-hora — um único endpoint com
     `dimension`/`bucket` como parâmetro, em vez de 16 rotas (`4 dimensões × 4 granularidades`).
 
@@ -1379,11 +1387,14 @@ async def get_query_recommendations(
 
     # Busca amostra para obter sql_text_masked e db_type.
     # Fallback: se não houver amostras na janela solicitada (ex.: query de ontem vista com filtro
-    # "última hora"), busca nos últimos 30 dias para conseguir o texto SQL e ainda gerar diagnóstico.
+    # "última hora"), busca nos últimos 30 dias para conseguir o texto SQL e ainda gerar
+    # diagnóstico.
     rows = await repository.query_detail(instance_id, sql_hash, resolved_since, resolved_until, 1)
     if not rows:
         fallback_since = datetime.now(UTC) - timedelta(days=30)
-        rows = await repository.query_detail(instance_id, sql_hash, fallback_since, datetime.now(UTC), 1)
+        rows = await repository.query_detail(
+            instance_id, sql_hash, fallback_since, datetime.now(UTC), 1
+        )
     if not rows:
         return RecommendationsResponse(
             sql_findings=[],

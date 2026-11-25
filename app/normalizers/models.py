@@ -19,7 +19,17 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.normalizers.wait_taxonomy import WaitCategory
 
-EngineType = Literal["postgresql", "sqlserver", "mysql", "cockroachdb", "aurora_postgresql", "aurora_mysql", "oracle", "db2", "redshift"]
+EngineType = Literal[
+    "postgresql",
+    "sqlserver",
+    "mysql",
+    "cockroachdb",
+    "aurora_postgresql",
+    "aurora_mysql",
+    "oracle",
+    "db2",
+    "redshift",
+]
 TargetType = Literal["server", "instance"]
 
 

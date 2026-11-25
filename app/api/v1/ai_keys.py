@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import date
-from typing import Annotated, Sequence
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
@@ -23,6 +23,7 @@ router = APIRouter()
 
 
 # ── schemas ───────────────────────────────────────────────────────────────────
+
 
 class AiApiKeyResponse(BaseModel):
     id: uuid.UUID
@@ -70,6 +71,7 @@ class AiApiKeyUpdateRequest(BaseModel):
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
+
 def _to_response(row: AiApiKey) -> AiApiKeyResponse:
     return AiApiKeyResponse(
         id=row.id,
@@ -98,6 +100,7 @@ async def _get_or_404(repo: AiApiKeyRepository, key_id: uuid.UUID) -> AiApiKey:
 
 # ── endpoints ─────────────────────────────────────────────────────────────────
 
+
 @router.get("", response_model=list[AiApiKeyResponse], dependencies=[Depends(require_admin)])
 async def list_ai_keys(
     session: Annotated[AsyncSession, Depends(get_db_session)],
@@ -107,8 +110,12 @@ async def list_ai_keys(
     return [_to_response(r) for r in rows]
 
 
-@router.post("", response_model=AiApiKeyResponse, status_code=status.HTTP_201_CREATED,
-             dependencies=[Depends(require_admin)])
+@router.post(
+    "",
+    response_model=AiApiKeyResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_admin)],
+)
 async def create_ai_key(
     body: AiApiKeyCreateRequest,
     session: Annotated[AsyncSession, Depends(get_db_session)],
@@ -152,8 +159,9 @@ async def update_ai_key(
     return _to_response(row)
 
 
-@router.delete("/{key_id}", status_code=status.HTTP_204_NO_CONTENT,
-               dependencies=[Depends(require_admin)])
+@router.delete(
+    "/{key_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_admin)]
+)
 async def delete_ai_key(
     key_id: uuid.UUID,
     session: Annotated[AsyncSession, Depends(get_db_session)],
@@ -163,8 +171,9 @@ async def delete_ai_key(
     await repo.delete(row)
 
 
-@router.post("/{key_id}/reset-tokens", response_model=AiApiKeyResponse,
-             dependencies=[Depends(require_admin)])
+@router.post(
+    "/{key_id}/reset-tokens", response_model=AiApiKeyResponse, dependencies=[Depends(require_admin)]
+)
 async def reset_ai_key_tokens(
     key_id: uuid.UUID,
     session: Annotated[AsyncSession, Depends(get_db_session)],
@@ -175,8 +184,9 @@ async def reset_ai_key_tokens(
     return _to_response(row)
 
 
-@router.post("/{key_id}/reset-error", response_model=AiApiKeyResponse,
-             dependencies=[Depends(require_admin)])
+@router.post(
+    "/{key_id}/reset-error", response_model=AiApiKeyResponse, dependencies=[Depends(require_admin)]
+)
 async def reset_ai_key_error(
     key_id: uuid.UUID,
     session: Annotated[AsyncSession, Depends(get_db_session)],

@@ -1,4 +1,4 @@
-﻿"""Worker de relatorios agendados â€" executa relatorios cujo `next_run_at` venceu.
+"""Worker de relatorios agendados â€" executa relatorios cujo `next_run_at` venceu.
 
 Padrao identico aos demais workers deste projeto (MissingIndexSupervisor, BackupStatusSupervisor,
 etc.): construtor recebe `(async_session_factory, check_interval_seconds)`, expoe `.run()` e
@@ -158,8 +158,7 @@ class ReportWorker:
             recipients=list(report.email_recipients),
             subject=f"[QueryAstra] {report.title}",
             text_body=(
-                f"Relatório gerado automaticamente: {report.title}"
-                f"\nInstância: {report.instance_id}"
+                f"Relatório gerado automaticamente: {report.title}\nInstância: {report.instance_id}"
             ),
             attachments=[EmailAttachment(filename, pdf_bytes, "application/pdf")],
         )

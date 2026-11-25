@@ -29,7 +29,6 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import sqlalchemy as sa
-
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.collectors.base import Collector
@@ -47,10 +46,17 @@ from app.security.credential_reference import (
 logger = get_logger(__name__)
 
 # DB types que usam explain_queries() em vez de scan_plan_history()
-_EXPLAIN_BASED_TYPES = frozenset({
-    "postgresql", "mysql", "oracle", "cockroachdb",
-    "aurora_postgresql", "aurora_mysql", "redshift",
-})
+_EXPLAIN_BASED_TYPES = frozenset(
+    {
+        "postgresql",
+        "mysql",
+        "oracle",
+        "cockroachdb",
+        "aurora_postgresql",
+        "aurora_mysql",
+        "redshift",
+    }
+)
 
 _CollectorFactory = Callable[..., Collector]
 _InstancesRepositoryFactory = Callable[[AsyncSession], InstancesRepository]

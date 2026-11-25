@@ -141,7 +141,9 @@ async def get_vacuum_stats(
     )
 
 
-@router.get("/{instance_id}/idle-in-transaction", response_model=list[IdleInTransactionSessionResponse])
+@router.get(
+    "/{instance_id}/idle-in-transaction", response_model=list[IdleInTransactionSessionResponse]
+)
 async def get_idle_in_transaction(
     instance_id: UUID,
     _access: Annotated[None, Depends(check_instance_access)],

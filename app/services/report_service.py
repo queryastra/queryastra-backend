@@ -9,11 +9,10 @@ Tres tipos de relatorio:
 from __future__ import annotations
 
 import io
+import pathlib
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
-
-import pathlib
 
 import sqlalchemy as sa
 from reportlab.lib import colors
@@ -22,18 +21,20 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
 from reportlab.platypus import (
     Image as RLImage,
+)
+from reportlab.platypus import (
     Paragraph,
     SimpleDocTemplate,
     Spacer,
     Table,
     TableStyle,
 )
-
-_ASSETS_DIR = pathlib.Path(__file__).parent.parent / "assets"
-_LOGO_PNG = _ASSETS_DIR / "logo-planet-128.png"
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.instance import Instance
+
+_ASSETS_DIR = pathlib.Path(__file__).parent.parent / "assets"
+_LOGO_PNG = _ASSETS_DIR / "logo-planet-128.png"
 
 _STYLES = getSampleStyleSheet()
 _TITLE_STYLE = ParagraphStyle(
@@ -144,13 +145,17 @@ def _build_header_table(report_title: str) -> Table:
         [[logo, Paragraph("QueryAstra", _BRAND_STYLE)]],
         colWidths=[logo_size + 0.1 * cm, 5 * cm],
     )
-    brand_cell.setStyle(TableStyle([
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 0),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-        ("TOPPADDING", (0, 0), (-1, -1), 0),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
-    ]))
+    brand_cell.setStyle(
+        TableStyle(
+            [
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                ("TOPPADDING", (0, 0), (-1, -1), 0),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+            ]
+        )
+    )
 
     title_para = Paragraph(report_title, _TITLE_STYLE)
 
@@ -158,14 +163,18 @@ def _build_header_table(report_title: str) -> Table:
         [[brand_cell, title_para]],
         colWidths=[6.5 * cm, 10.5 * cm],
     )
-    header.setStyle(TableStyle([
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 0),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-        ("TOPPADDING", (0, 0), (-1, -1), 0),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
-        ("LINEBELOW", (0, 0), (-1, 0), 1, _LOGO_PURPLE),
-    ]))
+    header.setStyle(
+        TableStyle(
+            [
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                ("TOPPADDING", (0, 0), (-1, -1), 0),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+                ("LINEBELOW", (0, 0), (-1, 0), 1, _LOGO_PURPLE),
+            ]
+        )
+    )
     return header
 
 
@@ -355,23 +364,26 @@ def _build_pdf(
     story.append(Spacer(1, 0.4 * cm))
 
     if not rows:
-        story.append(
-            Paragraph("No data found for the specified period.", _STYLES["Normal"])
-        )
+        story.append(Paragraph("No data found for the specified period.", _STYLES["Normal"]))
     elif report_type == "top_sql":
         story.append(Paragraph("Top SQL — Queries with Highest Wait Time", _SECTION_STYLE))
         header_style = ParagraphStyle(
-            "TblHdr", parent=_STYLES["Normal"],
-            fontSize=9, fontName="Helvetica-Bold", textColor=colors.white,
+            "TblHdr",
+            parent=_STYLES["Normal"],
+            fontSize=9,
+            fontName="Helvetica-Bold",
+            textColor=colors.white,
         )
-        data: list[list[Any]] = [[
-            Paragraph("#", header_style),
-            Paragraph("Query", header_style),
-            Paragraph("Database", header_style),
-            Paragraph("Total Wait", header_style),
-            Paragraph("Executions", header_style),
-            Paragraph("Dominant Wait", header_style),
-        ]]
+        data: list[list[Any]] = [
+            [
+                Paragraph("#", header_style),
+                Paragraph("Query", header_style),
+                Paragraph("Database", header_style),
+                Paragraph("Total Wait", header_style),
+                Paragraph("Executions", header_style),
+                Paragraph("Dominant Wait", header_style),
+            ]
+        ]
         sql_ids: list[str] = []
         for i, r in enumerate(rows, 1):
             sql_id = f"Q-{str(r['sql_hash'])[:8].upper()}"
@@ -399,9 +411,7 @@ def _build_pdf(
 
     elif report_type == "average_wait":
         story.append(Paragraph("Average Wait by Database", _SECTION_STYLE))
-        data = [
-            ["Database", "Samples", "Total Wait", "Avg Wait / Sample", "Dominant Wait"]
-        ]
+        data = [["Database", "Samples", "Total Wait", "Avg Wait / Sample", "Dominant Wait"]]
         for r in rows:
             data.append(
                 [
@@ -418,9 +428,7 @@ def _build_pdf(
         story.append(t)
 
     elif report_type == "typical_day":
-        story.append(
-            Paragraph("Typical Day — Wait Pattern by Hour of Day (UTC)", _SECTION_STYLE)
-        )
+        story.append(Paragraph("Typical Day — Wait Pattern by Hour of Day (UTC)", _SECTION_STYLE))
         by_hour = {int(r["hour_of_day"]): r for r in rows}
         data = [["Hour (UTC)", "Samples", "Total Wait", "Avg Wait / Sample", "Load"]]
         max_total = max((r["total_wait_ms"] or 0 for r in rows), default=1)

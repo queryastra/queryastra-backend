@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_session
 from app.repositories.system_license_repository import SystemLicenseRepository
 from app.services.auth_service import decode_token
-from app.services.plan_service import PlanConfig, PlanService
+from app.services.plan_service import PlanService
 
 DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 500

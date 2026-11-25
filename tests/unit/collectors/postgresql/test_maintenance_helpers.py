@@ -31,8 +31,14 @@ NOW = datetime(2026, 11, 10, 12, 0, tzinfo=UTC)
 
 
 def _idx(name: str, keys: tuple[str, ...], **kw) -> IndexDef:
-    return IndexDef(table_key="public.t", name=name, method=kw.pop("method", "btree"), keys=keys,
-                    extra={"schema_name": "public", "table_name": "t"}, **kw)
+    return IndexDef(
+        table_key="public.t",
+        name=name,
+        method=kw.pop("method", "btree"),
+        keys=keys,
+        extra={"schema_name": "public", "table_name": "t"},
+        **kw,
+    )
 
 
 # ── quoting / severities ─────────────────────────────────────────────────────
@@ -65,9 +71,14 @@ def test_analyze_threshold_honors_reloptions() -> None:
 
 def test_classify_statistics_stale_over_threshold() -> None:
     info = classify_statistics(
-        n_live_tup=1000, reltuples=1000, n_mod_since_analyze=600,
-        last_updated=NOW - timedelta(days=3), reloptions=None,
-        scale_factor=0.1, base_threshold=50, now=NOW,
+        n_live_tup=1000,
+        reltuples=1000,
+        n_mod_since_analyze=600,
+        last_updated=NOW - timedelta(days=3),
+        reloptions=None,
+        scale_factor=0.1,
+        base_threshold=50,
+        now=NOW,
     )
     assert info["is_stale"] is True
     assert info["severity"] == "critical"
@@ -77,8 +88,14 @@ def test_classify_statistics_stale_over_threshold() -> None:
 
 def test_classify_statistics_never_analyzed() -> None:
     info = classify_statistics(
-        n_live_tup=5000, reltuples=-1, n_mod_since_analyze=5000, last_updated=None,
-        reloptions=None, scale_factor=0.1, base_threshold=50, now=NOW,
+        n_live_tup=5000,
+        reltuples=-1,
+        n_mod_since_analyze=5000,
+        last_updated=None,
+        reloptions=None,
+        scale_factor=0.1,
+        base_threshold=50,
+        now=NOW,
     )
     assert info["is_stale"] and info["severity"] == "warning"
     assert info["detail"]["never_analyzed"] is True
@@ -86,15 +103,22 @@ def test_classify_statistics_never_analyzed() -> None:
 
 def test_classify_statistics_fresh() -> None:
     info = classify_statistics(
-        n_live_tup=1000, reltuples=1000, n_mod_since_analyze=10, last_updated=NOW,
-        reloptions=None, scale_factor=0.1, base_threshold=50, now=NOW,
+        n_live_tup=1000,
+        reltuples=1000,
+        n_mod_since_analyze=10,
+        last_updated=NOW,
+        reloptions=None,
+        scale_factor=0.1,
+        base_threshold=50,
+        now=NOW,
     )
     assert not info["is_stale"] and info["severity"] == "info"
 
 
 def test_usage_notes() -> None:
     assert usage_notes(NOW - timedelta(days=1), True, NOW) == [
-        "usage_stats_since_restart", "usage_stats_recent",
+        "usage_stats_since_restart",
+        "usage_stats_recent",
     ]
     assert usage_notes(NOW - timedelta(days=30), False, NOW) == []
 
@@ -165,11 +189,13 @@ def test_redundant_items_build_drop_command() -> None:
 
 def test_parse_range_bound() -> None:
     assert parse_range_bound("FOR VALUES FROM ('2026-01-01') TO ('2026-02-01')") == (
-        "2026-01-01", "2026-02-01",
+        "2026-01-01",
+        "2026-02-01",
     )
     assert parse_range_bound("FOR VALUES FROM (1, 'x') TO (100, 'y')") == ("1", "100")
     assert parse_range_bound("FOR VALUES FROM (MINVALUE) TO (MAXVALUE)") == (
-        "MINVALUE", "MAXVALUE",
+        "MINVALUE",
+        "MAXVALUE",
     )
     assert parse_range_bound("FOR VALUES FROM ('it''s') TO ('z')") == ("it's", "z")
     assert parse_range_bound(None) == (None, None)
@@ -244,27 +270,84 @@ def test_summarize_toast_columns() -> None:
 
 def test_crdb_index_defs_and_redundancy() -> None:
     idx_rows = [
-        {"table_id": 1, "schema_name": "public", "table_name": "t", "index_id": 1,
-         "index_name": "t_pkey", "index_type": "primary", "is_unique": True,
-         "is_inverted": False, "total_reads": 10, "indexdef": "CREATE UNIQUE INDEX t_pkey"},
-        {"table_id": 1, "schema_name": "public", "table_name": "t", "index_id": 2,
-         "index_name": "t_a_idx", "index_type": "secondary", "is_unique": False,
-         "is_inverted": False, "total_reads": 0, "indexdef": "CREATE INDEX t_a_idx"},
-        {"table_id": 1, "schema_name": "public", "table_name": "t", "index_id": 3,
-         "index_name": "t_a_b_idx", "index_type": "secondary", "is_unique": False,
-         "is_inverted": False, "total_reads": 3, "indexdef": "CREATE INDEX t_a_b_idx"},
+        {
+            "table_id": 1,
+            "schema_name": "public",
+            "table_name": "t",
+            "index_id": 1,
+            "index_name": "t_pkey",
+            "index_type": "primary",
+            "is_unique": True,
+            "is_inverted": False,
+            "total_reads": 10,
+            "indexdef": "CREATE UNIQUE INDEX t_pkey",
+        },
+        {
+            "table_id": 1,
+            "schema_name": "public",
+            "table_name": "t",
+            "index_id": 2,
+            "index_name": "t_a_idx",
+            "index_type": "secondary",
+            "is_unique": False,
+            "is_inverted": False,
+            "total_reads": 0,
+            "indexdef": "CREATE INDEX t_a_idx",
+        },
+        {
+            "table_id": 1,
+            "schema_name": "public",
+            "table_name": "t",
+            "index_id": 3,
+            "index_name": "t_a_b_idx",
+            "index_type": "secondary",
+            "is_unique": False,
+            "is_inverted": False,
+            "total_reads": 3,
+            "indexdef": "CREATE INDEX t_a_b_idx",
+        },
     ]
     col_rows = [
-        {"table_id": 1, "index_id": 1, "column_type": "key", "column_name": "id",
-         "column_direction": "ASC", "implicit": False},
-        {"table_id": 1, "index_id": 2, "column_type": "key", "column_name": "a",
-         "column_direction": "ASC", "implicit": False},
-        {"table_id": 1, "index_id": 2, "column_type": "extra", "column_name": "id",
-         "column_direction": None, "implicit": False},
-        {"table_id": 1, "index_id": 3, "column_type": "key", "column_name": "a",
-         "column_direction": "ASC", "implicit": False},
-        {"table_id": 1, "index_id": 3, "column_type": "key", "column_name": "b",
-         "column_direction": "ASC", "implicit": False},
+        {
+            "table_id": 1,
+            "index_id": 1,
+            "column_type": "key",
+            "column_name": "id",
+            "column_direction": "ASC",
+            "implicit": False,
+        },
+        {
+            "table_id": 1,
+            "index_id": 2,
+            "column_type": "key",
+            "column_name": "a",
+            "column_direction": "ASC",
+            "implicit": False,
+        },
+        {
+            "table_id": 1,
+            "index_id": 2,
+            "column_type": "extra",
+            "column_name": "id",
+            "column_direction": None,
+            "implicit": False,
+        },
+        {
+            "table_id": 1,
+            "index_id": 3,
+            "column_type": "key",
+            "column_name": "a",
+            "column_direction": "ASC",
+            "implicit": False,
+        },
+        {
+            "table_id": 1,
+            "index_id": 3,
+            "column_type": "key",
+            "column_name": "b",
+            "column_direction": "ASC",
+            "implicit": False,
+        },
     ]
     defs = build_crdb_index_defs(idx_rows, col_rows)
     assert {d.name: d.keys for d in defs}["t_a_idx"] == ("a:ASC",)
@@ -280,13 +363,36 @@ def test_crdb_statistics_classification() -> None:
 
 def test_crdb_statement_aggregation() -> None:
     rows = [
-        {"fingerprint": "f1", "query": "SELECT 1", "database_name": "d", "executions": 10,
-         "sampled": 2, "mem_mean": 1000.0, "disk_mean": 0.0, "aggregated_ts": NOW},
-        {"fingerprint": "f1", "query": "SELECT 1", "database_name": "d", "executions": 5,
-         "sampled": 2, "mem_mean": 3000.0, "disk_mean": 2048.0,
-         "aggregated_ts": NOW - timedelta(hours=1)},
-        {"fingerprint": "f2", "query": "SELECT 2", "database_name": "d", "executions": 1,
-         "sampled": 0, "mem_mean": None, "disk_mean": None, "aggregated_ts": NOW},
+        {
+            "fingerprint": "f1",
+            "query": "SELECT 1",
+            "database_name": "d",
+            "executions": 10,
+            "sampled": 2,
+            "mem_mean": 1000.0,
+            "disk_mean": 0.0,
+            "aggregated_ts": NOW,
+        },
+        {
+            "fingerprint": "f1",
+            "query": "SELECT 1",
+            "database_name": "d",
+            "executions": 5,
+            "sampled": 2,
+            "mem_mean": 3000.0,
+            "disk_mean": 2048.0,
+            "aggregated_ts": NOW - timedelta(hours=1),
+        },
+        {
+            "fingerprint": "f2",
+            "query": "SELECT 2",
+            "database_name": "d",
+            "executions": 1,
+            "sampled": 0,
+            "mem_mean": None,
+            "disk_mean": None,
+            "aggregated_ts": NOW,
+        },
     ]
     [agg] = aggregate_crdb_statements(rows)
     assert agg["executions"] == 15 and agg["mem_max"] == 3000.0 and agg["mem_avg"] == 2000.0
@@ -295,12 +401,26 @@ def test_crdb_statement_aggregation() -> None:
 
 def test_crdb_partitions_grouping() -> None:
     rows = [
-        {"schema_name": "public", "table_name": "t", "index_name": "t_pkey",
-         "index_type": "primary", "partition_name": "p1", "column_names": "k",
-         "list_value": None, "range_value": "(1) TO (10)"},
-        {"schema_name": "public", "table_name": "t", "index_name": "t_pkey",
-         "index_type": "primary", "partition_name": "p2", "column_names": "k",
-         "list_value": None, "range_value": "(10) TO (MAXVALUE)"},
+        {
+            "schema_name": "public",
+            "table_name": "t",
+            "index_name": "t_pkey",
+            "index_type": "primary",
+            "partition_name": "p1",
+            "column_names": "k",
+            "list_value": None,
+            "range_value": "(1) TO (10)",
+        },
+        {
+            "schema_name": "public",
+            "table_name": "t",
+            "index_name": "t_pkey",
+            "index_type": "primary",
+            "partition_name": "p2",
+            "column_names": "k",
+            "list_value": None,
+            "range_value": "(10) TO (MAXVALUE)",
+        },
     ]
     [item] = group_crdb_partitions(rows, "db")
     assert item.partition_method == "RANGE" and item.partition_count == 2
@@ -319,10 +439,20 @@ def test_redshift_stats_off_classification() -> None:
 
 def test_redshift_disk_based_aggregation() -> None:
     rows = [
-        {"querytxt": "select * from t where id = 1", "database_name": "dev",
-         "max_workmem": 2048, "diskbased_steps": 2, "starttime": NOW},
-        {"querytxt": "select * from t where id = 2", "database_name": "dev",
-         "max_workmem": 4096, "diskbased_steps": 1, "starttime": NOW - timedelta(hours=1)},
+        {
+            "querytxt": "select * from t where id = 1",
+            "database_name": "dev",
+            "max_workmem": 2048,
+            "diskbased_steps": 2,
+            "starttime": NOW,
+        },
+        {
+            "querytxt": "select * from t where id = 2",
+            "database_name": "dev",
+            "max_workmem": 4096,
+            "diskbased_steps": 1,
+            "starttime": NOW - timedelta(hours=1),
+        },
     ]
     [agg] = aggregate_disk_based(rows)  # mesmo sql_hash (literais mascarados)
     assert agg["executions"] == 2 and agg["steps"] == 3 and agg["workmem_max"] == 4096

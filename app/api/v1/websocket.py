@@ -40,6 +40,7 @@ router = APIRouter()
 
 _ACCESS_REFRESH_SECONDS = 30.0
 
+
 async def load_active_user(user_id: int) -> CurrentUser | None:
     """Usuario ATIVO atual do banco (papel do banco, nao o do token — rebaixar um admin vale ja na
     reconexao). Funcao de modulo para os testes poderem substitui-la (monkeypatch)."""
@@ -121,8 +122,8 @@ async def live_updates(websocket: WebSocket) -> None:
     async def forward_events() -> None:
         while True:
             event = await queue.get()
-            needs_access = (
-                event.get("type") != "notification_created" and bool(event.get("instance_id"))
+            needs_access = event.get("type") != "notification_created" and bool(
+                event.get("instance_id")
             )
             accessible = await access.get() if needs_access else None
             if event_visible_to(event, active_user, accessible):

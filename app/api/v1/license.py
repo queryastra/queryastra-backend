@@ -16,7 +16,13 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import CurrentUser, get_current_user, get_db_session, get_plan_service, require_admin
+from app.api.deps import (
+    CurrentUser,
+    get_current_user,
+    get_db_session,
+    get_plan_service,
+    require_admin,
+)
 from app.core.config import get_settings
 from app.repositories.instances_repository import InstancesRepository
 from app.repositories.system_license_repository import SystemLicenseRepository
@@ -86,7 +92,9 @@ async def get_billing_portal(
             json={"license_key": row.license_key, "return_url": return_url},
         )
     if resp.status_code == 404:
-        raise HTTPException(status_code=404, detail="Licença não encontrada no servidor de licenças.")
+        raise HTTPException(
+            status_code=404, detail="Licença não encontrada no servidor de licenças."
+        )
     if not resp.is_success:
         raise HTTPException(status_code=502, detail="Erro ao criar sessão do portal Stripe.")
 
@@ -125,7 +133,10 @@ async def activate_license(
     if not _KEY_RE.match(key):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Formato de chave inválido. Use QAP-XXXX-XXXX-XXXX-XXXX (Pro) ou QAT-XXXX-XXXX-XXXX-XXXX (Team).",
+            detail=(
+                "Formato de chave inválido. Use QAP-XXXX-XXXX-XXXX-XXXX (Pro) ou "
+                "QAT-XXXX-XXXX-XXXX-XXXX (Team)."
+            ),
         )
 
     prefix = key[:3]

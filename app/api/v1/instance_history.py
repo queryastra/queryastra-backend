@@ -113,9 +113,7 @@ async def get_slow_queries(
         )
         for r in rows
     ]
-    return SlowQueriesResponse(
-        since=since, until=until, days=days, order_by=order_by, items=items
-    )
+    return SlowQueriesResponse(since=since, until=until, days=days, order_by=order_by, items=items)
 
 
 # ── Regressions ───────────────────────────────────────────────────────────────

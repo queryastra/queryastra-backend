@@ -29,9 +29,7 @@ from app.core.logging import get_logger
 logger = get_logger(__name__)
 
 APP_VERSION = "0.2.0"
-_GITHUB_RELEASES_URL = (
-    "https://api.github.com/repos/queryastra/queryastra-backend/releases/latest"
-)
+_GITHUB_RELEASES_URL = "https://api.github.com/repos/queryastra/queryastra-backend/releases/latest"
 _REQUEST_TIMEOUT = 15.0
 
 
@@ -82,9 +80,7 @@ class UpdateChecker:
     async def _check(self) -> None:
         global _current_status  # noqa: PLW0603
         try:
-            async with httpx.AsyncClient(
-                timeout=_REQUEST_TIMEOUT, follow_redirects=True
-            ) as client:
+            async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT, follow_redirects=True) as client:
                 resp = await client.get(
                     _GITHUB_RELEASES_URL,
                     headers={
@@ -112,9 +108,7 @@ class UpdateChecker:
                 check_error=None,
             )
             if update_available:
-                logger.info(
-                    "Atualizacao disponivel: %s -> %s", APP_VERSION, latest_tag
-                )
+                logger.info("Atualizacao disponivel: %s -> %s", APP_VERSION, latest_tag)
             else:
                 logger.info("Versao atual (%s) esta atualizada", APP_VERSION)
         except Exception as exc:  # noqa: BLE001
@@ -131,9 +125,7 @@ class UpdateChecker:
 
 def _pick_asset(assets: list[dict]) -> str | None:
     """Retorna a URL de download do asset correspondente ao OS atual."""
-    os_key = {"Windows": "windows", "Linux": "linux", "Darwin": "macos"}.get(
-        platform.system(), ""
-    )
+    os_key = {"Windows": "windows", "Linux": "linux", "Darwin": "macos"}.get(platform.system(), "")
     for asset in assets:
         name: str = asset.get("name", "").lower()
         if os_key and os_key in name:

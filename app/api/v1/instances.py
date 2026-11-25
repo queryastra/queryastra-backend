@@ -15,7 +15,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import (
     CurrentUser,
-    PlanConfig,
     PlanService,
     check_instance_access,
     get_current_user,
@@ -65,7 +64,9 @@ class InstanceCreateRequest(BaseModel):
     """
 
     name: str
-    db_type: str = Field(pattern="^(postgresql|sqlserver|mysql|cockroachdb|aurora_postgresql|aurora_mysql|oracle|db2|redshift)$")
+    db_type: str = Field(
+        pattern="^(postgresql|sqlserver|mysql|cockroachdb|aurora_postgresql|aurora_mysql|oracle|db2|redshift)$"
+    )
     host: str
     port: int
     cloud_provider: str | None = Field(default=None, pattern="^(aws_rds|azure|gcp)$")
@@ -287,7 +288,8 @@ async def create_instance(
             raise HTTPException(
                 status_code=status.HTTP_402_PAYMENT_REQUIRED,
                 detail=(
-                    f"Limite do plano atingido: o plano atual permite até {effective.max_instances} instância(s). "
+                    "Limite do plano atingido: o plano atual permite até "
+                    f"{effective.max_instances} instância(s). "
                     "Acesse Settings → License para fazer upgrade."
                 ),
             )

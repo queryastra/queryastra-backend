@@ -58,7 +58,7 @@ class BlockingTreeNodeResponse(BaseModel):
     um bloqueador puro, incluindo o caso "ocioso" sem request ativa). `caused_ms` e a soma
     recursiva de `waited_ms` de toda a subarvore de descendentes — quanto tempo, no total, essa
     sessao e responsavel por travar por baixo dela.
-"""
+    """
 
     session_id: str
     sql_hash: str | None

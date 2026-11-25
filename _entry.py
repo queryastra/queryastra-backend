@@ -1,4 +1,5 @@
 """PyInstaller entry point — wraps uvicorn programmatically so the frozen executable works."""
+
 import multiprocessing
 import sys
 

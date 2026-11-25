@@ -36,12 +36,8 @@ def upgrade() -> None:
         )
     """)
     op.execute("SELECT create_hypertable('query_stats_snapshot', 'time')")
-    op.execute(
-        "CREATE INDEX ON query_stats_snapshot (instance_id, queryid, time DESC)"
-    )
-    op.execute(
-        "SELECT add_retention_policy('query_stats_snapshot', INTERVAL '30 days')"
-    )
+    op.execute("CREATE INDEX ON query_stats_snapshot (instance_id, queryid, time DESC)")
+    op.execute("SELECT add_retention_policy('query_stats_snapshot', INTERVAL '30 days')")
 
 
 def downgrade() -> None:

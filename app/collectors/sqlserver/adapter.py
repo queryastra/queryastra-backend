@@ -1302,7 +1302,8 @@ _SS_CONNECTION_CONSUMERS_QUERY = """
         COUNT(*)                           AS total,
         SUM(CASE WHEN s.status = 'running' THEN 1 ELSE 0 END)  AS active,
         SUM(CASE WHEN s.status = 'sleeping'
-                  AND (r.session_id IS NULL OR r.blocking_session_id = 0) THEN 1 ELSE 0 END) AS idle,
+                  AND (r.session_id IS NULL OR r.blocking_session_id = 0) THEN 1 ELSE 0 END) AS
+                  idle,
         SUM(CASE WHEN s.open_transaction_count > 0
                   AND s.status = 'sleeping' THEN 1 ELSE 0 END) AS idle_in_transaction,
         SUM(CASE WHEN r.blocking_session_id > 0 THEN 1 ELSE 0 END) AS waiting
@@ -1315,7 +1316,9 @@ _SS_CONNECTION_CONSUMERS_QUERY = """
 """
 
 
-def _evaluate_ss_config_param(name: str, setting: str, description: str) -> NormalizedConfigComplianceItem:
+def _evaluate_ss_config_param(
+    name: str, setting: str, description: str
+) -> NormalizedConfigComplianceItem:
     """Avalia um parametro do sys.configurations e retorna item de compliance SQL Server."""
     try:
         v = float(setting)
@@ -1326,22 +1329,52 @@ def _evaluate_ss_config_param(name: str, setting: str, description: str) -> Norm
 
     if name == "max degree of parallelism":
         status = "error" if v == 0 else ("warn" if v and v > 16 else "ok")
-        rules[name] = ("1 – num_vcpus/2", "0 permite paralelismo irrestrito — pode saturar CPUs em queries longas e prejudicar workloads OLTP concorrentes.", status)
+        rules[name] = (
+            "1 – num_vcpus/2",
+            "0 permite paralelismo irrestrito — pode saturar CPUs em queries longas e "
+            "prejudicar workloads OLTP concorrentes.",
+            status,
+        )
     elif name == "cost threshold for parallelism":
         status = "warn" if v is not None and v < 25 else "ok"
-        rules[name] = ("25 – 50", "O padrao (5) faz o planner paralelizar queries simples desnecessariamente; 25-50 e mais adequado para OLTP.", status)
+        rules[name] = (
+            "25 – 50",
+            "O padrao (5) faz o planner paralelizar queries simples desnecessariamente; 25-50 e "
+            "mais adequado para OLTP.",
+            status,
+        )
     elif name == "optimize for ad hoc workloads":
         status = "error" if v == 0 else "ok"
-        rules[name] = ("1 (habilitado)", "Desabilitado (0) faz o plan cache guardar planos completos de single-use queries, inflando a memoria.", status)
+        rules[name] = (
+            "1 (habilitado)",
+            "Desabilitado (0) faz o plan cache guardar planos completos de single-use queries, "
+            "inflando a memoria.",
+            status,
+        )
     elif name == "max server memory (MB)":
         status = "warn" if v is not None and v >= 2147483647 else "ok"
-        rules[name] = ("RAM total - 4 GB (mínimo)", "Sem limite (2147483647) — o SQL Server pode consumir toda a RAM e causar paginacao do OS.", status)
+        rules[name] = (
+            "RAM total - 4 GB (mínimo)",
+            "Sem limite (2147483647) — o SQL Server pode consumir toda a RAM e causar paginacao "
+            "do OS.",
+            status,
+        )
     elif name == "fill factor (%)":
         status = "warn" if v == 0 or v == 100 else "ok"
-        rules[name] = ("70 – 90", "0 ou 100 = paginas de indice 100% cheias; inserts futuras causam page splits e fragmentacao.", status)
+        rules[name] = (
+            "70 – 90",
+            "0 ou 100 = paginas de indice 100% cheias; inserts futuras causam page splits e "
+            "fragmentacao.",
+            status,
+        )
     elif name == "recovery interval (min)":
         status = "warn" if v is not None and v == 0 else "ok"
-        rules[name] = ("0 (auto)", "0 e o padrao automatico e e correto; valores altos aumentam tempo de recovery apos crash.", status)
+        rules[name] = (
+            "0 (auto)",
+            "0 e o padrao automatico e e correto; valores altos aumentam tempo de recovery apos "
+            "crash.",
+            status,
+        )
     else:
         status = "ok"
 
@@ -1380,7 +1413,10 @@ def _connect_and_collect_config_compliance(
     finally:
         conn.close()
 
-    return [_evaluate_ss_config_param(r["name"], str(r["setting"]), str(r["description"] or "")) for r in rows]
+    return [
+        _evaluate_ss_config_param(r["name"], str(r["setting"]), str(r["description"] or ""))
+        for r in rows
+    ]
 
 
 def _connect_and_collect_connection_consumers(
@@ -1480,10 +1516,12 @@ WHERE i1.is_disabled = 0 AND i2.is_disabled = 0
   AND i1.index_id > 0 AND i2.index_id > 0
   AND (SELECT STRING_AGG(CAST(ic1.column_id AS VARCHAR), ',')
        WITHIN GROUP (ORDER BY ic1.key_ordinal)
-       FROM sys.index_columns ic1 WHERE ic1.object_id = i1.object_id AND ic1.index_id = i1.index_id AND ic1.is_included_column = 0) =
+       FROM sys.index_columns ic1 WHERE ic1.object_id = i1.object_id AND ic1.index_id =
+       i1.index_id AND ic1.is_included_column = 0) =
       (SELECT STRING_AGG(CAST(ic2.column_id AS VARCHAR), ',')
        WITHIN GROUP (ORDER BY ic2.key_ordinal)
-       FROM sys.index_columns ic2 WHERE ic2.object_id = i2.object_id AND ic2.index_id = i2.index_id AND ic2.is_included_column = 0)
+       FROM sys.index_columns ic2 WHERE ic2.object_id = i2.object_id AND ic2.index_id =
+       i2.index_id AND ic2.is_included_column = 0)
 """
 
 _SS_FILE_IO_STATS_QUERY = """
@@ -1493,8 +1531,10 @@ SELECT DB_NAME(fs.database_id) AS database_name,
        fs.io_stall_write AS io_stall_write_ms,
        fs.num_of_reads,
        fs.num_of_writes,
-       CASE WHEN fs.num_of_reads > 0 THEN fs.io_stall_read * 1.0 / fs.num_of_reads ELSE 0 END AS avg_read_ms,
-       CASE WHEN fs.num_of_writes > 0 THEN fs.io_stall_write * 1.0 / fs.num_of_writes ELSE 0 END AS avg_write_ms
+       CASE WHEN fs.num_of_reads > 0 THEN fs.io_stall_read * 1.0 / fs.num_of_reads ELSE 0 END AS
+       avg_read_ms,
+       CASE WHEN fs.num_of_writes > 0 THEN fs.io_stall_write * 1.0 / fs.num_of_writes ELSE 0 END
+       AS avg_write_ms
 FROM sys.dm_io_virtual_file_stats(NULL, NULL) fs
 JOIN sys.master_files mf ON mf.database_id = fs.database_id AND mf.file_id = fs.file_id
 WHERE DB_NAME(fs.database_id) IS NOT NULL
@@ -2548,9 +2588,7 @@ def _build_transaction_events(
     prev_error_by_session_id = {str(row["session_id"]): row["prev_error"] for row in session_rows}
     active_session_ids = {str(row["session_id"]) for row in session_rows}
     machine_by_session_id = {
-        str(row["session_id"]): row["host_name"]
-        for row in all_session_rows
-        if row["host_name"]
+        str(row["session_id"]): row["host_name"] for row in all_session_rows if row["host_name"]
     }
     blocking_involved_transaction_ids = {
         tx_id
@@ -3332,7 +3370,9 @@ class SQLServerCollector(CollectorNoOpMixin):
 
     async def collect_buffer_cache_stats(
         self,
-    ) -> tuple[list[NormalizedBufferTableStats], list[NormalizedTempfileStats], list[NormalizedFileIoStats]]:
+    ) -> tuple[
+        list[NormalizedBufferTableStats], list[NormalizedTempfileStats], list[NormalizedFileIoStats]
+    ]:
         """File I/O stats — SQL Server only (on-demand). Buffer/tempfile fields are empty."""
         settings = get_settings()
         overall_timeout = (

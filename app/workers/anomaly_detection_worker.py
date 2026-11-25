@@ -103,9 +103,7 @@ def robust_center_spread(values: Sequence[float], abs_floor: float) -> tuple[flo
     return median, spread
 
 
-def select_baseline(
-    weekly: Sequence[float], daily: Sequence[float]
-) -> Baseline | None:
+def select_baseline(weekly: Sequence[float], daily: Sequence[float]) -> Baseline | None:
     if len(weekly) >= _MIN_WEEKLY_POINTS:
         return Baseline("same_hour_same_weekday", list(weekly))
     if len(daily) >= _MIN_DAILY_POINTS:

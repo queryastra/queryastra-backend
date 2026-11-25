@@ -19,10 +19,22 @@ from app.collectors.db2.maintenance import (
 
 def test_build_index_definitions_orders_keys_and_separates_includes() -> None:
     index_rows = [
-        {"indschema": "APP ", "indname": "IX1", "tabschema": "APP", "tabname": "T",
-         "uniquerule": "U", "indextype": "REG"},
-        {"indschema": "APP", "indname": "PK", "tabschema": "APP", "tabname": "T",
-         "uniquerule": "P", "indextype": None},
+        {
+            "indschema": "APP ",
+            "indname": "IX1",
+            "tabschema": "APP",
+            "tabname": "T",
+            "uniquerule": "U",
+            "indextype": "REG",
+        },
+        {
+            "indschema": "APP",
+            "indname": "PK",
+            "tabschema": "APP",
+            "tabname": "T",
+            "uniquerule": "P",
+            "indextype": None,
+        },
     ]
     column_rows = [
         {"indschema": "APP", "indname": "IX1", "colname": "B", "colseq": 2, "colorder": "D"},
@@ -92,7 +104,10 @@ def _part(seq: int, high: str, card: int) -> dict[str, object]:
 
 def test_partition_rows_in_maxvalue_tail_is_warning() -> None:
     info = build_db2_partition_info(
-        "DB", "APP", "T", "DT",
+        "DB",
+        "APP",
+        "T",
+        "DT",
         [_part(0, "'2026-01-01'", 10), _part(1, "'2026-02-01'", 20), _part(2, "MAXVALUE", 5)],
     )
     assert info.partition_count == 3

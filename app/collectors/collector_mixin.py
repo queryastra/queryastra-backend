@@ -83,9 +83,7 @@ class CollectorNoOpMixin:
     async def scan_plan_history(self) -> list[NormalizedPlanSnapshot]:
         return []
 
-    async def explain_queries(
-        self, queries: list[tuple[str, str]]
-    ) -> list[NormalizedPlanSnapshot]:
+    async def explain_queries(self, queries: list[tuple[str, str]]) -> list[NormalizedPlanSnapshot]:
         return []
 
     async def collect_vacuum_stats(
@@ -134,7 +132,9 @@ class CollectorNoOpMixin:
 
     async def collect_buffer_cache_stats(
         self,
-    ) -> tuple[list[NormalizedBufferTableStats], list[NormalizedTempfileStats], list[NormalizedFileIoStats]]:
+    ) -> tuple[
+        list[NormalizedBufferTableStats], list[NormalizedTempfileStats], list[NormalizedFileIoStats]
+    ]:
         return [], [], []
 
     async def explain_plan_for_hash(self, sql_text: str) -> dict | None:
@@ -143,7 +143,9 @@ class CollectorNoOpMixin:
     async def list_databases(self) -> list[str]:
         return []
 
-    async def collect_index_health(self, database: str | None = None) -> NormalizedIndexHealthReport:
+    async def collect_index_health(
+        self, database: str | None = None
+    ) -> NormalizedIndexHealthReport:
         return NormalizedIndexHealthReport(meta=NormalizedScanMeta(supported=False))
 
     async def collect_statistics_health(

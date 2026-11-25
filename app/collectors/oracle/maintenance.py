@@ -1,4 +1,4 @@
-﻿"""Varreduras de manutencao on-demand — Oracle Database.
+"""Varreduras de manutencao on-demand — Oracle Database.
 
 Escopo = o banco/PDB da conexao (`database_scope_current_only`). Usa as views DBA_* quando ha
 permissao (SELECT_CATALOG_ROLE) e cai para ALL_* (`permission_denied`) quando nao ha. Schemas
@@ -1020,8 +1020,8 @@ async def collect_partitions(conn: oracledb.AsyncConnection) -> NormalizedPartit
 
 
 async def collect_missing_index_suggestions(
-    conn: "oracledb.AsyncConnection", instance_id: "UUID | None"
-) -> "list[NormalizedMissingIndexSuggestion]":
+    conn: oracledb.AsyncConnection, instance_id: UUID | None
+) -> list[NormalizedMissingIndexSuggestion]:
     """Heuristica de indice ausente: tabelas sem nenhum indice com alto numero de linhas.
 
     Usa all_tables LEFT JOIN all_indexes. Nao indica coluna especifica — serve para
@@ -1029,11 +1029,12 @@ async def collect_missing_index_suggestions(
     if instance_id is None:
         return []
     from app.core.config import get_settings as _gs
+
     settings = _gs()
     timeout = settings.collection_query_timeout_seconds
     min_rows = 1000
     db_name = await current_service(conn, timeout)
-    v = await _dba_or_all(conn, timeout)
+    v = await view_prefix(conn, timeout)
     owners = await owner_filter(conn, timeout)
     rows = await try_fetch(
         conn,
@@ -1064,9 +1065,7 @@ async def collect_missing_index_suggestions(
                 instance_id=instance_id,
                 database_name=db_name,
                 table_name=f"{owner}.{table}",
-                suggestion=(
-                    f"Tabela sem nenhum indice com {num_rows:,} linhas: {owner}.{table}"
-                ),
+                suggestion=(f"Tabela sem nenhum indice com {num_rows:,} linhas: {owner}.{table}"),
                 impact_score=float(num_rows),
                 detail={"num_rows": num_rows, "source": f"{v}_tables", "owner": owner},
             )
@@ -1075,10 +1074,11 @@ async def collect_missing_index_suggestions(
 
 
 async def get_engine_start_time(
-    conn: "oracledb.AsyncConnection",
-) -> "datetime | None":
+    conn: oracledb.AsyncConnection,
+) -> datetime | None:
     """Hora de startup da instancia Oracle via v$instance.startup_time."""
     from app.core.config import get_settings as _gs
+
     timeout = _gs().collection_query_timeout_seconds
     rows = await try_fetch(conn, "SELECT startup_time FROM v$instance", timeout=timeout)
     if rows and rows[0].get("startup_time"):

@@ -106,7 +106,9 @@ class CockroachDBCollector(PostgreSQLBackedCollector):
             results.append(
                 CapabilityResult(
                     capability=POSTGRESQL_SESSION_ACTIVITY,
-                    status=CapabilityStatus.FULL if has_session_activity else CapabilityStatus.UNAVAILABLE,
+                    status=CapabilityStatus.FULL
+                    if has_session_activity
+                    else CapabilityStatus.UNAVAILABLE,
                     reason=session_reason,
                 )
             )
@@ -127,7 +129,8 @@ class CockroachDBCollector(PostgreSQLBackedCollector):
 
             # session_termination: CANCELQUERY privilege
             # CRDB nao tem pg_cancel_backend — usa CANCEL QUERIES com subquery vazia (no-op).
-            # Se o usuario nao tiver CANCELQUERY, recebe permission denied; root em insecure tem tudo.
+            # Se o usuario nao tiver CANCELQUERY, recebe permission denied; root em insecure tem
+            # tudo.
             has_termination, term_reason = await _try_execute(
                 conn,
                 "CANCEL QUERIES (SELECT query_id FROM crdb_internal.cluster_queries WHERE false)",
@@ -136,12 +139,15 @@ class CockroachDBCollector(PostgreSQLBackedCollector):
             results.append(
                 CapabilityResult(
                     capability=POSTGRESQL_SESSION_TERMINATION,
-                    status=CapabilityStatus.FULL if has_termination else CapabilityStatus.UNAVAILABLE,
+                    status=CapabilityStatus.FULL
+                    if has_termination
+                    else CapabilityStatus.UNAVAILABLE,
                     reason=term_reason,
                 )
             )
 
-            # top_sql: crdb_internal.node_statement_statistics (CRDB equivalent of pg_stat_statements)
+            # top_sql: crdb_internal.node_statement_statistics (CRDB equivalent of
+            # pg_stat_statements)
             has_top_sql, top_reason = await _try_query(
                 conn,
                 "SELECT count(*) FROM crdb_internal.node_statement_statistics",
@@ -213,7 +219,9 @@ class CockroachDBCollector(PostgreSQLBackedCollector):
     async def list_databases(self) -> list[str]:
         return await crdb_maintenance.list_databases(self._pg._connect_db)
 
-    async def collect_index_health(self, database: str | None = None) -> NormalizedIndexHealthReport:
+    async def collect_index_health(
+        self, database: str | None = None
+    ) -> NormalizedIndexHealthReport:
         return await crdb_maintenance.crdb_index_health(self._pg._connect_db, database)
 
     async def collect_statistics_health(

@@ -117,9 +117,7 @@ async def test_viewer_without_grant_is_denied(
     assert resp.status_code == 403
 
 
-async def test_duplicate_team_name_conflicts(
-    client: AsyncClient, cleanup_teams: list[int]
-) -> None:
+async def test_duplicate_team_name_conflicts(client: AsyncClient, cleanup_teams: list[int]) -> None:
     name = f"team-{uuid4().hex[:8]}"
     first = await client.post("/api/v1/auth/teams", json={"name": name})
     assert first.status_code == 201

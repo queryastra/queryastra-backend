@@ -1,4 +1,5 @@
-"""Endpoints on-demand de saude do banco — Fase 5 (T55, T57, T58, T59, T61, T62, T63, T64, T65, T68, T69).
+"""Endpoints on-demand de saude do banco — Fase 5
+(T55, T57, T58, T59, T61, T62, T63, T64, T65, T68, T69).
 
 Todos os endpoints consultam diretamente o servidor monitorado a cada requisicao (sem
 persistencia), exceto T62 e os novos endpoints locais que agregam dados do `query_samples`/
@@ -23,7 +24,7 @@ explain-plan: EXPLAIN (FORMAT JSON) sob demanda (PostgreSQL only)
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -227,7 +228,8 @@ async def get_user_functions(
 ) -> list[UserFunctionResponse]:
     """Top funcoes PL/pgSQL por tempo total (PostgreSQL only, requer track_functions=all).
 
-    Consulta on-demand. Retorna lista vazia para engines sem suporte ou track_functions desabilitado."""
+    Consulta on-demand. Retorna lista vazia para engines sem suporte ou track_functions
+    desabilitado."""
     collector = await _build_collector(instance_id, session, credential_resolver)
     try:
         funcs = await collector.collect_user_functions()
@@ -404,7 +406,7 @@ async def get_wait_heatmap(
     Agrega `query_samples` local por `time_bucket` de 1h e `wait_type` (categoria canonica).
     Nao consulta o servidor monitorado — apenas os dados historicos coletados.
     PostgreSQL + SQL Server."""
-    until = datetime.now(timezone.utc)
+    until = datetime.now(UTC)
     since = until - timedelta(hours=window)
 
     repo = QuerySamplesRepository(session)
@@ -483,7 +485,7 @@ async def get_query_trends(
 
     Agrega snapshots horarios armazenados pelo QueryStatsSupervisor. Retorna lista vazia se
     nenhum snapshot foi coletado ainda. PostgreSQL only; SQL Server retorna lista vazia."""
-    until = datetime.now(timezone.utc)
+    until = datetime.now(UTC)
     since = until - timedelta(days=days)
 
     repo = QueryStatsTrendRepository(session)
@@ -588,7 +590,8 @@ async def get_table_io_stats(
 ) -> list[TableIoStatsResponse]:
     """Estatisticas de I/O de tabelas ordenadas por seq_scan (PostgreSQL only) — Fase 5, T68.
 
-    Tabelas com seq_scan alto e idx_scan baixo sao candidatas a novos indices. Consulta on-demand."""
+    Tabelas com seq_scan alto e idx_scan baixo sao candidatas a novos indices. Consulta
+    on-demand."""
     collector = await _build_collector(instance_id, session, credential_resolver)
     try:
         entries = await collector.collect_table_io_stats()
@@ -730,7 +733,8 @@ async def get_hot_objects(
 
     Consulta a hypertable local `blocking_events` — nao conecta ao servidor monitorado.
     PostgreSQL + SQL Server."""
-    stmt = text("""
+    stmt = text(
+        """
         SELECT blocked_object, COUNT(*) AS incident_count, SUM(wait_time_ms) AS total_wait_ms
         FROM blocking_events
         WHERE instance_id = :instance_id
@@ -739,7 +743,8 @@ async def get_hot_objects(
         GROUP BY blocked_object
         ORDER BY total_wait_ms DESC
         LIMIT 20
-    """.replace(":window", str(window)))
+    """.replace(":window", str(window))
+    )
 
     try:
         result = await session.execute(stmt, {"instance_id": str(instance_id)})
@@ -782,7 +787,8 @@ async def get_concurrency_trend(
 
     Consulta a hypertable local `metric_samples` — nao conecta ao servidor monitorado.
     PostgreSQL + SQL Server."""
-    stmt = text("""
+    stmt = text(
+        """
         SELECT time_bucket('1 hour', time) AS bucket,
                MAX(value) AS max_sessions,
                AVG(value) AS avg_sessions,
@@ -793,7 +799,8 @@ async def get_concurrency_trend(
           AND time > NOW() - INTERVAL ':window hours'
         GROUP BY bucket
         ORDER BY bucket
-    """.replace(":window", str(window)))
+    """.replace(":window", str(window))
+    )
 
     try:
         result = await session.execute(stmt, {"instance_id": str(instance_id)})
@@ -844,16 +851,22 @@ async def get_workload_classification(
     Regras: oltp = duration_ms < 1000 sem wait ou CPU wait; analytics = duration_ms >= 5000
     ou wait I/O; maintenance = wait Lock ou programa com 'maintenance'/'backup'/'vacuum'.
     PostgreSQL + SQL Server."""
-    stmt = text("""
+    stmt = text(
+        """
         SELECT
-            SUM(CASE WHEN COALESCE(duration_ms, 0) < 1000 AND wait_type NOT IN ('Lock','IO') THEN 1 ELSE 0 END) AS oltp_count,
-            SUM(CASE WHEN COALESCE(duration_ms, 0) >= 5000 OR wait_type = 'IO' THEN 1 ELSE 0 END) AS analytics_count,
-            SUM(CASE WHEN wait_type = 'Lock' OR lower(program) LIKE ANY(ARRAY['%maintenance%','%backup%','%vacuum%']) THEN 1 ELSE 0 END) AS maintenance_count,
+            SUM(CASE WHEN COALESCE(duration_ms, 0) < 1000 AND wait_type NOT IN ('Lock','IO') THEN
+            1 ELSE 0 END) AS oltp_count,
+            SUM(CASE WHEN COALESCE(duration_ms, 0) >= 5000 OR wait_type = 'IO' THEN 1 ELSE 0 END)
+            AS analytics_count,
+            SUM(CASE WHEN wait_type = 'Lock' OR lower(program) LIKE
+            ANY(ARRAY['%maintenance%','%backup%','%vacuum%']) THEN 1 ELSE 0 END) AS
+            maintenance_count,
             COUNT(*) AS total_count
         FROM query_samples
         WHERE instance_id = :instance_id
           AND time > NOW() - INTERVAL ':window hours'
-    """.replace(":window", str(window)))
+    """.replace(":window", str(window))
+    )
 
     try:
         result = await session.execute(stmt, {"instance_id": str(instance_id)})
@@ -867,8 +880,14 @@ async def get_workload_classification(
 
     if row is None or int(row.total_count or 0) == 0:
         return WorkloadClassificationResponse(
-            oltp_pct=0.0, analytics_pct=0.0, maintenance_pct=0.0, other_pct=0.0,
-            oltp_count=0, analytics_count=0, maintenance_count=0, other_count=0,
+            oltp_pct=0.0,
+            analytics_pct=0.0,
+            maintenance_pct=0.0,
+            other_pct=0.0,
+            oltp_count=0,
+            analytics_count=0,
+            maintenance_count=0,
+            other_count=0,
             period_hours=window,
         )
 
@@ -932,7 +951,9 @@ async def get_explain_plan(
         )
         lookup_row = lookup_result.fetchone()
     except Exception as exc:
-        logger.exception("Erro ao buscar sql_text para sql_hash=%s instance_id=%s", sql_hash, instance_id)
+        logger.exception(
+            "Erro ao buscar sql_text para sql_hash=%s instance_id=%s", sql_hash, instance_id
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Erro ao buscar texto da query.",
@@ -950,7 +971,9 @@ async def get_explain_plan(
     try:
         plan = await collector.explain_plan_for_hash(sql_text_masked)
     except Exception as exc:
-        logger.exception("Erro ao executar EXPLAIN para instance_id=%s sql_hash=%s", instance_id, sql_hash)
+        logger.exception(
+            "Erro ao executar EXPLAIN para instance_id=%s sql_hash=%s", instance_id, sql_hash
+        )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Erro ao executar EXPLAIN na instancia.",

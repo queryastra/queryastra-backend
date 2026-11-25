@@ -33,17 +33,24 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import CurrentUser, PlanService, get_current_user, get_db_session, get_plan_service, require_admin
+from app.api.deps import (
+    CurrentUser,
+    PlanService,
+    get_current_user,
+    get_db_session,
+    get_plan_service,
+    require_admin,
+)
+from app.models.user import User
 from app.repositories.instances_repository import InstancesRepository
 from app.repositories.password_reset_tokens_repository import PasswordResetTokensRepository
 from app.repositories.system_license_repository import SystemLicenseRepository
-from app.services.plan_service import PLANS
-from app.models.user import User
 from app.repositories.teams_repository import TeamsRepository
 from app.repositories.user_instance_access_repository import UserInstanceAccessRepository
 from app.repositories.users_repository import UsersRepository
 from app.services.audit_service import record_audit
 from app.services.auth_service import create_access_token, hash_password, verify_password
+from app.services.plan_service import PLANS
 
 _PASSWORD_RESET_TOKEN_TTL_HOURS = 24
 
@@ -74,13 +81,14 @@ def _check_login_rate_limit(ip: str) -> None:
     with _login_lock:
         # Remove tentativas fora da janela deslizante
         _login_failures[ip] = [
-            t for t in _login_failures[ip]
-            if now - t < _LOGIN_RATE_LIMIT_WINDOW_SECONDS
+            t for t in _login_failures[ip] if now - t < _LOGIN_RATE_LIMIT_WINDOW_SECONDS
         ]
         if len(_login_failures[ip]) >= _LOGIN_RATE_LIMIT_MAX_FAILURES:
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail="Muitas tentativas de login. Aguarde alguns minutos antes de tentar novamente.",
+                detail=(
+                    "Muitas tentativas de login. Aguarde alguns minutos antes de tentar novamente."
+                ),
                 headers={"Retry-After": str(_LOGIN_RATE_LIMIT_WINDOW_SECONDS)},
             )
 
@@ -93,6 +101,7 @@ def _record_login_failure(ip: str) -> None:
 def _clear_login_failures(ip: str) -> None:
     with _login_lock:
         _login_failures.pop(ip, None)
+
 
 _VALID_ROLES = ("admin", "operator", "viewer")
 
@@ -269,7 +278,9 @@ async def login(
     )
     if not password_ok or user is None:
         _record_login_failure(client_ip)
-        await record_audit(session, actor=payload.username, action="login.failure", ip_address=client_ip)
+        await record_audit(
+            session, actor=payload.username, action="login.failure", ip_address=client_ip
+        )
         await session.commit()
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -306,9 +317,7 @@ async def update_my_profile(
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> MeResponse:
     """Atualiza o proprio e-mail (destinatario de notificacoes por e-mail)."""
-    email = await _validate_email_available(
-        repository, payload.email, user_id=current_user.user_id
-    )
+    email = await _validate_email_available(repository, payload.email, user_id=current_user.user_id)
     user = await repository.update_email(current_user.user_id, email)
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario nao encontrado.")
@@ -321,9 +330,7 @@ async def update_my_profile(
         target_name=current_user.username,
     )
     await session.commit()
-    return MeResponse(
-        user_id=user.id, username=user.username, role=user.role, email=user.email
-    )
+    return MeResponse(user_id=user.id, username=user.username, role=user.role, email=user.email)
 
 
 @router.get("/plan", response_model=PlanInfoResponse)
@@ -362,7 +369,9 @@ async def update_plan(
     Nao aceita "trial" — o trial e definido automaticamente na instalacao.
     """
     if payload.plan_id not in PLANS:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Plano desconhecido: {payload.plan_id}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=f"Plano desconhecido: {payload.plan_id}"
+        )
     repo = SystemLicenseRepository(session)
     await repo.update_plan(payload.plan_id, payload.subscription_expires_at)
     await session.commit()
@@ -398,9 +407,7 @@ async def list_users(
     users = await repository.list_all()
     teams_by_user = await TeamsRepository(session).teams_by_user([u.id for u in users])
     return [
-        _user_response(
-            u, [TeamRef(id=t.id, name=t.name) for t in teams_by_user.get(u.id, [])]
-        )
+        _user_response(u, [TeamRef(id=t.id, name=t.name) for t in teams_by_user.get(u.id, [])])
         for u in users
     ]
 

@@ -177,9 +177,7 @@ class InstanceOverviewService:
             return []
         now = datetime.now(UTC)
         ids = [i.id for i in instances]
-        latest = await self._repo.latest_metric_values(
-            ids, ALL_LATEST_METRICS, now - LATEST_WINDOW
-        )
+        latest = await self._repo.latest_metric_values(ids, ALL_LATEST_METRICS, now - LATEST_WINDOW)
         alerts = await self._repo.open_alerts_by_severity(ids)
         sqlserver_ids = [i.id for i in instances if i.db_type == "sqlserver"]
         counter_ids = [i.id for i in instances if i.db_type != "sqlserver"]

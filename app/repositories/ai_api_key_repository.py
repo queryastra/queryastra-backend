@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone, timedelta
-from typing import Sequence
+from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
 
 from cryptography.fernet import Fernet
 from sqlalchemy import select
@@ -117,7 +117,7 @@ class AiApiKeyRepository:
             row.token_limit = None
         elif token_limit is not None:
             row.token_limit = token_limit
-        row.updated_at = datetime.now(timezone.utc)
+        row.updated_at = datetime.now(UTC)
         await self._session.commit()
         await self._session.refresh(row)
         return row
@@ -128,32 +128,33 @@ class AiApiKeyRepository:
 
     async def reset_tokens(self, row: AiApiKey) -> AiApiKey:
         row.tokens_used = 0
-        row.updated_at = datetime.now(timezone.utc)
+        row.updated_at = datetime.now(UTC)
         await self._session.commit()
         await self._session.refresh(row)
         return row
 
     async def reset_error(self, row: AiApiKey) -> AiApiKey:
         row.last_error_at = None
-        row.updated_at = datetime.now(timezone.utc)
+        row.updated_at = datetime.now(UTC)
         await self._session.commit()
         await self._session.refresh(row)
         return row
 
     async def record_success(self, row: AiApiKey, tokens_consumed: int) -> None:
-        """Atualiza contadores após chamada bem-sucedida (sem commit extra — chamado no mesmo ciclo)."""
+        """Atualiza contadores após chamada bem-sucedida (sem commit extra — chamado no mesmo
+        ciclo)."""
         row.tokens_used = (row.tokens_used or 0) + tokens_consumed
-        row.last_used_at = datetime.now(timezone.utc)
+        row.last_used_at = datetime.now(UTC)
         await self._session.commit()
 
     async def record_error(self, row: AiApiKey) -> None:
         """Marca última falha para o cooldown de 5 minutos no failover."""
-        row.last_error_at = datetime.now(timezone.utc)
+        row.last_error_at = datetime.now(UTC)
         await self._session.commit()
 
     @staticmethod
     def is_in_error_cooldown(row: AiApiKey, cooldown_minutes: int = 5) -> bool:
         if not row.last_error_at:
             return False
-        cutoff = datetime.now(timezone.utc) - timedelta(minutes=cooldown_minutes)
+        cutoff = datetime.now(UTC) - timedelta(minutes=cooldown_minutes)
         return row.last_error_at > cutoff

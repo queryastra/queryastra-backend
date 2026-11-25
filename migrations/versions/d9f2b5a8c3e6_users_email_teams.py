@@ -77,9 +77,7 @@ def upgrade() -> None:
             nullable=False,
         ),
     )
-    op.create_index(
-        "ix_team_instance_access_instance_id", "team_instance_access", ["instance_id"]
-    )
+    op.create_index("ix_team_instance_access_instance_id", "team_instance_access", ["instance_id"])
 
     op.add_column(
         "alert_rules",

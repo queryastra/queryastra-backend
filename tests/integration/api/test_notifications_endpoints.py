@@ -95,9 +95,13 @@ async def test_retention_deletes_only_old_rows(
     await repo.delete_older_than(datetime.now(UTC) - timedelta(days=30))
 
     remaining = (
-        await db_session.execute(
-            sa.select(Notification.title).where(Notification.user_id == me.id)
+        (
+            await db_session.execute(
+                sa.select(Notification.title).where(Notification.user_id == me.id)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     assert remaining == ["new"]
     assert recent.id is not None

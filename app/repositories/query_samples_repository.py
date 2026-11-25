@@ -171,7 +171,8 @@ class QuerySamplesRepository(BaseRepository):
     `NULL <> ALL(array)` avalia pra `NULL` (nao `TRUE`), o que um `WHERE` trataria como exclusao —
     sem essa clausula extra, toda amostra sem wait ativo desapareceria da lista."""
 
-    # "Fatia de Tempo" (drill-down temporal fino dentro de uma unica hora): granularidades sub-hora, em
+    # "Fatia de Tempo" (drill-down temporal fino dentro de uma unica hora): granularidades
+    # sub-hora, em
     # segundos de largura do bucket. O Postgres nao tem unidade nativa de `date_trunc` pra
     # 10min/1min/10s/1s (so segundo/minuto/hora/dia/...), entao usamos aritmetica de epoch
     # (`floor(epoch/N)*N`) pra essas — mesmo padrao ja usado em `query_stats_by_bucket` pro caso

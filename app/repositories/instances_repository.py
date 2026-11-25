@@ -36,7 +36,8 @@ class InstancesRepository(BaseRepository):
         return result.scalar_one_or_none()
 
     async def count(self) -> int:
-        """Conta instancias nao-deletadas (ativas e inativas) — usado para checar limite do plano."""
+        """Conta instancias nao-deletadas (ativas e inativas) — usado para checar limite do
+        plano."""
         result = await self._session.execute(
             select(func.count()).select_from(Instance).where(Instance.deleted_at.is_(None))
         )

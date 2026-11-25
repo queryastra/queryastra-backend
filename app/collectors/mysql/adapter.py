@@ -212,7 +212,9 @@ class MySQLCollector(CollectorNoOpMixin):
                     results.append(
                         CapabilityResult(
                             capability=MYSQL_PERFORMANCE_SCHEMA,
-                            status=CapabilityStatus.FULL if ps_enabled else CapabilityStatus.UNAVAILABLE,
+                            status=CapabilityStatus.FULL
+                            if ps_enabled
+                            else CapabilityStatus.UNAVAILABLE,
                             reason=None if ps_enabled else "performance_schema desabilitado",
                         )
                     )
@@ -229,7 +231,8 @@ class MySQLCollector(CollectorNoOpMixin):
                 try:
                     await asyncio.wait_for(
                         cur.execute(
-                            "SELECT COUNT(*) FROM performance_schema.events_statements_history_long LIMIT 0"
+                            "SELECT COUNT(*) FROM "
+                            "performance_schema.events_statements_history_long LIMIT 0"
                         ),
                         timeout=settings.collection_query_timeout_seconds,
                     )
@@ -521,9 +524,7 @@ class MySQLCollector(CollectorNoOpMixin):
             derived.append(
                 (
                     MYSQL_CONNECTIONS_USED_PERCENT,
-                    connections_used_percent(
-                        status_map.get("Threads_connected"), max_connections
-                    ),
+                    connections_used_percent(status_map.get("Threads_connected"), max_connections),
                 )
             )
         return [
@@ -623,9 +624,7 @@ class MySQLCollector(CollectorNoOpMixin):
             logger.warning("Erro em run_scalar_query MySQL: %s", exc)
         return None
 
-    async def explain_queries(
-        self, queries: list[tuple[str, str]]
-    ) -> list[NormalizedPlanSnapshot]:
+    async def explain_queries(self, queries: list[tuple[str, str]]) -> list[NormalizedPlanSnapshot]:
         """Gera planos estimados via EXPLAIN FORMAT=JSON para as queries informadas.
 
         Substitui `?` por NULL antes de executar — plano estimado, sem executar a query.

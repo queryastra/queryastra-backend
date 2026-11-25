@@ -36,21 +36,21 @@ from app.services.auth_service import hash_password
 from app.services.email_service import load_email_config, parse_recipients
 from app.services.notification_service import NotificationService
 from app.workers.alerting_worker import AlertingWorker
-from app.workers.notification_retention_worker import NotificationRetentionWorker
 from app.workers.anomaly_detection_worker import AnomalyDetectionWorker
 from app.workers.backup_status_supervisor import BackupStatusSupervisor
 from app.workers.deadlock_supervisor import DeadlockSupervisor
 from app.workers.extended_health_metrics_supervisor import ExtendedHealthMetricsSupervisor
 from app.workers.missing_index_supervisor import MissingIndexSupervisor
+from app.workers.notification_retention_worker import NotificationRetentionWorker
 from app.workers.plan_compile_timeout_supervisor import PlanCompileTimeoutSupervisor
 from app.workers.plan_history_supervisor import PlanHistorySupervisor
 from app.workers.polling_supervisor import PollingSupervisor
 from app.workers.problem_events_retention_worker import ProblemEventsRetentionWorker
 from app.workers.query_stats_supervisor import QueryStatsSupervisor
 from app.workers.report_worker import ReportWorker
-from app.workers.update_checker import UpdateChecker
 from app.workers.transaction_error_supervisor import TransactionErrorSupervisor
 from app.workers.trial_expiry_worker import TrialExpiryWorker
+from app.workers.update_checker import UpdateChecker
 
 logger = get_logger(__name__)
 

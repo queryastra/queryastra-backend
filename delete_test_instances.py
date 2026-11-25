@@ -1,7 +1,9 @@
 import asyncio
+
 import sqlalchemy as sa
-from app.db.session import create_engine
+
 from app.core.config import get_settings
+from app.db.session import create_engine
 
 
 async def main():

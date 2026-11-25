@@ -10,8 +10,8 @@ originou a sessao bloqueadora/bloqueada quando `blocker_machine`/`blocked_machin
 SET NULL: se a instancia for removida do cadastro, o campo vira NULL automaticamente.
 """
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 from sqlalchemy.dialects.postgresql import UUID
 
 revision = "c2d3e4f5a6b1"

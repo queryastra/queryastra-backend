@@ -15,8 +15,7 @@ bem-sucedida, atualiza `tokens_used` e `last_used_at` no banco.
 
 from __future__ import annotations
 
-import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import httpx
 
@@ -47,9 +46,11 @@ _BASE_QUERY_SYSTEM_PROMPT = (
     "You are a senior DBA specializing in database performance. "
     "Analyze the running SQL statement and, when available, the full source of the object "
     "(batch/procedure/function) it belongs to. Use the full context to identify logic, "
-    "structural, and performance problems in the object as a whole, not just the isolated statement. "
+    "structural, and performance problems in the object as a whole, not just the isolated "
+    "statement. "
     "Produce a CONCISE and ACTIONABLE diagnosis in up to 4 short paragraphs. "
-    "Focus on: (1) likely root cause, (2) observed impact, (3) the 2-3 most important actions to take. "
+    "Focus on: (1) likely root cause, (2) observed impact, (3) the 2-3 most important actions "
+    "to take. "
     "Do not list each finding individually — synthesize a narrative. "
     "Respond in {language}. Be direct, with no generic introductions."
 )
@@ -109,14 +110,22 @@ class AiAdvisor:
 
         system_prompt = _build_query_system_prompt(locale)
         user_content = _build_user_prompt(
-            sql_text_masked, db_type, avg_duration_ms, sql_findings, plan_findings,
+            sql_text_masked,
+            db_type,
+            avg_duration_ms,
+            sql_findings,
+            plan_findings,
             object_text_masked=object_text_masked,
         )
         try:
             if self._provider == "anthropic":
-                narrative, tokens = await self._call_anthropic(user_content, system_prompt=system_prompt)
+                narrative, tokens = await self._call_anthropic(
+                    user_content, system_prompt=system_prompt
+                )
             else:
-                narrative, tokens = await self._call_openai_compat(user_content, system_prompt=system_prompt)
+                narrative, tokens = await self._call_openai_compat(
+                    user_content, system_prompt=system_prompt
+                )
         except httpx.HTTPStatusError as exc:
             body = exc.response.text[:300] if exc.response.content else "(sem corpo)"
             logger.warning(
@@ -155,9 +164,13 @@ class AiAdvisor:
             return AiAnalysis(configured=False)
         try:
             if self._provider == "anthropic":
-                narrative, tokens = await self._call_anthropic(user_content, system_prompt=system_prompt, max_tokens=max_tokens)
+                narrative, tokens = await self._call_anthropic(
+                    user_content, system_prompt=system_prompt, max_tokens=max_tokens
+                )
             else:
-                narrative, tokens = await self._call_openai_compat(user_content, system_prompt=system_prompt, max_tokens=max_tokens)
+                narrative, tokens = await self._call_openai_compat(
+                    user_content, system_prompt=system_prompt, max_tokens=max_tokens
+                )
         except Exception as exc:
             logger.warning("Falha em analyze_prompt (%s): %s", self._provider, exc)
             return AiAnalysis(configured=True, narrative=None)
@@ -253,25 +266,44 @@ class MultiKeyAiAdvisor:
         system_prompt = _build_query_system_prompt(locale)
         for row, repo, advisor in self._key_advisors:
             if AiApiKeyRepository.is_in_error_cooldown(row):
-                logger.warning("Pulando chave '%s' (cooldown ativo, last_error_at=%s)", row.name, row.last_error_at)
+                logger.warning(
+                    "Pulando chave '%s' (cooldown ativo, last_error_at=%s)",
+                    row.name,
+                    row.last_error_at,
+                )
                 continue
             if row.token_limit and row.tokens_used >= row.token_limit:
                 logger.warning(
                     "Pulando chave '%s' (limite de tokens atingido: %d/%d)",
-                    row.name, row.tokens_used, row.token_limit,
+                    row.name,
+                    row.tokens_used,
+                    row.token_limit,
                 )
                 continue
-            logger.warning("Tentando chave '%s' (base_url=%s, model=%s)", row.name, advisor._base_url, advisor._model)
+            logger.warning(
+                "Tentando chave '%s' (base_url=%s, model=%s)",
+                row.name,
+                advisor._base_url,
+                advisor._model,
+            )
 
             user_content = _build_user_prompt(
-                sql_text_masked, db_type, avg_duration_ms, sql_findings, plan_findings,
+                sql_text_masked,
+                db_type,
+                avg_duration_ms,
+                sql_findings,
+                plan_findings,
                 object_text_masked=object_text_masked,
             )
             try:
                 if advisor._provider == "anthropic":
-                    narrative, tokens = await advisor._call_anthropic(user_content, system_prompt=system_prompt)
+                    narrative, tokens = await advisor._call_anthropic(
+                        user_content, system_prompt=system_prompt
+                    )
                 else:
-                    narrative, tokens = await advisor._call_openai_compat(user_content, system_prompt=system_prompt)
+                    narrative, tokens = await advisor._call_openai_compat(
+                        user_content, system_prompt=system_prompt
+                    )
 
                 await repo.record_success(row, tokens)
                 return AiAnalysis(configured=True, narrative=narrative, tokens_consumed=tokens)
@@ -287,7 +319,9 @@ class MultiKeyAiAdvisor:
                 await repo.record_error(row)
 
             except Exception as exc:
-                logger.warning("Erro inesperado na chave '%s' — tentando próxima: %s", row.name, exc)
+                logger.warning(
+                    "Erro inesperado na chave '%s' — tentando próxima: %s", row.name, exc
+                )
                 await repo.record_error(row)
 
         logger.warning("Todas as chaves de IA falharam ou estão em cooldown")
@@ -312,9 +346,13 @@ class MultiKeyAiAdvisor:
                 continue
             try:
                 if advisor._provider == "anthropic":
-                    narrative, tokens = await advisor._call_anthropic(user_content, system_prompt=system_prompt, max_tokens=max_tokens)
+                    narrative, tokens = await advisor._call_anthropic(
+                        user_content, system_prompt=system_prompt, max_tokens=max_tokens
+                    )
                 else:
-                    narrative, tokens = await advisor._call_openai_compat(user_content, system_prompt=system_prompt, max_tokens=max_tokens)
+                    narrative, tokens = await advisor._call_openai_compat(
+                        user_content, system_prompt=system_prompt, max_tokens=max_tokens
+                    )
                 await repo.record_success(row, tokens)
                 return AiAnalysis(configured=True, narrative=narrative, tokens_consumed=tokens)
             except Exception as exc:
@@ -347,11 +385,16 @@ def _build_user_prompt(
             op = f.get("operator") or ""
             obj = f.get("object_name") or ""
             suffix = f" ({op}{' — ' + obj if obj else ''})" if op else ""
-            lines.append(f"- [{f.get('finding_id')} {f.get('severity')}]{suffix} {f.get('description')}")
+            lines.append(
+                f"- [{f.get('finding_id')} {f.get('severity')}]{suffix} {f.get('description')}"
+            )
 
     lines.append(f"\n## Running statement (values masked)\n```sql\n{sql_text[:2000]}\n```")
 
     if object_text_masked and object_text_masked.strip() != sql_text.strip():
-        lines.append(f"\n## Full object source (batch/procedure, values masked)\n```sql\n{object_text_masked[:4000]}\n```")
+        lines.append(
+            "\n## Full object source (batch/procedure, values "
+            f"masked)\n```sql\n{object_text_masked[:4000]}\n```"
+        )
 
     return "\n".join(lines)

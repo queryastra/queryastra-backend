@@ -83,9 +83,7 @@ class AlertRuleCreateRequest(BaseModel):
     escalation_levels: list[AlertEscalationLevelRequest] = Field(default_factory=list)
     # NULL = todas as instancias; preenchido = regra avaliada so contra essa instancia.
     instance_id: UUID | None = None
-    evaluation_mode: str = Field(
-        default="value", pattern="^(" + "|".join(_EVALUATION_MODES) + ")$"
-    )
+    evaluation_mode: str = Field(default="value", pattern="^(" + "|".join(_EVALUATION_MODES) + ")$")
     notify_emails: list[str] | None = None
     webhook_url: str | None = Field(default=None, max_length=2048)
     notify_team_id: int | None = None

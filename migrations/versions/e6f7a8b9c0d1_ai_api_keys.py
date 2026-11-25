@@ -12,8 +12,8 @@ habilitada e tentada automaticamente. Tokens consumidos sao contados por chamada
 from __future__ import annotations
 
 import sqlalchemy as sa
-from alembic import op
 import sqlalchemy.dialects.postgresql as pg
+from alembic import op
 
 revision = "e6f7a8b9c0d1"
 down_revision = "d5e6f7a8b9c0"
@@ -24,7 +24,12 @@ depends_on = None
 def upgrade() -> None:
     op.create_table(
         "ai_api_keys",
-        sa.Column("id", pg.UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()")),
+        sa.Column(
+            "id",
+            pg.UUID(as_uuid=True),
+            primary_key=True,
+            server_default=sa.text("gen_random_uuid()"),
+        ),
         sa.Column("name", sa.Text(), nullable=False),
         sa.Column("provider", sa.Text(), nullable=False, server_default=sa.text("'openai'")),
         sa.Column("api_key_encrypted", sa.Text(), nullable=False),
@@ -37,8 +42,18 @@ def upgrade() -> None:
         sa.Column("tokens_used", sa.BigInteger(), nullable=False, server_default=sa.text("0")),
         sa.Column("last_used_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("last_error_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("now()")),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("now()")),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.text("now()"),
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.text("now()"),
+        ),
     )
     op.create_index("ix_ai_api_keys_priority_enabled", "ai_api_keys", ["priority", "is_enabled"])
 

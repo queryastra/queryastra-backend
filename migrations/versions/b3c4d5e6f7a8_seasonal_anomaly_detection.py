@@ -111,12 +111,8 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint("state IN ('open', 'closed')", name="ck_anomaly_events_state"),
     )
-    op.create_index(
-        "ix_anomaly_events_instance_state", "anomaly_events", ["instance_id", "state"]
-    )
-    op.create_index(
-        "ix_anomaly_events_last_detected_at", "anomaly_events", ["last_detected_at"]
-    )
+    op.create_index("ix_anomaly_events_instance_state", "anomaly_events", ["instance_id", "state"])
+    op.create_index("ix_anomaly_events_last_detected_at", "anomaly_events", ["last_detected_at"])
 
 
 def downgrade() -> None:

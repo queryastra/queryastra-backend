@@ -277,7 +277,7 @@ class AnomalyRepository(BaseRepository):
                 },
             )
         ).all()
-        avg_ms ={r.b: (float(r.avg_ms), int(r.n)) for r in rows if r.avg_ms is not None}
+        avg_ms = {r.b: (float(r.avg_ms), int(r.n)) for r in rows if r.avg_ms is not None}
         p95_ms = {r.b: (float(r.p95_ms), int(r.n)) for r in rows if r.p95_ms is not None}
         return avg_ms, p95_ms
 

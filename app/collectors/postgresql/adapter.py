@@ -232,7 +232,8 @@ _QUALSTATS_INDEX_ADVISOR_QUERY = """
         nspname || '.' || relname AS table_name,
         attnames,
         ddl
-    FROM pg_qualstats_index_advisor() AS t(relid oid, nspname text, relname text, attnames text[], indexes text[], ddl text)
+    FROM pg_qualstats_index_advisor() AS t(relid oid, nspname text, relname text, attnames text[],
+    indexes text[], ddl text)
     WHERE ddl IS NOT NULL
     ORDER BY nspname, relname
 """
@@ -361,7 +362,8 @@ _USER_FUNCTIONS_QUERY = """
         calls,
         total_time AS total_time_ms,
         self_time AS self_time_ms,
-        CASE WHEN calls > 0 THEN round((total_time / calls)::numeric, 3)::float ELSE 0 END AS avg_time_ms
+        CASE WHEN calls > 0 THEN round((total_time / calls)::numeric, 3)::float ELSE 0 END AS
+        avg_time_ms
     FROM pg_stat_user_functions
     ORDER BY total_time DESC
     LIMIT 50
@@ -547,12 +549,14 @@ SELECT n.nspname AS schema_name, c.relname AS table_name,
        COALESCE(s.heap_blks_read, 0) AS heap_blks_read,
        COALESCE(s.heap_blks_hit, 0) AS heap_blks_hit,
        CASE WHEN COALESCE(s.heap_blks_read,0) + COALESCE(s.heap_blks_hit,0) > 0
-            THEN COALESCE(s.heap_blks_hit,0)::float / (COALESCE(s.heap_blks_read,0) + COALESCE(s.heap_blks_hit,0))
+            THEN COALESCE(s.heap_blks_hit,0)::float / (COALESCE(s.heap_blks_read,0) +
+            COALESCE(s.heap_blks_hit,0))
             ELSE 1.0 END AS hit_ratio,
        COALESCE(s.idx_blks_read, 0) AS idx_blks_read,
        COALESCE(s.idx_blks_hit, 0) AS idx_blks_hit,
        CASE WHEN COALESCE(s.idx_blks_read,0) + COALESCE(s.idx_blks_hit,0) > 0
-            THEN COALESCE(s.idx_blks_hit,0)::float / (COALESCE(s.idx_blks_read,0) + COALESCE(s.idx_blks_hit,0))
+            THEN COALESCE(s.idx_blks_hit,0)::float / (COALESCE(s.idx_blks_read,0) +
+            COALESCE(s.idx_blks_hit,0))
             ELSE 1.0 END AS idx_hit_ratio
 FROM pg_statio_user_tables s
 JOIN pg_class c ON c.oid = s.relid
@@ -580,7 +584,8 @@ _DB_SIZES_QUERY = """
     ORDER BY size_bytes DESC
 """
 
-# Fase 5 T64 — compliance de configuracao. Apenas parametros com impacto significativo de performance.
+# Fase 5 T64 — compliance de configuracao. Apenas parametros com impacto significativo de
+# performance.
 _CONFIG_COMPLIANCE_QUERY = """
     SELECT name, setting, unit, short_desc AS description
     FROM pg_settings
@@ -638,56 +643,95 @@ def _evaluate_pg_config_param(
     if name == "work_mem":
         mb = _to_mb(setting, unit)
         status = "ok" if mb is not None and 4 <= mb <= 512 else "warn"
-        rules[name] = ("4 MB – 512 MB", "Acima de 512 MB pode causar OOM sob carga paralela; abaixo de 4 MB prejudica sorts e hash joins.", status)
+        rules[name] = (
+            "4 MB – 512 MB",
+            "Acima de 512 MB pode causar OOM sob carga paralela; abaixo de 4 MB prejudica sorts "
+            "e hash joins.",
+            status,
+        )
     elif name == "max_connections":
         try:
             v = int(setting)
             status = "error" if v > 500 else ("warn" if v > 200 else "ok")
         except ValueError:
             status = "warn"
-        rules[name] = ("≤ 200 (com PgBouncer)", "Muitas conexoes diretas consomem shared memory e context switches; use um pooler acima de 200.", status)
+        rules[name] = (
+            "≤ 200 (com PgBouncer)",
+            "Muitas conexoes diretas consomem shared memory e context switches; use um pooler "
+            "acima de 200.",
+            status,
+        )
     elif name == "autovacuum_vacuum_scale_factor":
         try:
             v = float(setting)
             status = "warn" if v > 0.1 else "ok"
         except ValueError:
             status = "warn"
-        rules[name] = ("0.01 – 0.05", "O valor padrao (0.2) adia vacuum em tabelas grandes (ex.: 1M linhas * 0.2 = 200k dead tuples antes de vacuum).", status)
+        rules[name] = (
+            "0.01 – 0.05",
+            "O valor padrao (0.2) adia vacuum em tabelas grandes (ex.: 1M linhas * 0.2 = 200k "
+            "dead tuples antes de vacuum).",
+            status,
+        )
     elif name == "autovacuum_analyze_scale_factor":
         try:
             v = float(setting)
             status = "warn" if v > 0.1 else "ok"
         except ValueError:
             status = "warn"
-        rules[name] = ("0.01 – 0.05", "Mesmo problema do vacuum_scale_factor — estatisticas ficam desatualizadas em tabelas grandes.", status)
+        rules[name] = (
+            "0.01 – 0.05",
+            "Mesmo problema do vacuum_scale_factor — estatisticas ficam desatualizadas em "
+            "tabelas grandes.",
+            status,
+        )
     elif name == "checkpoint_completion_target":
         try:
             v = float(setting)
             status = "warn" if v < 0.7 else "ok"
         except ValueError:
             status = "warn"
-        rules[name] = ("0.9", "Valores baixos (< 0.7) causam I/O em rajadas ao final do checkpoint; 0.9 distribui o flush uniformemente.", status)
+        rules[name] = (
+            "0.9",
+            "Valores baixos (< 0.7) causam I/O em rajadas ao final do checkpoint; 0.9 distribui "
+            "o flush uniformemente.",
+            status,
+        )
     elif name == "log_min_duration_statement":
         try:
             v = int(setting)
             status = "error" if v == -1 else ("warn" if v == 0 else "ok")
         except ValueError:
             status = "warn"
-        rules[name] = ("500 – 2000 ms", "-1 desabilita completamente o log de queries lentas; 0 loga tudo (ruidoso); 500-2000ms e um bom ponto de partida.", status)
+        rules[name] = (
+            "500 – 2000 ms",
+            "-1 desabilita completamente o log de queries lentas; 0 loga tudo (ruidoso); "
+            "500-2000ms e um bom ponto de partida.",
+            status,
+        )
     elif name == "random_page_cost":
         try:
             v = float(setting)
             status = "warn" if v >= 4.0 else "ok"
         except ValueError:
             status = "warn"
-        rules[name] = ("1.1 – 2.0 (SSD)", "O padrao (4.0) assume disco rotativo; em SSD o planner subestima index scans e escolhe seq scans desnecessarios.", status)
+        rules[name] = (
+            "1.1 – 2.0 (SSD)",
+            "O padrao (4.0) assume disco rotativo; em SSD o planner subestima index scans e "
+            "escolhe seq scans desnecessarios.",
+            status,
+        )
     elif name == "autovacuum_max_workers":
         try:
             v = int(setting)
             status = "warn" if v < 3 else "ok"
         except ValueError:
             status = "warn"
-        rules[name] = ("3 – 6", "O padrao (3) pode ser insuficiente em bancos com muitas tabelas de alta escrita.", status)
+        rules[name] = (
+            "3 – 6",
+            "O padrao (3) pode ser insuficiente em bancos com muitas tabelas de alta escrita.",
+            status,
+        )
 
     rec_val, recommendation, status_val = rules.get(name, (None, None, "ok"))
 
@@ -840,9 +884,7 @@ class PostgreSQLCollector(CollectorNoOpMixin):
             "SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname='pg_qualstats')"
         )
         if has_extension:
-            return CapabilityResult(
-                capability=POSTGRESQL_QUALSTATS, status=CapabilityStatus.FULL
-            )
+            return CapabilityResult(capability=POSTGRESQL_QUALSTATS, status=CapabilityStatus.FULL)
         return CapabilityResult(
             capability=POSTGRESQL_QUALSTATS,
             status=CapabilityStatus.DEGRADED,
@@ -957,9 +999,7 @@ class PostgreSQLCollector(CollectorNoOpMixin):
                         timeout=settings.collection_query_timeout_seconds,
                     )
                 except Exception:  # noqa: BLE001 - metrica derivada opcional, nunca derruba a coleta
-                    logger.debug(
-                        "max_connections indisponivel instance_id=%s", self._instance_id
-                    )
+                    logger.debug("max_connections indisponivel instance_id=%s", self._instance_id)
                     max_connections = None
 
                 if version_num >= _PG17_VERSION_NUM:
@@ -1360,7 +1400,9 @@ class PostgreSQLCollector(CollectorNoOpMixin):
                     [
                         sample(PG_CHECKPOINTS_TIMED, checkpoint_row["checkpoints_timed"]),
                         sample(PG_CHECKPOINTS_REQUESTED, checkpoint_row["checkpoints_req"]),
-                        sample(PG_CHECKPOINT_WRITE_TIME_MS, checkpoint_row["checkpoint_write_time"]),
+                        sample(
+                            PG_CHECKPOINT_WRITE_TIME_MS, checkpoint_row["checkpoint_write_time"]
+                        ),
                         sample(PG_CHECKPOINT_SYNC_TIME_MS, checkpoint_row["checkpoint_sync_time"]),
                         sample(PG_CHECKPOINT_BUFFERS_WRITTEN, checkpoint_row["buffers_checkpoint"]),
                     ]
@@ -1628,9 +1670,7 @@ class PostgreSQLCollector(CollectorNoOpMixin):
         """PostgreSQL não tem cache de plano exposto via SQL — use explain_queries()."""
         return []
 
-    async def explain_queries(
-        self, queries: list[tuple[str, str]]
-    ) -> list[NormalizedPlanSnapshot]:
+    async def explain_queries(self, queries: list[tuple[str, str]]) -> list[NormalizedPlanSnapshot]:
         """Gera planos estimados via EXPLAIN (FORMAT JSON) para as queries informadas.
 
         `queries` é uma lista de (sql_hash, sql_text_masked). Substitui literais mascarados
@@ -1822,7 +1862,11 @@ class PostgreSQLCollector(CollectorNoOpMixin):
         )
         try:
             version_num = await self._fetch_version(conn, settings.collection_query_timeout_seconds)
-            query = _BGWRITER_STATS_QUERY_PG17 if version_num >= _PG17_VERSION_NUM else _BGWRITER_STATS_QUERY
+            query = (
+                _BGWRITER_STATS_QUERY_PG17
+                if version_num >= _PG17_VERSION_NUM
+                else _BGWRITER_STATS_QUERY
+            )
             row = await asyncio.wait_for(
                 conn.fetchrow(query),
                 timeout=settings.collection_query_timeout_seconds,
@@ -1923,7 +1967,10 @@ class PostgreSQLCollector(CollectorNoOpMixin):
         finally:
             await conn.close()
 
-        return [_evaluate_pg_config_param(r["name"], r["setting"], r["unit"], r["description"]) for r in rows]
+        return [
+            _evaluate_pg_config_param(r["name"], r["setting"], r["unit"], r["description"])
+            for r in rows
+        ]
 
     async def collect_connection_consumers(self) -> list[NormalizedConnectionConsumer]:
         """Fase 5 T65 — consumidores de conexao agrupados por app/host/usuario (on-demand)."""
@@ -2198,7 +2245,9 @@ class PostgreSQLCollector(CollectorNoOpMixin):
     async def list_databases(self) -> list[str]:
         return await pg_maintenance.list_databases(self._connect_db, self.maintenance_bootstrap_db)
 
-    async def collect_index_health(self, database: str | None = None) -> NormalizedIndexHealthReport:
+    async def collect_index_health(
+        self, database: str | None = None
+    ) -> NormalizedIndexHealthReport:
         version = await self._maintenance_version()
         outcome = await pg_maintenance.scan_databases(
             self._connect_db,

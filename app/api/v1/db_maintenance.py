@@ -10,14 +10,12 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from typing import Annotated, Literal, TypeVar
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import distinct, select
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.repositories._tables import query_samples_table
 
 from app.api.deps import check_instance_access, get_db_session
 from app.api.v1.health_stats import _build_collector
@@ -31,13 +29,13 @@ from app.normalizers.models import (
     NormalizedPartitionReport,
     NormalizedStatisticsHealthReport,
 )
+from app.repositories._tables import query_samples_table
 from app.security.credential_reference import CredentialResolver
 
 logger = get_logger(__name__)
 
 router = APIRouter()
 
-T = TypeVar("T")
 
 _DatabaseParam = Annotated[
     str | None,
@@ -45,7 +43,7 @@ _DatabaseParam = Annotated[
 ]
 
 
-async def _run_scan(
+async def _run_scan[T](
     instance_id: UUID,
     session: AsyncSession,
     credential_resolver: CredentialResolver,
@@ -107,7 +105,9 @@ async def list_databases(
         ) from exc
     except Exception as exc:
         logger.warning("Erro ao listar bancos instance_id=%s: %s", instance_id, exc)
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Erro ao listar bancos da instancia.") from exc
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail="Erro ao listar bancos da instancia."
+        ) from exc
     finally:
         await collector.close()
 

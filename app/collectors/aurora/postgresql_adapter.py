@@ -10,11 +10,8 @@ Se `aurora_version()` falhar (instancia PostgreSQL vanilla), a capability e DEGR
 
 from __future__ import annotations
 
-from uuid import UUID
-
 from app.collectors.base import CapabilityResult, CapabilityStatus
 from app.collectors.capabilities import AURORA_POSTGRESQL_ENGINE
-from app.collectors.connection import ConnectionParams
 from app.collectors.postgresql.pg_backed import PostgreSQLBackedCollector
 from app.core.config import get_settings
 from app.core.logging import get_logger

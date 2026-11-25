@@ -9,7 +9,6 @@ Achados ordenados por severidade: critical → warning → info.
 
 from __future__ import annotations
 
-import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from typing import Literal
@@ -39,14 +38,14 @@ class PlanFinding:
 class _RelOpNode:
     physical_op: str | None
     logical_op: str | None
-    estimated_cost: float | None      # operador isolado (sem subárvore)
-    subtree_cost: float | None        # subtree (usado para % do total)
+    estimated_cost: float | None  # operador isolado (sem subárvore)
+    subtree_cost: float | None  # subtree (usado para % do total)
     estimate_rows: float | None
     actual_rows: float | None
     parallel: bool
     object_name: str | None
     warnings: list[str]
-    children: list["_RelOpNode"] = field(default_factory=list)
+    children: list[_RelOpNode] = field(default_factory=list)
 
 
 def _tag(local: str) -> str:
@@ -65,6 +64,7 @@ def _float_attr(el: ET.Element, name: str) -> float | None:
 
 def _collect_object_name(rel_op: ET.Element) -> str | None:
     """Primeiro elemento Object dentro do RelOp (não descendo em RelOp filhos)."""
+
     def _search(el: ET.Element, depth: int = 0) -> ET.Element | None:
         for child in el:
             if child.tag == _tag("RelOp") and depth > 0:
@@ -184,16 +184,17 @@ def analyze_plan(plan_xml: str) -> list[PlanFinding]:
 
     # Rebuild mais correto: coleta RelOps que não são filhos de outro RelOp
     all_rel_ops_in_doc: list[ET.Element] = list(root.iter(_tag("RelOp")))
-    rel_op_set = set(id(e) for e in all_rel_ops_in_doc)
 
     parent_ids: set[int] = set()
     for el in all_rel_ops_in_doc:
+
         def _mark_children(node: ET.Element) -> None:
             for child in node:
                 if child.tag == _tag("RelOp"):
                     parent_ids.add(id(child))
                 else:
                     _mark_children(child)
+
         _mark_children(el)
 
     root_rel_ops = [e for e in all_rel_ops_in_doc if id(e) not in parent_ids]
@@ -222,139 +223,171 @@ def analyze_plan(plan_xml: str) -> list[PlanFinding]:
 
         # P001 — Key Lookup (índice não covering)
         if op == "Key Lookup":
-            _add(PlanFinding(
-                finding_id="P001",
-                severity="warning",
-                description="Key Lookup detected — the index does not cover all required columns.",
-                suggestion=(
-                    "Create a covering index with the projected columns in INCLUDE. "
-                    "Key Lookup eliminates direct access to the base row (RID/clustered), "
-                    "but still performs one extra read per row."
-                ),
-                operator="Key Lookup",
-                object_name=node.object_name,
-            ))
+            _add(
+                PlanFinding(
+                    finding_id="P001",
+                    severity="warning",
+                    description=(
+                        "Key Lookup detected — the index does not cover all required columns."
+                    ),
+                    suggestion=(
+                        "Create a covering index with the projected columns in INCLUDE. "
+                        "Key Lookup eliminates direct access to the base row (RID/clustered), "
+                        "but still performs one extra read per row."
+                    ),
+                    operator="Key Lookup",
+                    object_name=node.object_name,
+                )
+            )
 
         # P002 — Sort com custo alto
         if op == "Sort" and cost_pct >= _COSTLY_OP_THRESHOLD:
             pct_str = f"{cost_pct * 100:.0f}%"
-            _add(PlanFinding(
-                finding_id="P002",
-                severity="warning",
-                description=f"Sort consuming {pct_str} of total cost — data does not arrive in the desired order.",
-                suggestion=(
-                    "Create an index with ORDER BY / GROUP BY columns in the same order. "
-                    "An explicit Sort in the plan means the optimizer did not find "
-                    "a suitable ordered index."
-                ),
-                operator="Sort",
-                params={"pct": pct_str},
-            ))
+            _add(
+                PlanFinding(
+                    finding_id="P002",
+                    severity="warning",
+                    description=(
+                        f"Sort consuming {pct_str} of total cost — data does not arrive in the "
+                        "desired order."
+                    ),
+                    suggestion=(
+                        "Create an index with ORDER BY / GROUP BY columns in the same order. "
+                        "An explicit Sort in the plan means the optimizer did not find "
+                        "a suitable ordered index."
+                    ),
+                    operator="Sort",
+                    params={"pct": pct_str},
+                )
+            )
 
         # P003 — Table Scan ou Clustered Index Scan com custo alto
         if op in ("Table Scan", "Clustered Index Scan") and cost_pct >= _COSTLY_OP_THRESHOLD:
             pct_str = f"{cost_pct * 100:.0f}%"
-            _add(PlanFinding(
-                finding_id="P003",
-                severity="warning",
-                description=f"{op} consuming {pct_str} of total cost — full table scan.",
-                suggestion=(
-                    "Consider creating an index on the WHERE filter columns. "
-                    f"A {op} reads all rows in the table regardless of the applied filter."
-                ),
-                operator=op,
-                object_name=node.object_name,
-                params={"op": op, "pct": pct_str},
-            ))
+            _add(
+                PlanFinding(
+                    finding_id="P003",
+                    severity="warning",
+                    description=f"{op} consuming {pct_str} of total cost — full table scan.",
+                    suggestion=(
+                        "Consider creating an index on the WHERE filter columns. "
+                        f"A {op} reads all rows in the table regardless of the applied filter."
+                    ),
+                    operator=op,
+                    object_name=node.object_name,
+                    params={"op": op, "pct": pct_str},
+                )
+            )
 
         # P004 — Erro de estimativa de linhas (só planos actual)
         if has_actual and node.actual_rows is not None and node.estimate_rows:
             ratio = node.actual_rows / node.estimate_rows if node.estimate_rows > 0 else None
-            if ratio is not None and (ratio > _ESTIMATE_RATIO_THRESHOLD or ratio < 1 / _ESTIMATE_RATIO_THRESHOLD):
+            if ratio is not None and (
+                ratio > _ESTIMATE_RATIO_THRESHOLD or ratio < 1 / _ESTIMATE_RATIO_THRESHOLD
+            ):
                 direction = "sub" if ratio > 1 else "super"
-                _add(PlanFinding(
-                    finding_id="P004",
-                    severity="warning",
-                    description=(
-                        f"Cardinality estimation error: estimated {node.estimate_rows:.0f} rows, "
-                        f"actual {node.actual_rows:.0f} ({direction}estimated {abs(ratio):.0f}x)."
-                    ),
-                    suggestion=(
-                        "Stale statistics or parameter sniffing. "
-                        "Try UPDATE STATISTICS with FULLSCAN or add OPTION (RECOMPILE) "
-                        "to force recompilation with the actual parameters."
-                    ),
-                    operator=op or None,
-                    object_name=node.object_name,
-                    params={
-                        "estimateRows": int(node.estimate_rows),
-                        "actualRows": int(node.actual_rows),
-                        "direction": direction,
-                        "ratio": int(abs(ratio)),
-                    },
-                ))
+                _add(
+                    PlanFinding(
+                        finding_id="P004",
+                        severity="warning",
+                        description=(
+                            f"Cardinality estimation error: estimated {node.estimate_rows:.0f} "
+                            "rows, "
+                            f"actual {node.actual_rows:.0f} ({direction}estimated "
+                            f"{abs(ratio):.0f}x)."
+                        ),
+                        suggestion=(
+                            "Stale statistics or parameter sniffing. "
+                            "Try UPDATE STATISTICS with FULLSCAN or add OPTION (RECOMPILE) "
+                            "to force recompilation with the actual parameters."
+                        ),
+                        operator=op or None,
+                        object_name=node.object_name,
+                        params={
+                            "estimateRows": int(node.estimate_rows),
+                            "actualRows": int(node.actual_rows),
+                            "direction": direction,
+                            "ratio": int(abs(ratio)),
+                        },
+                    )
+                )
 
         # P005 — SpillToTempDb (grant de memória insuficiente)
         if "SpillToTempDb" in node.warnings:
-            _add(PlanFinding(
-                finding_id="P005",
-                severity="critical",
-                description="SpillToTempDb — Sort or Hash Match spilled data to disk due to insufficient memory grant.",
-                suggestion=(
-                    "The memory grant was insufficient (wrong row estimate). "
-                    "Fix statistics to improve the grant, or tune max server memory / "
-                    "Resource Governor if the server has available memory."
-                ),
-                operator=op or None,
-            ))
+            _add(
+                PlanFinding(
+                    finding_id="P005",
+                    severity="critical",
+                    description=(
+                        "SpillToTempDb — Sort or Hash Match spilled data to disk due to "
+                        "insufficient memory grant."
+                    ),
+                    suggestion=(
+                        "The memory grant was insufficient (wrong row estimate). "
+                        "Fix statistics to improve the grant, or tune max server memory / "
+                        "Resource Governor if the server has available memory."
+                    ),
+                    operator=op or None,
+                )
+            )
 
         # P006 — NoJoinPredicate (produto cartesiano)
         if "NoJoinPredicate" in node.warnings:
-            _add(PlanFinding(
-                finding_id="P006",
-                severity="critical",
-                description="NoJoinPredicate — JOIN without a condition (Cartesian product).",
-                suggestion=(
-                    "Check JOIN conditions. A JOIN without a predicate multiplies "
-                    "all rows from one table by those from the other."
-                ),
-                operator=op or None,
-            ))
+            _add(
+                PlanFinding(
+                    finding_id="P006",
+                    severity="critical",
+                    description="NoJoinPredicate — JOIN without a condition (Cartesian product).",
+                    suggestion=(
+                        "Check JOIN conditions. A JOIN without a predicate multiplies "
+                        "all rows from one table by those from the other."
+                    ),
+                    operator=op or None,
+                )
+            )
 
         # P007 — ColumnsWithNoStatistics
         if "ColumnsWithNoStatistics" in node.warnings:
-            _add(PlanFinding(
-                finding_id="P007",
-                severity="info",
-                description="Columns without statistics — optimizer used default estimates (possibly incorrect).",
-                suggestion=(
-                    "Create statistics on the filtered columns: "
-                    "CREATE STATISTICS stat_name ON table(column) WITH FULLSCAN"
-                ),
-                operator=op or None,
-                object_name=node.object_name,
-            ))
+            _add(
+                PlanFinding(
+                    finding_id="P007",
+                    severity="info",
+                    description=(
+                        "Columns without statistics — optimizer used default estimates "
+                        "(possibly incorrect)."
+                    ),
+                    suggestion=(
+                        "Create statistics on the filtered columns: "
+                        "CREATE STATISTICS stat_name ON table(column) WITH FULLSCAN"
+                    ),
+                    operator=op or None,
+                    object_name=node.object_name,
+                )
+            )
 
         # P008 — Nested Loops com outer input grande (estimativa alta)
         if op == "Nested Loops" and node.children:
             outer = node.children[0]
             outer_rows = outer.estimate_rows or 0
             if outer_rows > 10_000:
-                _add(PlanFinding(
-                    finding_id="P008",
-                    severity="info",
-                    description=(
-                        f"Nested Loops with ~{outer_rows:,.0f} estimated rows on the outer input — "
-                        "may be slow if the inner input does not have an efficient seek."
-                    ),
-                    suggestion=(
-                        "Verify that the inner input of the loop uses an Index Seek. "
-                        "For large volumes, Hash Match or Merge Join may be more efficient "
-                        "— use OPTION (HASH JOIN) or OPTION (MERGE JOIN) to compare."
-                    ),
-                    operator="Nested Loops",
-                    params={"outerRows": int(outer_rows)},
-                ))
+                _add(
+                    PlanFinding(
+                        finding_id="P008",
+                        severity="info",
+                        description=(
+                            f"Nested Loops with ~{outer_rows:,.0f} estimated rows on the outer "
+                            "input — "
+                            "may be slow if the inner input does not have an efficient seek."
+                        ),
+                        suggestion=(
+                            "Verify that the inner input of the loop uses an Index Seek. "
+                            "For large volumes, Hash Match or Merge Join may be more efficient "
+                            "— use OPTION (HASH JOIN) or OPTION (MERGE JOIN) to compare."
+                        ),
+                        operator="Nested Loops",
+                        params={"outerRows": int(outer_rows)},
+                    )
+                )
 
     # Ordena: critical → warning → info
     _order = {"critical": 0, "warning": 1, "info": 2}
@@ -363,6 +396,7 @@ def analyze_plan(plan_xml: str) -> list[PlanFinding]:
 
 
 # ── PostgreSQL EXPLAIN JSON ───────────────────────────────────────────────────
+
 
 def _pg_walk(node: dict, collected: list[dict]) -> None:
     collected.append(node)
@@ -404,101 +438,117 @@ def analyze_plan_postgresql_json(plan_json_text: str) -> list[PlanFinding]:
 
         # PG01 — Sequential Scan com custo significativo
         if ntype == "Seq Scan" and cost_pct >= _COSTLY_OP_THRESHOLD:
-            _add(PlanFinding(
-                finding_id="PG01",
-                severity="warning",
-                description=(
-                    f"Seq Scan on '{relation}' accounts for {cost_pct:.0%} of total cost "
-                    f"({plan_rows:,.0f} estimated rows) — full table scan."
-                ),
-                suggestion=(
-                    "Create an index on the columns used in the filter (WHERE) or JOIN. "
-                    "Use EXPLAIN ANALYZE to confirm the actual cost."
-                ),
-                operator="Seq Scan",
-                object_name=relation,
-                params={"relation": relation or "", "pct": f"{cost_pct:.0%}", "planRows": int(plan_rows)},
-            ))
+            _add(
+                PlanFinding(
+                    finding_id="PG01",
+                    severity="warning",
+                    description=(
+                        f"Seq Scan on '{relation}' accounts for {cost_pct:.0%} of total cost "
+                        f"({plan_rows:,.0f} estimated rows) — full table scan."
+                    ),
+                    suggestion=(
+                        "Create an index on the columns used in the filter (WHERE) or JOIN. "
+                        "Use EXPLAIN ANALYZE to confirm the actual cost."
+                    ),
+                    operator="Seq Scan",
+                    object_name=relation,
+                    params={
+                        "relation": relation or "",
+                        "pct": f"{cost_pct:.0%}",
+                        "planRows": int(plan_rows),
+                    },
+                )
+            )
 
         # PG02 — Sort sem índice com custo alto
         if ntype == "Sort" and cost_pct >= _COSTLY_OP_THRESHOLD:
             sort_key = ", ".join(node.get("Sort Key", []))
-            _add(PlanFinding(
-                finding_id="PG02",
-                severity="warning",
-                description=(
-                    f"In-memory/disk Sort accounts for {cost_pct:.0%} of total cost. "
-                    f"Key: {sort_key or 'unknown'}."
-                ),
-                suggestion=(
-                    "Create an index covering the sort columns. "
-                    "Check work_mem if the sort is spilling to disk."
-                ),
-                operator="Sort",
-                params={"pct": f"{cost_pct:.0%}", "sortKey": sort_key or "unknown"},
-            ))
+            _add(
+                PlanFinding(
+                    finding_id="PG02",
+                    severity="warning",
+                    description=(
+                        f"In-memory/disk Sort accounts for {cost_pct:.0%} of total cost. "
+                        f"Key: {sort_key or 'unknown'}."
+                    ),
+                    suggestion=(
+                        "Create an index covering the sort columns. "
+                        "Check work_mem if the sort is spilling to disk."
+                    ),
+                    operator="Sort",
+                    params={"pct": f"{cost_pct:.0%}", "sortKey": sort_key or "unknown"},
+                )
+            )
 
         # PG03 — Hash Join ou Hash com linhas altas (pressão de memória)
         if ntype in ("Hash", "Hash Join") and plan_rows > 10_000:
-            _add(PlanFinding(
-                finding_id="PG03",
-                severity="info",
-                description=(
-                    f"{ntype} with {plan_rows:,.0f} estimated rows may pressure work_mem."
-                ),
-                suggestion=(
-                    "If the plan shows 'Batches > 1', increase work_mem or add an index "
-                    "to allow Merge Join (which does not need an in-memory hash table)."
-                ),
-                operator=ntype,
-                params={"ntype": ntype, "planRows": int(plan_rows)},
-            ))
+            _add(
+                PlanFinding(
+                    finding_id="PG03",
+                    severity="info",
+                    description=(
+                        f"{ntype} with {plan_rows:,.0f} estimated rows may pressure work_mem."
+                    ),
+                    suggestion=(
+                        "If the plan shows 'Batches > 1', increase work_mem or add an index "
+                        "to allow Merge Join (which does not need an in-memory hash table)."
+                    ),
+                    operator=ntype,
+                    params={"ntype": ntype, "planRows": int(plan_rows)},
+                )
+            )
 
         # PG04 — Erro de estimativa de cardinalidade (plano real com ANALYZE)
         if actual_rows is not None and plan_rows > 0:
             ratio = actual_rows / plan_rows if plan_rows else None
-            if ratio is not None and (ratio > _ESTIMATE_RATIO_THRESHOLD or ratio < 1 / _ESTIMATE_RATIO_THRESHOLD):
+            if ratio is not None and (
+                ratio > _ESTIMATE_RATIO_THRESHOLD or ratio < 1 / _ESTIMATE_RATIO_THRESHOLD
+            ):
                 direction = "sub" if ratio > 1 else "super"
-                _add(PlanFinding(
-                    finding_id="PG04",
-                    severity="warning",
-                    description=(
-                        f"Cardinality estimation error: expected {plan_rows:,.0f} rows, "
-                        f"actual {actual_rows:,.0f} ({direction}estimated {abs(ratio):.0f}x)."
-                    ),
-                    suggestion=(
-                        "Run ANALYZE on the table to update statistics. "
-                        "Consider increasing default_statistics_target for skewed columns."
-                    ),
-                    operator=ntype or None,
-                    object_name=relation,
-                    params={
-                        "planRows": int(plan_rows),
-                        "actualRows": int(actual_rows),
-                        "direction": direction,
-                        "ratio": int(abs(ratio)),
-                    },
-                ))
+                _add(
+                    PlanFinding(
+                        finding_id="PG04",
+                        severity="warning",
+                        description=(
+                            f"Cardinality estimation error: expected {plan_rows:,.0f} rows, "
+                            f"actual {actual_rows:,.0f} ({direction}estimated {abs(ratio):.0f}x)."
+                        ),
+                        suggestion=(
+                            "Run ANALYZE on the table to update statistics. "
+                            "Consider increasing default_statistics_target for skewed columns."
+                        ),
+                        operator=ntype or None,
+                        object_name=relation,
+                        params={
+                            "planRows": int(plan_rows),
+                            "actualRows": int(actual_rows),
+                            "direction": direction,
+                            "ratio": int(abs(ratio)),
+                        },
+                    )
+                )
 
         # PG05 — Nested Loop com muitas linhas no outer
         if ntype == "Nested Loop" and node.get("Plans"):
             outer_rows = node["Plans"][0].get("Plan Rows", 0)
             if outer_rows > 10_000:
-                _add(PlanFinding(
-                    finding_id="PG05",
-                    severity="info",
-                    description=(
-                        f"Nested Loop with ~{outer_rows:,.0f} rows on the outer input — "
-                        "inefficient if the inner input does not use an Index Scan."
-                    ),
-                    suggestion=(
-                        "Make sure the inner input of the loop uses an Index Scan. "
-                        "For large volumes, a Hash Join may be more efficient — "
-                        "test with SET enable_nestloop = off."
-                    ),
-                    operator="Nested Loop",
-                    params={"outerRows": int(outer_rows)},
-                ))
+                _add(
+                    PlanFinding(
+                        finding_id="PG05",
+                        severity="info",
+                        description=(
+                            f"Nested Loop with ~{outer_rows:,.0f} rows on the outer input — "
+                            "inefficient if the inner input does not use an Index Scan."
+                        ),
+                        suggestion=(
+                            "Make sure the inner input of the loop uses an Index Scan. "
+                            "For large volumes, a Hash Join may be more efficient — "
+                            "test with SET enable_nestloop = off."
+                        ),
+                        operator="Nested Loop",
+                        params={"outerRows": int(outer_rows)},
+                    )
+                )
 
     _order = {"critical": 0, "warning": 1, "info": 2}
     findings.sort(key=lambda f: _order[f.severity])
@@ -506,6 +556,7 @@ def analyze_plan_postgresql_json(plan_json_text: str) -> list[PlanFinding]:
 
 
 # ── MySQL EXPLAIN FORMAT=JSON ─────────────────────────────────────────────────
+
 
 def _mysql_walk(node: dict, collected: list[dict]) -> None:
     """Percorre recursivamente os nós do plano JSON do MySQL."""
@@ -552,72 +603,82 @@ def analyze_plan_mysql_json(plan_json_text: str) -> list[PlanFinding]:
 
         # MY01 — Full Table Scan (access_type = ALL)
         if access_type == "ALL":
-            _add(PlanFinding(
-                finding_id="MY01",
-                severity="warning",
-                description=(
-                    f"Full Table Scan on '{table_name}' ({rows:,} rows examined, "
-                    f"{filtered:.0f}% filtered) — no index used."
-                ),
-                suggestion=(
-                    "Create an index on the WHERE/JOIN columns. "
-                    "Use EXPLAIN to confirm which index the optimizer would choose."
-                ),
-                operator="ALL",
-                object_name=table_name,
-                params={"tableName": table_name or "", "rows": rows, "filtered": int(filtered)},
-            ))
+            _add(
+                PlanFinding(
+                    finding_id="MY01",
+                    severity="warning",
+                    description=(
+                        f"Full Table Scan on '{table_name}' ({rows:,} rows examined, "
+                        f"{filtered:.0f}% filtered) — no index used."
+                    ),
+                    suggestion=(
+                        "Create an index on the WHERE/JOIN columns. "
+                        "Use EXPLAIN to confirm which index the optimizer would choose."
+                    ),
+                    operator="ALL",
+                    object_name=table_name,
+                    params={"tableName": table_name or "", "rows": rows, "filtered": int(filtered)},
+                )
+            )
 
         # MY02 — Filesort (ordenação sem índice)
         if "filesort" in extra or node.get("using_filesort"):
-            _add(PlanFinding(
-                finding_id="MY02",
-                severity="warning",
-                description=(
-                    f"Filesort on '{table_name}' — sorting done in memory/disk without an index."
-                ),
-                suggestion=(
-                    "Create a composite index covering the ORDER BY columns, "
-                    "ideally the same one used in WHERE to avoid an extra scan."
-                ),
-                operator="filesort",
-                object_name=table_name,
-                params={"tableName": table_name or ""},
-            ))
+            _add(
+                PlanFinding(
+                    finding_id="MY02",
+                    severity="warning",
+                    description=(
+                        f"Filesort on '{table_name}' — sorting done in memory/disk without an "
+                        "index."
+                    ),
+                    suggestion=(
+                        "Create a composite index covering the ORDER BY columns, "
+                        "ideally the same one used in WHERE to avoid an extra scan."
+                    ),
+                    operator="filesort",
+                    object_name=table_name,
+                    params={"tableName": table_name or ""},
+                )
+            )
 
         # MY03 — Tabela temporária
         if "temporary" in extra or node.get("using_temporary_table"):
-            _add(PlanFinding(
-                finding_id="MY03",
-                severity="warning",
-                description=(
-                    "Internal temporary table created — indicates GROUP BY/DISTINCT/UNION "
-                    "without a suitable index or TEXT/BLOB columns forcing disk usage."
-                ),
-                suggestion=(
-                    "Review indexes for the grouping/sorting columns. "
-                    "Increase tmp_table_size and max_heap_table_size if the table is spilling to disk."
-                ),
-                operator="temporary table",
-            ))
+            _add(
+                PlanFinding(
+                    finding_id="MY03",
+                    severity="warning",
+                    description=(
+                        "Internal temporary table created — indicates GROUP BY/DISTINCT/UNION "
+                        "without a suitable index or TEXT/BLOB columns forcing disk usage."
+                    ),
+                    suggestion=(
+                        "Review indexes for the grouping/sorting columns. "
+                        "Increase tmp_table_size and max_heap_table_size if the table is "
+                        "spilling to disk."
+                    ),
+                    operator="temporary table",
+                )
+            )
 
         # MY04 — Index range scan com muitas linhas
         if access_type == "range" and rows > 50_000 and not key_used:
-            _add(PlanFinding(
-                finding_id="MY04",
-                severity="info",
-                description=(
-                    f"Range scan on '{table_name}' reads ~{rows:,} rows — "
-                    "index present but low selectivity."
-                ),
-                suggestion=(
-                    "Consider a more selective index or rewrite the query "
-                    "to reduce the scanned range."
-                ),
-                operator="range",
-                object_name=table_name,
-                params={"tableName": table_name or "", "rows": rows},
-            ))
+            _add(
+                PlanFinding(
+                    finding_id="MY04",
+                    severity="info",
+                    description=(
+                        f"Range scan on '{table_name}' reads ~{rows:,} rows — "
+                        "index present but low selectivity."
+                    ),
+                    suggestion=(
+                        "Consider a more selective index or rewrite the query "
+                        "to reduce the scanned range."
+                    ),
+                    operator="range",
+                    object_name=table_name,
+                    params={"tableName": table_name or "", "rows": rows},
+                )
+            )
 
     _order = {"critical": 0, "warning": 1, "info": 2}
     findings.sort(key=lambda f: _order[f.severity])
@@ -625,6 +686,7 @@ def analyze_plan_mysql_json(plan_json_text: str) -> list[PlanFinding]:
 
 
 # ── Oracle V$SQL_PLAN (texto formatado) ───────────────────────────────────────
+
 
 def analyze_plan_oracle_text(plan_text: str) -> list[PlanFinding]:
     """Analisa plano Oracle formatado a partir de V$SQL_PLAN."""
@@ -655,73 +717,81 @@ def analyze_plan_oracle_text(plan_text: str) -> list[PlanFinding]:
 
         # OR01 — Full Table Scan
         if "TABLE ACCESS" in operation and "FULL" in options:
-            _add(PlanFinding(
-                finding_id="OR01",
-                severity="warning",
-                description=(
-                    f"Full Table Scan on '{obj or 'table'}' "
-                    f"(estimated cost: {cost:,}, rows: {rows_est:,})."
-                ),
-                suggestion=(
-                    "Create an index on the WHERE/JOIN columns. "
-                    "Use INDEX hints or check statistics with DBMS_STATS."
-                ),
-                operator="TABLE ACCESS FULL",
-                object_name=obj,
-                params={"obj": obj or "table", "cost": cost, "rowsEst": rows_est},
-            ))
+            _add(
+                PlanFinding(
+                    finding_id="OR01",
+                    severity="warning",
+                    description=(
+                        f"Full Table Scan on '{obj or 'table'}' "
+                        f"(estimated cost: {cost:,}, rows: {rows_est:,})."
+                    ),
+                    suggestion=(
+                        "Create an index on the WHERE/JOIN columns. "
+                        "Use INDEX hints or check statistics with DBMS_STATS."
+                    ),
+                    operator="TABLE ACCESS FULL",
+                    object_name=obj,
+                    params={"obj": obj or "table", "cost": cost, "rowsEst": rows_est},
+                )
+            )
 
         # OR02 — Sort
         if "SORT" in operation and cost > 0:
-            _add(PlanFinding(
-                finding_id="OR02",
-                severity="warning",
-                description=(
-                    f"Sort operation with cost {cost:,} — "
-                    "may use excessive PGA or spill to disk (temp)."
-                ),
-                suggestion=(
-                    "Create an index covering the ORDER BY/GROUP BY columns. "
-                    "Monitor V$SORT_USAGE and tune PGA_AGGREGATE_TARGET if there is a spill."
-                ),
-                operator="SORT",
-                params={"cost": cost},
-            ))
+            _add(
+                PlanFinding(
+                    finding_id="OR02",
+                    severity="warning",
+                    description=(
+                        f"Sort operation with cost {cost:,} — "
+                        "may use excessive PGA or spill to disk (temp)."
+                    ),
+                    suggestion=(
+                        "Create an index covering the ORDER BY/GROUP BY columns. "
+                        "Monitor V$SORT_USAGE and tune PGA_AGGREGATE_TARGET if there is a spill."
+                    ),
+                    operator="SORT",
+                    params={"cost": cost},
+                )
+            )
 
         # OR03 — Nested Loops com muitas linhas
         if "NESTED LOOPS" in operation and rows_est > 10_000:
-            _add(PlanFinding(
-                finding_id="OR03",
-                severity="info",
-                description=(
-                    f"Nested Loops with {rows_est:,} estimated rows — "
-                    "inefficient if the inner side does not use an Index Scan."
-                ),
-                suggestion=(
-                    "Check that the inner side of the loop uses an index. "
-                    "For large volumes, consider HASH JOIN via hint /*+ USE_HASH */."
-                ),
-                operator="NESTED LOOPS",
-                params={"rowsEst": rows_est},
-            ))
+            _add(
+                PlanFinding(
+                    finding_id="OR03",
+                    severity="info",
+                    description=(
+                        f"Nested Loops with {rows_est:,} estimated rows — "
+                        "inefficient if the inner side does not use an Index Scan."
+                    ),
+                    suggestion=(
+                        "Check that the inner side of the loop uses an index. "
+                        "For large volumes, consider HASH JOIN via hint /*+ USE_HASH */."
+                    ),
+                    operator="NESTED LOOPS",
+                    params={"rowsEst": rows_est},
+                )
+            )
 
         # OR04 — Partition Full Scan (pode ser intencional mas merece atenção)
         if "PARTITION" in operation and "FULL" in options:
-            _add(PlanFinding(
-                finding_id="OR04",
-                severity="info",
-                description=(
-                    f"Partition Full Scan on '{obj or 'object'}' — "
-                    "all partitions are being read."
-                ),
-                suggestion=(
-                    "Check that the filter includes the partition key "
-                    "to enable Partition Pruning and reduce the scan."
-                ),
-                operator="PARTITION FULL",
-                object_name=obj,
-                params={"obj": obj or "object"},
-            ))
+            _add(
+                PlanFinding(
+                    finding_id="OR04",
+                    severity="info",
+                    description=(
+                        f"Partition Full Scan on '{obj or 'object'}' — "
+                        "all partitions are being read."
+                    ),
+                    suggestion=(
+                        "Check that the filter includes the partition key "
+                        "to enable Partition Pruning and reduce the scan."
+                    ),
+                    operator="PARTITION FULL",
+                    object_name=obj,
+                    params={"obj": obj or "object"},
+                )
+            )
 
     _order = {"critical": 0, "warning": 1, "info": 2}
     findings.sort(key=lambda f: _order[f.severity])
@@ -729,6 +799,7 @@ def analyze_plan_oracle_text(plan_text: str) -> list[PlanFinding]:
 
 
 # ── Dispatcher ───────────────────────────────────────────────────────────────
+
 
 def analyze_plan_by_format(plan_text: str, plan_format: str) -> list[PlanFinding]:
     """Despacha para o analisador correto conforme o formato do plano."""

@@ -83,19 +83,46 @@ class TestRedundancy:
     def test_build_index_defs_orders_keys_and_splits_includes(self) -> None:
         meta = [
             {
-                "object_id": 1, "index_id": 2, "schema_name": "dbo", "table_name": "t",
-                "index_name": "ix", "type": 2, "type_desc": "NONCLUSTERED", "is_unique": False,
-                "is_primary_key": False, "is_unique_constraint": False, "has_filter": False,
-                "filter_definition": None, "size_bytes": 8192,
+                "object_id": 1,
+                "index_id": 2,
+                "schema_name": "dbo",
+                "table_name": "t",
+                "index_name": "ix",
+                "type": 2,
+                "type_desc": "NONCLUSTERED",
+                "is_unique": False,
+                "is_primary_key": False,
+                "is_unique_constraint": False,
+                "has_filter": False,
+                "filter_definition": None,
+                "size_bytes": 8192,
             }
         ]
         cols = [
-            {"object_id": 1, "index_id": 2, "column_name": "b", "key_ordinal": 2,
-             "is_included_column": False, "is_descending_key": True},
-            {"object_id": 1, "index_id": 2, "column_name": "a", "key_ordinal": 1,
-             "is_included_column": False, "is_descending_key": False},
-            {"object_id": 1, "index_id": 2, "column_name": "c", "key_ordinal": 0,
-             "is_included_column": True, "is_descending_key": False},
+            {
+                "object_id": 1,
+                "index_id": 2,
+                "column_name": "b",
+                "key_ordinal": 2,
+                "is_included_column": False,
+                "is_descending_key": True,
+            },
+            {
+                "object_id": 1,
+                "index_id": 2,
+                "column_name": "a",
+                "key_ordinal": 1,
+                "is_included_column": False,
+                "is_descending_key": False,
+            },
+            {
+                "object_id": 1,
+                "index_id": 2,
+                "column_name": "c",
+                "key_ordinal": 0,
+                "is_included_column": True,
+                "is_descending_key": False,
+            },
         ]
         [d] = m._build_index_defs(meta, cols)
         assert d.key_columns == (("a", False), ("b", True))
@@ -205,8 +232,13 @@ class TestMemoryGrants:
         }
         rows = [
             {**base, "plan_handle": b"p1", "statement_start_offset": 0, "execution_count": 2},
-            {**base, "plan_handle": b"p2", "statement_start_offset": 0, "execution_count": 3,
-             "statement_text": "SELECT * FROM t WHERE id = 7"},
+            {
+                **base,
+                "plan_handle": b"p2",
+                "statement_start_offset": 0,
+                "execution_count": 3,
+                "statement_text": "SELECT * FROM t WHERE id = 7",
+            },
             # mesma linha retornada pelas 2 consultas (por grant e por spill) — nao duplica
             {**base, "plan_handle": b"p1", "statement_start_offset": 0, "execution_count": 2},
         ]
@@ -220,8 +252,12 @@ class TestMemoryGrants:
 
     def test_active_grant_waiting_flag(self) -> None:
         g = m.build_active_grant(
-            {"session_id": 55, "grant_time": None, "requested_memory_kb": 1024,
-             "statement_text": "SELECT 1"}
+            {
+                "session_id": 55,
+                "grant_time": None,
+                "requested_memory_kb": 1024,
+                "statement_text": "SELECT 1",
+            }
         )
         assert g.is_waiting and g.session_id == "55" and g.requested_kb == 1024
         assert g.sql_hash is not None
@@ -253,16 +289,40 @@ class TestCompression:
 
     def test_candidate_selection_largest_first_and_skips_compressed(self) -> None:
         rows_db1 = [
-            {"schema_name": "dbo", "table_name": "big", "index_id": 1, "used_kb": 900,
-             "min_compression": "NONE", "max_compression": "NONE"},
-            {"schema_name": "dbo", "table_name": "done", "index_id": 1, "used_kb": 5000,
-             "min_compression": "PAGE", "max_compression": "PAGE"},
+            {
+                "schema_name": "dbo",
+                "table_name": "big",
+                "index_id": 1,
+                "used_kb": 900,
+                "min_compression": "NONE",
+                "max_compression": "NONE",
+            },
+            {
+                "schema_name": "dbo",
+                "table_name": "done",
+                "index_id": 1,
+                "used_kb": 5000,
+                "min_compression": "PAGE",
+                "max_compression": "PAGE",
+            },
         ]
         rows_db2 = [
-            {"schema_name": "dbo", "table_name": "mid", "index_id": 1, "used_kb": 500,
-             "min_compression": "NONE", "max_compression": "NONE"},
-            {"schema_name": "dbo", "table_name": "small", "index_id": 1, "used_kb": 10,
-             "min_compression": "ROW", "max_compression": "ROW"},
+            {
+                "schema_name": "dbo",
+                "table_name": "mid",
+                "index_id": 1,
+                "used_kb": 500,
+                "min_compression": "NONE",
+                "max_compression": "NONE",
+            },
+            {
+                "schema_name": "dbo",
+                "table_name": "small",
+                "index_id": 1,
+                "used_kb": 10,
+                "min_compression": "ROW",
+                "max_compression": "ROW",
+            },
         ]
         selected, truncated = m.select_compression_candidates(
             [("db1", rows_db1), ("db2", rows_db2)], "PAGE", 2
@@ -273,10 +333,18 @@ class TestCompression:
     def test_build_items_aggregates_partitions(self) -> None:
         cand = m._CompressionCandidate("db", "dbo", "t", 100)
         cand.indexes = {
-            1: {"index_name": "pk", "type_desc": "CLUSTERED",
-                "min_compression": "NONE", "max_compression": "NONE"},
-            2: {"index_name": "ix", "type_desc": "NONCLUSTERED",
-                "min_compression": "PAGE", "max_compression": "PAGE"},
+            1: {
+                "index_name": "pk",
+                "type_desc": "CLUSTERED",
+                "min_compression": "NONE",
+                "max_compression": "NONE",
+            },
+            2: {
+                "index_name": "ix",
+                "type_desc": "NONCLUSTERED",
+                "min_compression": "PAGE",
+                "max_compression": "PAGE",
+            },
         }
         est = [
             {"index_id": 1, m._EST_CURRENT: 600, m._EST_REQUESTED: 200},
@@ -297,12 +365,21 @@ class TestPartitions:
         for n, b in enumerate(boundaries, start=1):
             rows.append(
                 {
-                    "schema_name": "dbo", "table_name": "fact", "index_id": 1,
-                    "index_name": "pk", "index_type": "CLUSTERED", "partition_scheme": "ps",
-                    "partition_function": "pf", "boundary_value_on_right": True,
-                    "partition_number": n, "rows": 10 if b else last_rows,
-                    "data_compression_desc": "PAGE", "filegroup_name": "FG1",
-                    "partition_key": "dt", "boundary_type": "date", "boundary_value": b,
+                    "schema_name": "dbo",
+                    "table_name": "fact",
+                    "index_id": 1,
+                    "index_name": "pk",
+                    "index_type": "CLUSTERED",
+                    "partition_scheme": "ps",
+                    "partition_function": "pf",
+                    "boundary_value_on_right": True,
+                    "partition_number": n,
+                    "rows": 10 if b else last_rows,
+                    "data_compression_desc": "PAGE",
+                    "filegroup_name": "FG1",
+                    "partition_key": "dt",
+                    "boundary_type": "date",
+                    "boundary_value": b,
                 }
             )
         return rows

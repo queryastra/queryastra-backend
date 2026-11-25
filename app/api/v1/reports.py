@@ -54,7 +54,7 @@ class ReportExecutionLogResponse(BaseModel):
     email_recipients: list[str]
 
     @classmethod
-    def from_orm(cls, r: ReportExecutionLog) -> "ReportExecutionLogResponse":
+    def from_orm(cls, r: ReportExecutionLog) -> ReportExecutionLogResponse:
         return cls(
             id=r.id,
             report_id=r.report_id,

@@ -224,7 +224,8 @@ def find_redundant_indexes(indexes: Iterable[IndexDef]) -> list[tuple[str, Index
                 # Mantem o de maior "rank" (PK > constraint > unique); empate: mantem o mais
                 # usado (e, por fim, o de menor nome, para ser deterministico).
                 drop, keep = sorted(
-                    (a, b), key=lambda x: (_keep_rank(x), x.reads or 0, x.name == min(a.name, b.name))
+                    (a, b),
+                    key=lambda x: (_keep_rank(x), x.reads or 0, x.name == min(a.name, b.name)),
                 )
                 if drop.protected or drop.name in flagged:
                     continue
@@ -405,13 +406,21 @@ def summarize_partitions(
             out["severity"] = "warning"
 
     detail_rows = [
-        {"number": i + 1, "name": r[1].get("name"), "boundary": r[1].get("bound"),
-         "rows": r[1].get("rows")}
+        {
+            "number": i + 1,
+            "name": r[1].get("name"),
+            "boundary": r[1].get("bound"),
+            "rows": r[1].get("rows"),
+        }
         for i, r in enumerate(ordered)
     ]
     detail_rows += [
-        {"number": len(detail_rows) + i + 1, "name": c.get("name"), "boundary": "DEFAULT",
-         "rows": c.get("rows")}
+        {
+            "number": len(detail_rows) + i + 1,
+            "name": c.get("name"),
+            "boundary": "DEFAULT",
+            "rows": c.get("rows"),
+        }
         for i, c in enumerate(default)
     ]
     out["partitions"] = detail_rows[-PARTITION_DETAIL_LIMIT:]
@@ -793,7 +802,8 @@ def redundant_items(
                 is_primary_key=drop.is_primary,
                 severity="warning" if category == "duplicate" else "info",
                 recommendation=drop_template.format(
-                    schema=quote_ident(schema), index=quote_ident(drop.name),
+                    schema=quote_ident(schema),
+                    index=quote_ident(drop.name),
                     table=quote_ident(drop.extra.get("table_name", "")),
                 ),
                 detail={
@@ -806,9 +816,7 @@ def redundant_items(
     return items
 
 
-async def pg_index_health_for_db(
-    conn: asyncpg.Connection, database: str, version: int
-) -> DbScan:
+async def pg_index_health_for_db(conn: asyncpg.Connection, database: str, version: int) -> DbScan:
     settings = get_settings()
     scan = DbScan()
     scan.usage_since, scan.usage_from_restart = await _usage_since(conn)
@@ -821,8 +829,9 @@ async def pg_index_health_for_db(
     rows: list[asyncpg.Record] = []
     if ext_schema:
         try:
-            rows = await _fetch(conn, _pgstatindex_sql(ext_schema), min_pages,
-                                PGSTATINDEX_MAX_INDEXES)
+            rows = await _fetch(
+                conn, _pgstatindex_sql(ext_schema), min_pages, PGSTATINDEX_MAX_INDEXES
+            )
             measured = True
         except asyncpg.InsufficientPrivilegeError:
             scan.notes.add("permission_denied")
@@ -846,9 +855,7 @@ async def pg_index_health_for_db(
                     fragmentation_pct=pct,
                     page_count=int(r["relpages"] or 0),
                     severity=fragmentation_severity(pct),  # type: ignore[arg-type]
-                    recommendation=(
-                        f"{reindex} {qualified(r['schema_name'], r['index_name'])};"
-                    ),
+                    recommendation=(f"{reindex} {qualified(r['schema_name'], r['index_name'])};"),
                     detail={
                         "leaf_fragmentation_pct": round(leaf_frag, 1),
                         "avg_leaf_density_pct": r["avg_leaf_density"],
@@ -863,7 +870,9 @@ async def pg_index_health_for_db(
 
     if not measured:
         scan.notes.add("fragmentation_estimated")
-        rows = await _fetch(conn, _BTREE_BLOAT_ESTIMATE_SQL, min_pages, settings.maintenance_max_rows)
+        rows = await _fetch(
+            conn, _BTREE_BLOAT_ESTIMATE_SQL, min_pages, settings.maintenance_max_rows
+        )
         for r in rows:
             relpages = int(r["relpages"] or 0)
             est = int(r["est_pages"] or 0)
@@ -884,9 +893,7 @@ async def pg_index_health_for_db(
                     fragmentation_pct=pct,
                     page_count=relpages,
                     severity=fragmentation_severity(pct),  # type: ignore[arg-type]
-                    recommendation=(
-                        f"{reindex} {qualified(r['schema_name'], r['index_name'])};"
-                    ),
+                    recommendation=(f"{reindex} {qualified(r['schema_name'], r['index_name'])};"),
                     detail={
                         "estimated_pages": est,
                         "fillfactor": r["fillfactor"],
@@ -921,9 +928,7 @@ async def pg_index_health_for_db(
 
     # Duplicados e sobrepostos.
     defs = build_index_defs(await _fetch(conn, _index_defs_sql(version)))
-    scan.items.extend(
-        redundant_items(defs, database, "DROP INDEX CONCURRENTLY {schema}.{index};")
-    )
+    scan.items.extend(redundant_items(defs, database, "DROP INDEX CONCURRENTLY {schema}.{index};"))
     scan.notes |= set(usage_notes(scan.usage_since, scan.usage_from_restart, datetime.now(UTC)))
     return scan
 
@@ -995,18 +1000,21 @@ async def pg_statistics_for_db(conn: asyncpg.Connection, database: str) -> DbSca
 _SEVERITY_ORDER = {"critical": 0, "warning": 1, "info": 2}
 
 
-def sort_statistics(items: list[NormalizedStatisticsHealthItem]) -> list[NormalizedStatisticsHealthItem]:
+def sort_statistics(
+    items: list[NormalizedStatisticsHealthItem],
+) -> list[NormalizedStatisticsHealthItem]:
     return sorted(
         items,
-        key=lambda i: (_SEVERITY_ORDER.get(i.severity, 3), not i.is_stale,
-                       -(i.modified_pct or 0.0)),
+        key=lambda i: (
+            _SEVERITY_ORDER.get(i.severity, 3),
+            not i.is_stale,
+            -(i.modified_pct or 0.0),
+        ),
     )
 
 
 def sort_index_items(items: list[NormalizedIndexHealthItem]) -> list[NormalizedIndexHealthItem]:
-    return sorted(
-        items, key=lambda i: (_SEVERITY_ORDER.get(i.severity, 3), -(i.size_bytes or 0))
-    )
+    return sorted(items, key=lambda i: (_SEVERITY_ORDER.get(i.severity, 3), -(i.size_bytes or 0)))
 
 
 # ── Memoria (proxy: spill de work_mem) ─────────────────────────────────────────────────────
@@ -1071,8 +1079,9 @@ async def pg_memory_grants(
     connect: ConnectFn, bootstrap_db: str, version: int
 ) -> NormalizedMemoryGrantReport:
     settings = get_settings()
-    meta = NormalizedScanMeta(method="pg_stat_statements.temp_blks_written",
-                              notes=["workmem_spill_proxy"])
+    meta = NormalizedScanMeta(
+        method="pg_stat_statements.temp_blks_written", notes=["workmem_spill_proxy"]
+    )
     report = NormalizedMemoryGrantReport(meta=meta)
 
     conn = await connect(bootstrap_db)
@@ -1117,8 +1126,11 @@ async def pg_memory_grants(
             "temp_files_total": sum(int(r["temp_files"] or 0) for r in temp_rows),
             "spilling_now": sum(1 for a in report.active if a.detail.get("spilling_now")),
             "temp_by_database": [
-                {"database_name": r["database_name"], "temp_files": int(r["temp_files"] or 0),
-                 "temp_bytes": int(r["temp_bytes"] or 0)}
+                {
+                    "database_name": r["database_name"],
+                    "temp_files": int(r["temp_files"] or 0),
+                    "temp_bytes": int(r["temp_bytes"] or 0),
+                }
                 for r in temp_rows[:20]
             ],
         },
@@ -1142,7 +1154,9 @@ async def pg_memory_grants(
             rows = await _fetch(db_conn, _pgss_sql(version), TOP_QUERIES_LIMIT)
             if version >= PG14:
                 try:
-                    reset = await _fetchval(db_conn, "SELECT stats_reset FROM pg_stat_statements_info")
+                    reset = await _fetchval(
+                        db_conn, "SELECT stats_reset FROM pg_stat_statements_info"
+                    )
                     if reset is not None:
                         meta.usage_stats_since = reset
                 except asyncpg.PostgresError:
@@ -1170,7 +1184,9 @@ async def pg_memory_grants(
                 NormalizedMemoryGrantTopQuery(
                     sql_hash=None if hidden else sql_hash(text),
                     sql_text_masked=(
-                        "<insufficient privilege>" if hidden else mask_sql_literals_for_display(text)
+                        "<insufficient privilege>"
+                        if hidden
+                        else mask_sql_literals_for_display(text)
                     ),
                     database_name=r["database_name"],
                     executions=calls,
@@ -1238,8 +1254,12 @@ def summarize_toast_columns(
         if effective:
             methods.add(effective)
         out.append(
-            {"name": col["attname"], "type": col["data_type"], "storage": storage,
-             "compression": effective}
+            {
+                "name": col["attname"],
+                "type": col["data_type"],
+                "storage": storage,
+                "compression": effective,
+            }
         )
     if not methods:
         return "none", out
@@ -1343,8 +1363,14 @@ async def pg_partitions_for_db(conn: asyncpg.Connection, database: str) -> DbSca
         if c["relkind"] == "p":
             rows = None  # subparticionada: reltuples do pai e sempre 0/-1
         estimated = estimated or rows is not None
-        entry = {"name": c["name"], "schema_name": c["schema_name"], "bound": c["bound"],
-                 "rows": rows, "has_rows": None, "relkind": c["relkind"]}
+        entry = {
+            "name": c["name"],
+            "schema_name": c["schema_name"],
+            "bound": c["bound"],
+            "rows": rows,
+            "has_rows": None,
+            "relkind": c["relkind"],
+        }
         if (c["bound"] or "").strip().upper() == "DEFAULT" and c["relkind"] == "r":
             # Particao DEFAULT: o que importa e se tem QUALQUER linha (EXISTS e barato).
             entry["has_rows"] = bool(

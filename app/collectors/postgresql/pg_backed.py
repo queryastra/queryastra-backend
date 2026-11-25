@@ -108,9 +108,7 @@ class PostgreSQLBackedCollector:
     async def scan_plan_history(self) -> list[NormalizedPlanSnapshot]:
         return await self._pg.scan_plan_history()
 
-    async def explain_queries(
-        self, queries: list[tuple[str, str]]
-    ) -> list[NormalizedPlanSnapshot]:
+    async def explain_queries(self, queries: list[tuple[str, str]]) -> list[NormalizedPlanSnapshot]:
         return await self._pg.explain_queries(queries)
 
     # Varreduras de manutencao: Aurora PostgreSQL usa a implementacao PostgreSQL integral;
@@ -119,7 +117,9 @@ class PostgreSQLBackedCollector:
     async def list_databases(self) -> list[str]:
         return await self._pg.list_databases()
 
-    async def collect_index_health(self, database: str | None = None) -> NormalizedIndexHealthReport:
+    async def collect_index_health(
+        self, database: str | None = None
+    ) -> NormalizedIndexHealthReport:
         return await self._pg.collect_index_health(database)
 
     async def collect_statistics_health(

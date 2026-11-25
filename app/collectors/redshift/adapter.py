@@ -67,9 +67,7 @@ class RedshiftCollector(PostgreSQLBackedCollector):
             finally:
                 await conn.close()
         except Exception as exc:
-            logger.debug(
-                "SVV_SESSIONS não disponível (possivelmente PostgreSQL vanilla): %s", exc
-            )
+            logger.debug("SVV_SESSIONS não disponível (possivelmente PostgreSQL vanilla): %s", exc)
             results.append(
                 CapabilityResult(
                     capability=REDSHIFT_SESSION_ACTIVITY,
@@ -80,9 +78,7 @@ class RedshiftCollector(PostgreSQLBackedCollector):
 
         return results
 
-    async def explain_queries(
-        self, queries: list[tuple[str, str]]
-    ) -> list[NormalizedPlanSnapshot]:
+    async def explain_queries(self, queries: list[tuple[str, str]]) -> list[NormalizedPlanSnapshot]:
         # Redshift não suporta EXPLAIN FORMAT JSON — retorna lista vazia sem tentar conectar.
         return []
 
@@ -91,7 +87,9 @@ class RedshiftCollector(PostgreSQLBackedCollector):
     async def list_databases(self) -> list[str]:
         return await rs_maintenance.list_fn(self._pg._connect_db)()
 
-    async def collect_index_health(self, database: str | None = None) -> NormalizedIndexHealthReport:
+    async def collect_index_health(
+        self, database: str | None = None
+    ) -> NormalizedIndexHealthReport:
         # Sem indices no Redshift (sort keys / dist keys).
         return NormalizedIndexHealthReport(
             meta=NormalizedScanMeta(supported=False, notes=["no_indexes_concept"])

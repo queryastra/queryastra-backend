@@ -86,11 +86,24 @@ def test_postgresql_collector_omits_connection_gauge_without_max_connections() -
         ConnectionParams(host="localhost", port=5432, auth_method="encrypted_fallback"),
         instance_id=uuid4(),
     )
-    stats_row = {k: 0 for k in (
-        "numbackends", "xact_commit", "xact_rollback", "blks_read", "blks_hit", "tup_returned",
-        "tup_fetched", "tup_inserted", "tup_updated", "tup_deleted", "deadlocks", "temp_files",
-        "temp_bytes",
-    )}
+    stats_row = {
+        k: 0
+        for k in (
+            "numbackends",
+            "xact_commit",
+            "xact_rollback",
+            "blks_read",
+            "blks_hit",
+            "tup_returned",
+            "tup_fetched",
+            "tup_inserted",
+            "tup_updated",
+            "tup_deleted",
+            "deadlocks",
+            "temp_files",
+            "temp_bytes",
+        )
+    }
     samples = collector._build_metric_samples([], stats_row, None, 160000, datetime.now(UTC))
     names = {s.metric_name for s in samples}
     assert PG_CONNECTIONS_USED_PERCENT not in names

@@ -167,7 +167,9 @@ async def delete_own_account(
 
     if user.role == "admin":
         all_users = await users_repo.list_all()
-        active_admins = [u for u in all_users if u.role == "admin" and u.is_active and u.id != user.id]
+        active_admins = [
+            u for u in all_users if u.role == "admin" and u.is_active and u.id != user.id
+        ]
         if not active_admins:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,

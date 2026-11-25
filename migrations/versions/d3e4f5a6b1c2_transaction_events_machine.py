@@ -9,8 +9,8 @@ Create Date: 2026-10-06
 Base para linked server detection na tela de Transacoes.
 """
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 revision = "d3e4f5a6b1c2"
 down_revision = "c2d3e4f5a6b1"

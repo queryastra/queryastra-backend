@@ -99,7 +99,9 @@ async def redshift_statistics_for_db(conn: asyncpg.Connection, database: str) ->
     scan = DbScan(notes={"stats_off_from_svv_table_info"})
     rows = await _fetch(conn, _STATISTICS_SQL, settings.maintenance_max_rows)
     try:
-        last = {int(r["table_id"]): r["last_analyze"] for r in await _fetch(conn, _LAST_ANALYZE_SQL)}
+        last = {
+            int(r["table_id"]): r["last_analyze"] for r in await _fetch(conn, _LAST_ANALYZE_SQL)
+        }
     except asyncpg.PostgresError:
         # STL so mostra tudo para superuser (e retem ~7 dias) — sem ele, so `stats_off`.
         last = {}
@@ -120,7 +122,8 @@ async def redshift_statistics_for_db(conn: asyncpg.Connection, database: str) ->
                 modified_pct=stats_off,
                 days_since_update=(
                     round((now - last_updated).total_seconds() / 86400.0, 1)
-                    if last_updated else None
+                    if last_updated
+                    else None
                 ),
                 recommendation=f"ANALYZE {qualified(r['schema_name'], r['table_name'])};",
                 detail={
@@ -139,8 +142,12 @@ async def redshift_statistics(
     connect: ConnectFn, database: str | None
 ) -> NormalizedStatisticsHealthReport:
     outcome = await scan_databases(
-        connect, BOOTSTRAP_DB, database, redshift_statistics_for_db,
-        method="svv_table_info.stats_off", list_fn=list_fn(connect),
+        connect,
+        BOOTSTRAP_DB,
+        database,
+        redshift_statistics_for_db,
+        method="svv_table_info.stats_off",
+        list_fn=list_fn(connect),
     )
     items = sorted(outcome.items, key=lambda i: -(i.modified_pct or 0))
     return NormalizedStatisticsHealthReport(items=items, meta=outcome.meta)
@@ -177,7 +184,8 @@ async def redshift_compression_for_db(
                 # ALTER ... ENCODE AUTO deixa o Redshift escolher o encoding de cada coluna.
                 command=(
                     f"ANALYZE COMPRESSION {table};\nALTER TABLE {table} ALTER ENCODE AUTO;"
-                    if not_encoded else None
+                    if not_encoded
+                    else None
                 ),
                 detail={"tbl_rows": r["tbl_rows"], "diststyle": r["diststyle"]},
             )
@@ -189,9 +197,12 @@ async def redshift_compression(
     connect: ConnectFn, database: str | None, max_objects: int
 ) -> NormalizedCompressionReport:
     outcome = await scan_databases(
-        connect, BOOTSTRAP_DB, database,
+        connect,
+        BOOTSTRAP_DB,
+        database,
         lambda conn, db: redshift_compression_for_db(conn, db, max_objects),
-        method="svv_table_info.encoded", list_fn=list_fn(connect),
+        method="svv_table_info.encoded",
+        list_fn=list_fn(connect),
     )
     items = sorted(outcome.items, key=lambda i: -(i.current_size_kb or 0))
     return NormalizedCompressionReport(items=items, meta=outcome.meta)
@@ -229,8 +240,17 @@ def aggregate_disk_based(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         text = r["querytxt"] or ""
         key = sql_hash(text)
         a = acc.setdefault(
-            key, {"hash": key, "text": text, "database_name": r["database_name"],
-                  "executions": 0, "steps": 0, "workmem_max": 0, "workmem_sum": 0, "last": None},
+            key,
+            {
+                "hash": key,
+                "text": text,
+                "database_name": r["database_name"],
+                "executions": 0,
+                "steps": 0,
+                "workmem_max": 0,
+                "workmem_sum": 0,
+                "last": None,
+            },
         )
         mem = int(r["max_workmem"] or 0)
         a["executions"] += 1
@@ -275,9 +295,12 @@ async def redshift_memory_grants(connect: ConnectFn) -> NormalizedMemoryGrantRep
                 is_waiting=is_waiting,
                 # STV_WLM_QUERY_STATE em microssegundos.
                 wait_time_ms=int((r["queue_time"] or 0) / 1000),
-                detail={"query_id": r["query"], "state": str(r["state"] or "").strip(),
-                        "exec_time_ms": int((r["exec_time"] or 0) / 1000),
-                        "service_class": r["service_class"]},
+                detail={
+                    "query_id": r["query"],
+                    "state": str(r["state"] or "").strip(),
+                    "exec_time_ms": int((r["exec_time"] or 0) / 1000),
+                    "service_class": r["service_class"],
+                },
             )
         )
 

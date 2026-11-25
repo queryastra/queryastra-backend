@@ -109,7 +109,8 @@ class QueryStatsSupervisor:
                 if instance.auth_method == "encrypted_fallback":
                     if instance.encrypted_credential_ref is None:
                         logger.error(
-                            "encrypted_credential_ref ausente para instance_id=%s - snapshot pulado",
+                            "encrypted_credential_ref ausente para instance_id=%s - snapshot "
+                            "pulado",
                             instance_id,
                         )
                         return

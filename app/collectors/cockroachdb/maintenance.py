@@ -184,7 +184,10 @@ async def crdb_index_health(
     connect: ConnectFn, database: str | None
 ) -> NormalizedIndexHealthReport:
     outcome = await scan_databases(
-        connect, BOOTSTRAP_DB, database, crdb_index_health_for_db,
+        connect,
+        BOOTSTRAP_DB,
+        database,
+        crdb_index_health_for_db,
         method="crdb_internal.index_usage_statistics",
         list_fn=lambda: list_databases(connect),
     )
@@ -275,8 +278,12 @@ async def crdb_statistics(
     connect: ConnectFn, database: str | None
 ) -> NormalizedStatisticsHealthReport:
     outcome = await scan_databases(
-        connect, BOOTSTRAP_DB, database, crdb_statistics_for_db,
-        method="system.table_statistics", list_fn=lambda: list_databases(connect),
+        connect,
+        BOOTSTRAP_DB,
+        database,
+        crdb_statistics_for_db,
+        method="system.table_statistics",
+        list_fn=lambda: list_databases(connect),
     )
     items = sorted(outcome.items, key=lambda i: (not i.is_stale, -(i.days_since_update or 0)))
     return NormalizedStatisticsHealthReport(items=items, meta=outcome.meta)
@@ -314,9 +321,18 @@ def aggregate_crdb_statements(rows: list[dict[str, Any]]) -> list[dict[str, Any]
         fp = r["fingerprint"]
         a = acc.setdefault(
             fp,
-            {"fingerprint": fp, "query": r["query"], "database_name": r["database_name"],
-             "executions": 0, "sampled": 0, "mem_sum": 0.0, "mem_max": None,
-             "disk_sum": 0.0, "disk_max": None, "last": None},
+            {
+                "fingerprint": fp,
+                "query": r["query"],
+                "database_name": r["database_name"],
+                "executions": 0,
+                "sampled": 0,
+                "mem_sum": 0.0,
+                "mem_max": None,
+                "disk_sum": 0.0,
+                "disk_max": None,
+                "last": None,
+            },
         )
         a["executions"] += int(r["executions"] or 0)
         sampled = int(r["sampled"] or 0)
@@ -342,8 +358,9 @@ def aggregate_crdb_statements(rows: list[dict[str, Any]]) -> list[dict[str, Any]
 
 
 async def crdb_memory_grants(connect: ConnectFn) -> NormalizedMemoryGrantReport:
-    meta = NormalizedScanMeta(method="crdb_internal.statement_statistics",
-                              notes=["sampled_statistics"])
+    meta = NormalizedScanMeta(
+        method="crdb_internal.statement_statistics", notes=["sampled_statistics"]
+    )
     report = NormalizedMemoryGrantReport(meta=meta)
     conn = await connect(BOOTSTRAP_DB)
     try:
@@ -395,11 +412,12 @@ async def crdb_memory_grants(connect: ConnectFn) -> NormalizedMemoryGrantReport:
                 max_used_kb=round(mem_max_kb, 1),
                 spill_kb=disk_kb or None,
                 last_execution=a["last"],
-                severity=(
-                    "warning" if disk_kb > 0 or mem_max_kb >= 1024 * 1024 else "info"
-                ),
-                detail={"fingerprint_id": a["fingerprint"], "sampled_executions": a["sampled"],
-                        "avg_disk_kb": round(a["disk_avg"] / 1024, 1)},
+                severity=("warning" if disk_kb > 0 or mem_max_kb >= 1024 * 1024 else "info"),
+                detail={
+                    "fingerprint_id": a["fingerprint"],
+                    "sampled_executions": a["sampled"],
+                    "avg_disk_kb": round(a["disk_avg"] / 1024, 1),
+                },
             )
         )
     report.summary = NormalizedMemoryGrantSummary(
@@ -426,7 +444,9 @@ _PARTITIONS_SQL = """
 """
 
 
-def group_crdb_partitions(rows: list[dict[str, Any]], database: str) -> list[NormalizedPartitionInfo]:
+def group_crdb_partitions(
+    rows: list[dict[str, Any]], database: str
+) -> list[NormalizedPartitionInfo]:
     groups: dict[tuple[str, str, str | None], list[dict[str, Any]]] = {}
     for r in rows:
         groups.setdefault((r["schema_name"], r["table_name"], r.get("index_name")), []).append(r)
@@ -434,9 +454,12 @@ def group_crdb_partitions(rows: list[dict[str, Any]], database: str) -> list[Nor
     for (schema, table, index), parts in groups.items():
         is_range = any(p.get("range_value") for p in parts)
         last = parts[-1].get("range_value") if is_range else None
-        unbounded = [p["partition_name"] for p in parts
-                     if "MAXVALUE" in str(p.get("range_value") or "").upper()
-                     or "DEFAULT" in str(p.get("list_value") or "").upper()]
+        unbounded = [
+            p["partition_name"]
+            for p in parts
+            if "MAXVALUE" in str(p.get("range_value") or "").upper()
+            or "DEFAULT" in str(p.get("list_value") or "").upper()
+        ]
         items.append(
             NormalizedPartitionInfo(
                 database_name=database,
@@ -451,8 +474,12 @@ def group_crdb_partitions(rows: list[dict[str, Any]], database: str) -> list[Nor
                 severity="info",
                 detail={
                     "partitions": [
-                        {"number": i + 1, "name": p["partition_name"],
-                         "boundary": p.get("range_value") or p.get("list_value"), "rows": None}
+                        {
+                            "number": i + 1,
+                            "name": p["partition_name"],
+                            "boundary": p.get("range_value") or p.get("list_value"),
+                            "rows": None,
+                        }
                         for i, p in enumerate(parts)
                     ][-24:],
                     "catch_all_partitions": unbounded or None,
@@ -469,7 +496,11 @@ async def crdb_partitions_for_db(conn: asyncpg.Connection, database: str) -> DbS
 
 async def crdb_partitions(connect: ConnectFn, database: str | None) -> NormalizedPartitionReport:
     outcome = await scan_databases(
-        connect, BOOTSTRAP_DB, database, crdb_partitions_for_db,
-        method="crdb_internal.partitions", list_fn=lambda: list_databases(connect),
+        connect,
+        BOOTSTRAP_DB,
+        database,
+        crdb_partitions_for_db,
+        method="crdb_internal.partitions",
+        list_fn=lambda: list_databases(connect),
     )
     return NormalizedPartitionReport(items=outcome.items, meta=outcome.meta)

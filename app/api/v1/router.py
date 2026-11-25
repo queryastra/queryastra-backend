@@ -48,9 +48,7 @@ api_v1_router = APIRouter()
 
 api_v1_router.include_router(auth.router, prefix="/auth", tags=["auth"])
 api_v1_router.include_router(teams.router, prefix="/auth/teams", tags=["teams"])
-api_v1_router.include_router(
-    notifications.router, prefix="/notifications", tags=["notifications"]
-)
+api_v1_router.include_router(notifications.router, prefix="/notifications", tags=["notifications"])
 api_v1_router.include_router(license.router, prefix="/license", tags=["license"])
 api_v1_router.include_router(audit_log.router, prefix="/audit-log", tags=["audit-log"])
 api_v1_router.include_router(instances.router, prefix="/instances", tags=["instances"])
@@ -76,18 +74,16 @@ api_v1_router.include_router(status.router, prefix="/status", tags=["status"])
 api_v1_router.include_router(update.router, prefix="/update", tags=["update"])
 api_v1_router.include_router(vacuum.router, prefix="/instances", tags=["vacuum"])
 api_v1_router.include_router(health_stats.router, prefix="/instances", tags=["health-stats"])
+api_v1_router.include_router(db_maintenance.router, prefix="/instances", tags=["db-maintenance"])
 api_v1_router.include_router(
-    db_maintenance.router, prefix="/instances", tags=["db-maintenance"]
+    ai_deep_analysis.router, prefix="/instances", tags=["ai-deep-analysis"]
 )
-api_v1_router.include_router(ai_deep_analysis.router, prefix="/instances", tags=["ai-deep-analysis"])
 api_v1_router.include_router(anomalies.instance_router, prefix="/instances", tags=["anomalies"])
 api_v1_router.include_router(anomalies.router, prefix="/anomalies", tags=["anomalies"])
 api_v1_router.include_router(
     instance_history.router, prefix="/instances", tags=["instance-history"]
 )
-api_v1_router.include_router(
-    annotations_api.router, prefix="/annotations", tags=["annotations"]
-)
+api_v1_router.include_router(annotations_api.router, prefix="/annotations", tags=["annotations"])
 api_v1_router.include_router(overview.router, prefix="/overview", tags=["overview"])
 api_v1_router.include_router(exports.router, prefix="/exports", tags=["exports"])
 api_v1_router.include_router(websocket.router, tags=["websocket"])

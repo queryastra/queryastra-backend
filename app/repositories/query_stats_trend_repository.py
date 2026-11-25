@@ -17,7 +17,6 @@ from app.repositories.base import BaseRepository
 
 
 class QueryStatsTrendRepository(BaseRepository):
-
     async def insert_snapshot(
         self,
         instance_id: UUID,

@@ -277,9 +277,7 @@ class Collector(Protocol):
         """
         ...
 
-    async def explain_queries(
-        self, queries: list[tuple[str, str]]
-    ) -> list[NormalizedPlanSnapshot]:
+    async def explain_queries(self, queries: list[tuple[str, str]]) -> list[NormalizedPlanSnapshot]:
         """Gera planos via EXPLAIN/V$SQL_PLAN para as queries informadas.
 
         Chamado pelo `PlanHistorySupervisor` para engines sem cache de plano exposto
@@ -409,7 +407,9 @@ class Collector(Protocol):
         """Bancos de usuario acessiveis (seletor da tela). `[]` = motor de banco unico."""
         ...
 
-    async def collect_index_health(self, database: str | None = None) -> NormalizedIndexHealthReport:
+    async def collect_index_health(
+        self, database: str | None = None
+    ) -> NormalizedIndexHealthReport:
         """Fragmentacao, indices sem uso (custam escrita, nao ajudam leitura), duplicados e
         sobrepostos (prefixo a esquerda)."""
         ...

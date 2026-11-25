@@ -386,9 +386,7 @@ class OracleCollector(CollectorNoOpMixin):
         except (TypeError, ValueError):
             return None
 
-    async def explain_queries(
-        self, queries: list[tuple[str, str]]
-    ) -> list[NormalizedPlanSnapshot]:
+    async def explain_queries(self, queries: list[tuple[str, str]]) -> list[NormalizedPlanSnapshot]:
         """Coleta planos de execução diretamente de V$SQL_PLAN para as queries informadas.
 
         Para cada sql_hash, procura o sql_id correspondente em V$SQL via hash SHA-256 do texto
@@ -431,13 +429,11 @@ class OracleCollector(CollectorNoOpMixin):
             hash_to_plan: dict[str, tuple[str, int]] = {}
             for row in sql_rows:
                 raw_text = row.get("sql_text") or ""
-                computed_hash = hashlib.sha256(
-                    mask_sql_literals(raw_text).encode()
-                ).hexdigest()
+                computed_hash = hashlib.sha256(mask_sql_literals(raw_text).encode()).hexdigest()
                 if computed_hash not in hash_to_plan:
                     hash_to_plan[computed_hash] = (row["sql_id"], row["plan_hash_value"])
 
-            for sql_hash, sql_text in queries[:40]:
+            for sql_hash, _sql_text in queries[:40]:
                 plan_info = hash_to_plan.get(sql_hash)
                 if not plan_info:
                     continue

@@ -184,7 +184,8 @@ class DB2Collector(CollectorNoOpMixin):
                         functools.partial(
                             _execute_sync,
                             conn,
-                            "SELECT COUNT(*) AS cnt FROM TABLE(MON_GET_ACTIVITY(NULL, -2)) AS t FETCH FIRST 1 ROWS ONLY",
+                            "SELECT COUNT(*) AS cnt FROM TABLE(MON_GET_ACTIVITY(NULL, -2)) AS t "
+                            "FETCH FIRST 1 ROWS ONLY",
                         ),
                     ),
                     timeout=settings.collection_query_timeout_seconds,
@@ -211,7 +212,8 @@ class DB2Collector(CollectorNoOpMixin):
                         functools.partial(
                             _execute_sync,
                             conn,
-                            "SELECT COUNT(*) AS cnt FROM TABLE(MON_GET_STATEMENT(NULL, -2)) AS t FETCH FIRST 1 ROWS ONLY",
+                            "SELECT COUNT(*) AS cnt FROM TABLE(MON_GET_STATEMENT(NULL, -2)) AS "
+                            "t FETCH FIRST 1 ROWS ONLY",
                         ),
                     ),
                     timeout=settings.collection_query_timeout_seconds,
@@ -347,10 +349,12 @@ class DB2Collector(CollectorNoOpMixin):
         ]
         if db_rows:
             row = db_rows[0]
-            candidates.extend([
-                sample(DB2_DEADLOCKS_TOTAL, row.get("deadlocks")),
-                sample(DB2_LOCK_WAITS_TOTAL, row.get("lock_waits")),
-            ])
+            candidates.extend(
+                [
+                    sample(DB2_DEADLOCKS_TOTAL, row.get("deadlocks")),
+                    sample(DB2_LOCK_WAITS_TOTAL, row.get("lock_waits")),
+                ]
+            )
         if bp_rows:
             row = bp_rows[0]
             logical = float(row.get("logical_reads") or 0)

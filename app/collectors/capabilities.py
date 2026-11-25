@@ -42,14 +42,17 @@ AURORA_MYSQL_ENGINE = "aurora_mysql_engine"
 
 # Oracle
 ORACLE_SESSION_ACTIVITY = "oracle_session_activity"  # SELECT on V$SESSION (CREATE SESSION)
-ORACLE_QUERY_STATS = "oracle_query_stats"           # SELECT on V$SQL, V$SQLAREA (SELECT_CATALOG_ROLE ou SELECT ANY DICTIONARY)
+# SELECT on V$SQL, V$SQLAREA (SELECT_CATALOG_ROLE ou SELECT ANY DICTIONARY)
+ORACLE_QUERY_STATS = "oracle_query_stats"
 
 # IBM DB2
-DB2_SESSION_ACTIVITY = "db2_session_activity"       # EXECUTE on MON_GET_ACTIVITY (DBADM ou DATAACCESS)
-DB2_QUERY_STATS = "db2_query_stats"                # EXECUTE on MON_GET_STATEMENT
+DB2_SESSION_ACTIVITY = "db2_session_activity"  # EXECUTE on MON_GET_ACTIVITY (DBADM ou DATAACCESS)
+DB2_QUERY_STATS = "db2_query_stats"  # EXECUTE on MON_GET_STATEMENT
 
 # Amazon Redshift (PostgreSQL-compatible, via asyncpg)
-REDSHIFT_SESSION_ACTIVITY = "redshift_session_activity"  # SELECT on SVV_SESSIONS / STV_WLM_QUERY_STATE
+REDSHIFT_SESSION_ACTIVITY = (
+    "redshift_session_activity"  # SELECT on SVV_SESSIONS / STV_WLM_QUERY_STATE
+)
 
 # Usado por todos os adaptadores quando a conexao nem abre (Docs/rules/02-safe-collection.md).
 CONNECTIVITY = "connectivity"
