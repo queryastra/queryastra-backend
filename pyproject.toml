@@ -19,7 +19,7 @@ dependencies = [
     # Mantidas ativas por padrao; ver nota no README/relatorio de scaffold caso `uv sync`
     # falhe por falta de driver ODBC do SO — nesse caso comentar as duas linhas abaixo.
     "pyodbc>=5.1",
-    "pymssql>=2.3",
+    "pymssql>=2.4.6",
     "cryptography>=42",
     # Cliente HTTP usado pelo AlertingWorker para notificacao via webhook
     # (app/workers/alerting_worker.py) — dependencia de runtime, nao so de teste.
