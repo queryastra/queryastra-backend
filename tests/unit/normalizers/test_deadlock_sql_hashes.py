@@ -36,13 +36,15 @@ _EVENT_XML = f"""
       <process-list>
         <process id="process1" spid="61" currentdbname="AB_COBRANCA">
           <executionStack>
-            <frame procname="adhoc" line="1" stmtstart="{_STMTSTART}" sqlhandle="0x02">unknown</frame>
+            <frame procname="adhoc" line="1" stmtstart="{_STMTSTART}"
+                   sqlhandle="0x02">unknown</frame>
           </executionStack>
           <inputbuf>{_PREFIX}{_STATEMENT}</inputbuf>
         </process>
         <process id="process2" spid="62" currentdbname="AB_COBRANCA">
           <executionStack>
-            <frame procname="AB_COBRANCA.dbo.sp_x" line="3">SELECT 1 FROM outra_tabela WHERE id = 7</frame>
+            <frame procname="AB_COBRANCA.dbo.sp_x"
+                   line="3">SELECT 1 FROM outra_tabela WHERE id = 7</frame>
           </executionStack>
           <inputbuf>EXEC dbo.sp_x</inputbuf>
         </process>
@@ -61,7 +63,7 @@ def _process(xml: str) -> ElementTree.Element:
 def test_adhoc_frame_slice_matches_collector_statement_hash() -> None:
     process = _process(
         f'<process id="p1"><executionStack><frame procname="adhoc" stmtstart="{_STMTSTART}"'
-        f' /></executionStack><inputbuf>{_PREFIX}{_STATEMENT}</inputbuf></process>'
+        f" /></executionStack><inputbuf>{_PREFIX}{_STATEMENT}</inputbuf></process>"
     )
     assert _collector_hash(_STATEMENT) in deadlock_process_sql_hashes(process)
 
