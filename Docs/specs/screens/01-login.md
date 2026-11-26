@@ -18,7 +18,15 @@ in `AuthContext`.
 
 ## Behavior
 - On success: stores token, redirects to `/instances`
-- On failure: shows inline error (401)
+- On failure: inline error chosen by the cause (`loginErrorKey` in `src/app/login/_content.tsx`):
+
+  | Response | Message key (`Login.*`) | pt-BR |
+  |---|---|---|
+  | 4xx (e.g. 401) | `error` | Usuário ou senha incorretos |
+  | 429 (10 failures / 10 min per IP) | `errorTooManyAttempts` | Muitas tentativas sem sucesso… |
+  | network error / 5xx (backend down or restarting) | `errorUnavailable` | Não foi possível conectar ao servidor… |
+
+  A backend outage must never be reported as a wrong password.
 - If already authenticated, redirects immediately to `/instances`
 
 ## Notes

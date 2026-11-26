@@ -26,6 +26,13 @@ Both buttons call `collectMutation`; the target is passed as a parameter.
 `isBusy = isScanningAll || isScanningSelected` controls button disabled state.
 
 ## Engine support
-- SQL Server: ✓ (`sys.dm_db_missing_index_details`)
-- PostgreSQL: partial (pg_stat_user_tables scan patterns)
-- MySQL: partial
+- SQL Server: ✓ (`sys.dm_db_missing_index_details` — suggests specific columns)
+- PostgreSQL (and Aurora PG / CockroachDB / Redshift, which delegate to it): heuristic per
+  database (`pg_stat_user_tables`, seq_scan ≫ idx_scan); with the `pg_qualstats` extension,
+  adds column-level suggestions — best-effort, a failure there never drops the heuristic ones
+- MySQL / MariaDB / Aurora MySQL: `performance_schema.table_io_waits_summary_by_index_usage`
+- Oracle, Db2: tables with no index and many rows
+
+Only SQL Server (and PostgreSQL with `pg_qualstats`) name columns; the others point to the
+candidate table. The list only contains databases that have suggestions — it is expected that
+a database present in other screens does not appear here.

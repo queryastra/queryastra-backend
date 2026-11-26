@@ -14,7 +14,8 @@ Extended Events / ring buffer. Shows a deadlock heatmap and links to individual 
 ## UI
 - **DeadlockHistoryPanel** — heatmap of deadlock frequency by hour/day
 - **Deadlock table** — timestamp, victim query text, participating tables, resolution
-- Filters: database, time range
+- Filters: database, time range. The database options are built from the deadlocks loaded for
+  the selected period (only databases with deadlocks in that window — intentional).
 - Click a row → deadlock detail page
 
 ## Deadlock detail (`/deadlocks/[deadlockId]`)

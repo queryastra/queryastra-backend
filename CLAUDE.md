@@ -18,6 +18,15 @@ See `Docs/rules/01-credential-security.md`.
 Reason: pymssql is not cancellable; a stuck thread must be isolated per-instance.
 See `app/core/instance_executors.py`.
 
+### pymssql >= 2.4.6 — never lower
+2.4.1 deadlocks the whole process when a SQL Server connection dies (every SQL Server instance
+goes ERR until restart). Do not wrap `pymssql.connect` in `socket.setdefaulttimeout()`: it
+doesn't reach FreeTDS sockets and is process-global. See `Docs/specs/00-overview.md`.
+
+### One operation at a time per asyncpg connection
+Never `asyncio.gather` several queries on the same asyncpg connection ("another operation is
+in progress"). Run them sequentially or open one connection per query.
+
 ### Never run unbounded queries
 All query results have row limits. See `Docs/rules/02-database-access.md`.
 

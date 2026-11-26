@@ -1,46 +1,46 @@
-# Screen: DB Health
+# Screen: DB Health (Saúde do BD)
 
 **Route:** `/instances/[instanceId]/db-health`  
-**Component:** `src/app/instances/[instanceId]/db-health/page.tsx`
+**Component:** `src/app/instances/[instanceId]/db-health/page.tsx` (panels in `src/components/health/`)  
+**Menu:** Saúde → Saúde do BD
 
 ## Purpose
-Aggregated database-level health panels. Shows five dimensions of database health that go
-beyond simple CPU/connection metrics.
+On-demand database-level health panels that go beyond CPU/connection metrics. Each panel calls
+its own endpoint and fails independently: one failing endpoint shows "Não foi possível conectar
+a esta instância" only in that panel.
 
-## API calls
-- `GET /api/v1/instances/{instance_id}/schema-health` — table counts, missing PKs, wide tables
-- `GET /api/v1/instances/{instance_id}/buffer-cache` — buffer hit ratios, memory pressure
-- `GET /api/v1/instances/{instance_id}/hot-objects` — most accessed tables and indexes
-- `GET /api/v1/instances/{instance_id}/concurrency-trend` — locks, waits, deadlocks trend
-- `GET /api/v1/instances/{instance_id}/workload-classification` — query pattern analysis
+## Panels (in screen order)
+| Panel | Endpoint (`/api/v1/instances/{id}/…`) | Shown as | Copy |
+|---|---|---|---|
+| Configuration compliance | `config-compliance` | table | ✓ |
+| Replication slots (PostgreSQL) | `replication-slots` | table | ✓ |
+| Bgwriter / checkpoints (PostgreSQL) | `bgwriter` | card | — |
+| User functions (PL/pgSQL) | `user-functions` | table | ✓ |
+| Connection consumers | `connection-consumers` | table | ✓ |
+| TempDB usage (SQL Server) | `tempdb` | card | — |
+| Wait events heatmap (24 h) | `wait-heatmap?window=24` | heatmap | — |
+| Query performance trends (7 days) | `query-trends?days=7` | chart | — |
+| Table I/O statistics | `table-io-stats` | table | ✓ |
+| Unused indexes | `unused-indexes` | table | ✓ |
+| Schema health | `schema-health` | table | ✓ |
+| Buffer cache and I/O | `buffer-cache` | 3 tables (tables in cache, temp files, I/O per file) | ✓ each |
+| Contention hot spots | `hot-objects?window=24` | table | ✓ |
+| Session concurrency | `concurrency-trend?window=24` | chart | — |
+| Workload classification | `workload-classification?window=24` | pie chart | — |
+| Database sizes | `db-sizes` | table with bars | ✓ |
 
-## Panels
+Engine-specific panels return an empty result (or `null`) on engines that don't have the
+concept — the panel shows its empty state, not an error.
 
-### Schema Health
-- Table count per database
-- Tables without primary keys
-- Very wide tables (>50 columns)
-- Tables with no indexes
+## "Copiar resultado"
+Every table panel is wrapped in `CopyableTable` (`src/components/common/CopyableTable.tsx`),
+which copies the **rendered** table as TSV (header + rows; bar columns become the value). The
+button only appears when the panel actually renders a table — empty, unsupported and error
+states have none. These tables neither truncate text nor reorder rows, so the rendered table is
+the data.
 
-### Buffer Cache
-- Buffer hit ratio trend
-- Pages in cache by database
-- Memory pressure indicators
-
-### Hot Objects
-- Top tables by logical reads
-- Top indexes by range scan / seek count
-- Heatmap of access patterns
-
-### Concurrency Trend
-- Lock waits per second
-- Deadlock rate
-- Blocking chain frequency
-
-### Workload Classification
-- Query pattern distribution (point lookups vs. range scans vs. aggregations)
-- Application-level breakdown
-
-## Engine support
-Panels vary by engine. SQL Server provides the richest data. PostgreSQL and MySQL have
-equivalent but different DMVs/catalog views.
+## Notes
+- `query-trends` comes from `query_stats_snapshot` (pg_stat_statements snapshots) — empty on
+  engines without that collection.
+- SQL Server I/O per file uses `sys.dm_io_virtual_file_stats` columns
+  `io_stall_read_ms` / `io_stall_write_ms`.

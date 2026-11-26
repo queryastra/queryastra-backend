@@ -1,26 +1,31 @@
-# Screen: Memory Grants
+# Screen: Memory Grants (Memória)
 
 **Route:** `/instances/[instanceId]/memory-grants`  
-**Component:** `src/app/instances/[instanceId]/memory-grants/page.tsx`
+**Component:** `src/app/instances/[instanceId]/memory-grants/page.tsx` + `src/components/maintenance/MemoryGrantsPanel.tsx`  
+**Menu:** Performance → Memória
 
 ## Purpose
-On-demand scan of memory grant requests. Identifies queries that request excessive memory
-(causing others to wait) or spill to TempDB (causing I/O).
+On-demand view of memory grants. Identifies queries that request excessive memory (causing
+others to wait on RESOURCE_SEMAPHORE), leave most of the grant unused, or spill to TempDB.
 
 ## API calls
-- `GET /api/v1/instances/{instance_id}/memory-grants` — active/pending grants + top consumers
+- `GET /api/v1/instances/{instance_id}/memory-grants` — summary + active/pending grants + top
+  queries by memory
 
 ## UI
-- **Active grants table** — query, database, requested KB, granted KB, used KB, wait time
-- **Pending grants** — queries waiting for memory
-- **Top memory consumers** — queries that historically request the most memory
-- Spill indicator: queries that spilled to TempDB highlighted in red
+- **Summary cards** — granted requests, waiting for memory (red when > 0), total granted, total
+  used, available / target, cumulative memory wait
+- **Running now** — sessions holding or waiting for work memory (waiting rows highlighted):
+  session, state, query, requested, granted, used (+ max), ideal, wait, DOP, spill. Sortable.
+- **Top queries by memory** — historical: severity, query (+ database), executions, avg grant,
+  max grant, avg used (+ max), unused grant %, spills, spilled volume, last execution. Sortable.
+  **"Copiar resultado"** copies it as TSV in the current sort order (full query on one line,
+  database in its own column, severity translated).
 
 ## Engine support
-- SQL Server: ✓ (`sys.dm_exec_query_memory_grants`)
+- SQL Server: ✓ (`sys.dm_exec_query_memory_grants`, `sys.dm_exec_query_stats`)
 - PostgreSQL: ✓ (`pg_stat_activity`, work_mem tracking)
 - MySQL: limited
 
 ## Notes
-This is an on-demand scan (no historical data). The result reflects the current state of
-the server at the moment the button is clicked.
+No history is stored for the "Running now" table: it reflects the server at request time.

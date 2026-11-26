@@ -68,9 +68,27 @@ Using the default shared executor would eventually exhaust the event loop's thre
 Solution: each monitored instance has its own `ThreadPoolExecutor` with a small cap
 (`INSTANCE_EXECUTOR_MAX_WORKERS=6`). A stuck thread only affects that one instance.
 
+**Saturation watchdog:** if *all* of an instance's threads have been running for more than
+`INSTANCE_EXECUTOR_STUCK_THRESHOLD_SECONDS` (default 90), the pool is discarded and recreated
+before the next call, so the instance recovers without a backend restart. The orphaned threads
+are tracked for the shutdown check below.
+
 On shutdown, `exit_if_threads_stuck(grace_seconds=5)` starts a daemon timer that calls
 `os._exit(0)` if any pool threads are still alive after 5 seconds, preventing uvicorn from
 hanging indefinitely on reload or Ctrl+C.
+
+### SQL Server driver: `pymssql>=2.4.6` (never lower)
+
+pymssql 2.4.1 has a process-wide deadlock: in `_mssql.pyx`, `connection_list_lock` is a
+non-reentrant `threading.Lock`; when a connection dies (timeout, network drop) `err_handler`
+holds it and calls `mark_disconnected()`, which tries to take it again. That thread waits on
+itself and every later `connect`/`close` in the process waits on the same lock: **all** SQL
+Server instances go ERR at once until restart (PostgreSQL keeps working; the worker's thread
+count grows without bound). 2.4.6 ("FIX:1018") calls `mark_disconnected()` outside the lock.
+
+Rejected workaround: wrapping `pymssql.connect` in `socket.setdefaulttimeout()`. FreeTDS opens
+its sockets in C, so Python's default timeout never reaches them (measured: no effect), and the
+setting is process-global and racy between threads.
 
 ### Maintenance scans vs polling
 

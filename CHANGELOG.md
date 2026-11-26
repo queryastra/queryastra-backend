@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.2] — 2026-11-26
+
+### Correções
+- **SQL Server — todas as instâncias em ERR até reiniciar**: o pymssql 2.4.1 tinha um deadlock (trava não reentrante no tratamento de conexão morta) que congelava toda coleta SQL Server do processo depois de uma oscilação de rede. Dependência atualizada para `pymssql>=2.4.6`, que corrige o problema
+- **Saúde do BD — tendências de queries**: a consulta era inválida e o painel dava erro em todos os engines
+- **Vacuum / Saúde (PostgreSQL)**: as duas consultas rodavam ao mesmo tempo na mesma conexão e a tela dava erro sempre; agora rodam em sequência
+- **Saúde do BD — I/O por arquivo (SQL Server)**: usava colunas inexistentes de `sys.dm_io_virtual_file_stats`
+
+### Documentação
+- Specs de tela atualizadas (navegação, Particionamento e compressão, Bloqueios, Saúde do BD, Memória, Queries lentas, Login, manutenção) e decisões de arquitetura (driver SQL Server, watchdog do pool)
+
 ## [0.2.1] — 2026-11-25
 
 ### Correções

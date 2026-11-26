@@ -28,7 +28,10 @@ generate poor execution plans. This screen shows which statistics need UPDATE ST
 
 ## Notes
 Same scan timeout behavior as Index Health (`MAINTENANCE_SCAN_TIMEOUT_SECONDS=300s`).
-Both screens share the `MaintenanceShared` base component (same two-button pattern).
+Both screens share the `MaintenanceShared` base component (same two-button pattern), the same
+`sessionStorage` persistence (`stat-map-{id}`, `stat-ts-{id}`) and the same database selector
+rule: union of `/databases` with the already-scanned databases, "Scan all" disabled while the
+list loads (see `13-index-health.md`).
 
 ## Engine support
 - SQL Server: ✓ (`sys.stats`, `sys.dm_db_stats_properties`)

@@ -13,7 +13,9 @@ contention and rollback storms.
 
 ## UI
 - **Transactions table** — session ID, database, duration, status, blocking, SQL text
-- Filters: database, min duration, status (open/blocked/sleeping)
+- Filters: database, min duration, status (open/blocked/sleeping). The database options are
+  built from the transactions loaded for the selected period (only databases with transactions
+  in that window — intentional).
 - Color coding: green → normal, yellow → long-running, red → blocking others
 - Click → transaction detail page
 
