@@ -279,6 +279,34 @@ class BlockingIncidentsRepository(BaseRepository):
         )
         return list((await self._session.execute(stmt)).scalars().all())
 
+    async def find_by_sql_hash(
+        self,
+        instance_id: UUID,
+        sql_hash: str,
+        since: datetime,
+        until: datetime,
+        limit: int,
+    ) -> list[BlockingIncident]:
+        """Incidentes em que `sql_hash` era o comando do bloqueador OU do bloqueado, com
+        SOBREPOSICAO a janela `since`/`until` (mesmo criterio de `list_incidents`) — secao
+        "Envolvimento em eventos" do detalhe de query. Ligacao exata (mesma chave de identidade
+        de `query_samples`), sem heuristica."""
+        stmt = (
+            sa.select(BlockingIncident)
+            .where(
+                BlockingIncident.instance_id == instance_id,
+                sa.or_(
+                    BlockingIncident.blocker_sql_hash == sql_hash,
+                    BlockingIncident.blocked_sql_hash == sql_hash,
+                ),
+                sa.or_(BlockingIncident.ended_at.is_(None), BlockingIncident.ended_at >= since),
+                BlockingIncident.started_at <= until,
+            )
+            .order_by(sa.desc(BlockingIncident.last_seen_at))
+            .limit(limit)
+        )
+        return list((await self._session.execute(stmt)).scalars().all())
+
     async def count_incidents_since(self, instance_id: UUID, since: datetime) -> int:
         """Quantos incidentes (`started_at >= since`, em andamento ou ja encerrados) essa
         instancia teve — base do `rule_type="blocking_recurrence"` (Fase 2, item 4):

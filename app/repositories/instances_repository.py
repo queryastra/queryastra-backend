@@ -241,6 +241,24 @@ class InstancesRepository(BaseRepository):
         )
         return {row.id: row.name for row in result.all()}
 
+    async def host_map_excluding(self, instance_id: UUID) -> dict[str, tuple[UUID, str]]:
+        """`host` (minusculo, completo e o nome curto antes do primeiro ponto) → (id, nome) das
+        OUTRAS instancias ativas — mesmo criterio de deteccao de linked server de
+        `BlockingIncidentsRepository.upsert_batch`, reaproveitado pelo detalhe de query."""
+        result = await self._session.execute(
+            select(Instance.id, Instance.name, Instance.host).where(
+                Instance.active.is_(True), Instance.id != instance_id
+            )
+        )
+        host_map: dict[str, tuple[UUID, str]] = {}
+        for row in result.all():
+            full = (row.host or "").lower()
+            if not full:
+                continue
+            host_map[full] = (row.id, row.name)
+            host_map.setdefault(full.split(".")[0], (row.id, row.name))
+        return host_map
+
     async def update_engine_version(
         self, instance_id: UUID, engine_version: str, engine_version_major: int
     ) -> None:

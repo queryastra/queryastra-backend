@@ -170,6 +170,81 @@ class TransactionEventsRepository(BaseRepository):
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def find_by_identifiers(
+        self, instance_id: UUID, transaction_identifiers: list[str]
+    ) -> list[TransactionEvent]:
+        """Lote de `get_by_identifier` — usado para resolver as transacoes ja referenciadas por
+        um incidente de bloqueio (`blocker_transaction_id`/`blocked_transaction_id`)."""
+        if not transaction_identifiers:
+            return []
+        stmt = sa.select(TransactionEvent).where(
+            TransactionEvent.instance_id == instance_id,
+            TransactionEvent.transaction_identifier.in_(transaction_identifiers),
+        )
+        return list((await self._session.execute(stmt)).scalars().all())
+
+    async def find_overlapping_sql_hash(
+        self,
+        instance_id: UUID,
+        sql_hash: str,
+        since: datetime,
+        until: datetime,
+        limit: int,
+    ) -> list[tuple[TransactionEvent, int, datetime]]:
+        """Transacoes registradas cuja SESSAO executou `sql_hash` ENQUANTO a transacao estava
+        aberta — ligacao HEURISTICA (a transacao nao guarda o comando que a abriu): mesma
+        `session_id` + amostra de `query_samples` dentro de `[begin_time (ou first_seen_at),
+        closed_at (ou agora)]`. O tempo da amostra fica restrito a `since`/`until` (a hypertable
+        so e varrida no periodo e pelo `sql_hash`). Devolve (transacao, numero de amostras da
+        query dentro dela, ultima amostra) — mais recentes primeiro.
+
+        Limite conhecido: `session_id` e reaproveitado pelo motor depois que a sessao fecha; a
+        janela de tempo da transacao elimina quase todo falso positivo, mas a UI apresenta o
+        vinculo como "provavel". Transacao cuja query nunca foi amostrada (rapida demais para o
+        ciclo de coleta — o caso tipico da transacao orfa) nao aparece."""
+        stmt = sa.text(
+            """
+            SELECT t.id, count(*) AS sample_count, max(s.time) AS last_sample_at
+            FROM transaction_events AS t
+            INNER JOIN query_samples AS s
+                ON s.instance_id = t.instance_id
+               AND s.session_id = t.session_id
+               AND s.time >= coalesce(t.begin_time, t.first_seen_at)
+               AND s.time <= coalesce(t.closed_at, now())
+            WHERE t.instance_id = :instance_id
+              AND s.sql_hash = :sql_hash
+              AND s.time >= :since AND s.time <= :until
+            GROUP BY t.id
+            ORDER BY max(s.time) DESC
+            LIMIT :limit
+            """
+        )
+        rows = (
+            await self._session.execute(
+                stmt,
+                {
+                    "instance_id": instance_id,
+                    "sql_hash": sql_hash,
+                    "since": since,
+                    "until": until,
+                    "limit": limit,
+                },
+            )
+        ).fetchall()
+        if not rows:
+            return []
+        by_id = {
+            ev.id: ev
+            for ev in (
+                await self._session.execute(
+                    sa.select(TransactionEvent).where(TransactionEvent.id.in_([r.id for r in rows]))
+                )
+            )
+            .scalars()
+            .all()
+        }
+        return [(by_id[r.id], int(r.sample_count), r.last_sample_at) for r in rows if r.id in by_id]
+
     async def tag_open_transactions_by_session(
         self, instance_id: UUID, session_ids: list[str], tag: str
     ) -> None:

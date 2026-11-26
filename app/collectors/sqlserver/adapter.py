@@ -85,6 +85,7 @@ from app.masking.sql_masking import (
     mask_sql_literals,
     mask_sql_literals_for_display,
 )
+from app.normalizers.deadlock_sql_hashes import deadlock_process_sql_hashes
 from app.normalizers.derived_metrics import connections_used_percent, ratio_counter_percent
 from app.normalizers.metric_names import (
     SQLSERVER_ACTIVE_SESSION_COUNT,
@@ -2062,6 +2063,11 @@ def _parse_deadlock_process(process: ElementTree.Element, is_victim: bool) -> di
         # ambiguidade de qual funcao usar).
         "sql_text_masked": mask_sql_literals_for_display(sql_text) if sql_text else None,
         "procedures": procedures,
+        # `sql_hash` candidatos (mesma identidade de `query_samples`) — liga o deadlock à tela
+        # de detalhe da query (seção "Envolvimento em eventos"). Calculado aqui, com o texto
+        # ORIGINAL (antes de qualquer mascaramento), porque só aqui os offsets `stmtstart`/
+        # `stmtend` ainda existem — ver `app/normalizers/deadlock_sql_hashes.py`.
+        "sql_hashes": deadlock_process_sql_hashes(process),
     }
 
 

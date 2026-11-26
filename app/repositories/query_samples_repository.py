@@ -1436,6 +1436,36 @@ class QuerySamplesRepository(BaseRepository):
         )
         return {row.sql_hash: row.sql_text_masked for row in result.fetchall()}
 
+    async def machines_for_sql_hash(
+        self, instance_id: UUID, sql_hash: str, since: datetime, until: datetime, limit: int
+    ) -> list[sa.Row]:
+        """Maquinas clientes de onde `sql_hash` foi executado no periodo (com contagem de
+        amostras) — base do indicador "vinda de linked server" no detalhe de query: o servico
+        resolve cada `machine` contra o host das outras instancias cadastradas (mesmo criterio
+        de `BlockingIncidentsRepository._detect_linked`)."""
+        stmt = sa.text("""
+            SELECT machine, count(*) AS sample_count,
+                   min(time) AS first_seen_at, max(time) AS last_seen_at
+            FROM query_samples
+            WHERE instance_id = :instance_id AND sql_hash = :sql_hash
+              AND time >= :since AND time <= :until
+              AND machine IS NOT NULL AND machine <> ''
+            GROUP BY machine
+            ORDER BY count(*) DESC
+            LIMIT :limit
+        """)
+        result = await self._session.execute(
+            stmt,
+            {
+                "instance_id": instance_id,
+                "sql_hash": sql_hash,
+                "since": since,
+                "until": until,
+                "limit": limit,
+            },
+        )
+        return list(result.fetchall())
+
     async def list_distinct_machines_by_instance(self, since: datetime) -> list[sa.Row]:
         """Máquinas clientes distintas observadas se conectando a cada instância desde `since` —
         base do "Mapa de Dependências" (`TopologyService`): `machine` já é gravado por ambos os

@@ -62,14 +62,21 @@ from app.api.deps import (
 )
 from app.core.config import get_settings
 from app.repositories.ai_api_key_repository import AiApiKeyRepository
+from app.repositories.blocking_incidents_repository import BlockingIncidentsRepository
+from app.repositories.deadlock_events_repository import DeadlockEventsRepository
 from app.repositories.instances_repository import InstancesRepository
 from app.repositories.query_plan_snapshots_repository import QueryPlanSnapshotsRepository
 from app.repositories.query_samples_repository import QuerySamplesRepository
 from app.repositories.system_settings_repository import SystemSettingsRepository
+from app.repositories.transaction_events_repository import TransactionEventsRepository
 from app.security.credential_reference import CredentialResolver
 from app.services.ai_advisor import AiAdvisor, MultiKeyAiAdvisor
 from app.services.execution_plan_service import fetch_execution_plan
 from app.services.plan_advisor import analyze_plan_by_format
+from app.services.query_involvement_service import (
+    QueryInvolvementResponse,
+    build_query_involvement,
+)
 from app.services.sql_advisor import analyze_sql
 from app.services.sql_insight_client import SqlInsightClient
 
@@ -1175,6 +1182,38 @@ async def get_query_detail(
             )
             for row in wait_breakdown_rows
         ],
+    )
+
+
+@router.get("/detail/{instance_id}/{sql_hash}/involvement", response_model=QueryInvolvementResponse)
+async def get_query_involvement(
+    instance_id: UUID,
+    sql_hash: str,
+    _access: Annotated[None, Depends(check_instance_access)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    since: Annotated[datetime | None, Query(alias="from")] = None,
+    until: Annotated[datetime | None, Query(alias="to")] = None,
+) -> QueryInvolvementResponse:
+    """Secao "Envolvimento em eventos" do detalhe de query: em quais sessoes este `sql_hash`
+    participou de bloqueios, transacoes registradas e deadlocks no periodo, e se foi executado a
+    partir de outra instancia cadastrada (linked server). Mesmo periodo (`from`/`to`) do resto da
+    tela. Cada vinculo vem com `match` (`exact`/`probable`) — ver
+    `app/services/query_involvement_service.py`. Lista vazia nao e 404: "nada observado" e uma
+    resposta valida."""
+    settings = get_settings()
+    resolved_since, resolved_until = resolve_time_window(
+        since, until, timedelta(seconds=settings.api_read_default_lookback_seconds)
+    )
+    return await build_query_involvement(
+        instance_id=instance_id,
+        sql_hash=sql_hash,
+        since=resolved_since,
+        until=resolved_until,
+        blocking_repository=BlockingIncidentsRepository(session),
+        transactions_repository=TransactionEventsRepository(session),
+        deadlocks_repository=DeadlockEventsRepository(session),
+        query_samples_repository=QuerySamplesRepository(session),
+        instances_repository=InstancesRepository(session),
     )
 
 
