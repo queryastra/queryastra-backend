@@ -70,13 +70,24 @@ Key endpoints:
 - `GET /queries/timeslice/{instance_id}` — workload by time bucket
 - `GET /queries/detail/{instance_id}/{sql_hash}` — single query deep-dive
 - `GET /queries/detail/{instance_id}/{sql_hash}/execution-plan` — cached plan XML
+- `GET /queries/detail/{instance_id}/{sql_hash}/involvement?from&to` — sessions where the query
+  took part in blocking (`blocking[]`, one row per role, with `incident_id`), recorded transactions
+  (`transactions[]`, `match`: `exact` | `probable`), deadlocks (`deadlocks[]`, `match`) and
+  linked-server origins (`linked_sources[]`); each list capped at 200 with `*_truncated` flags.
+  Empty lists = nothing observed (never 404). See `app/services/query_involvement_service.py`
 - `GET /instances/{instance_id}/slow-queries` — slow query history
 - `GET /instances/{instance_id}/query-regressions` — queries that regressed
 
 ## Waits / Blocking (`/waits-blocking`)
 
 - `GET /waits-blocking/blocking/{instance_id}` — blocking tree (live)
-- `GET /waits-blocking/blocking/{instance_id}/incidents` — historical blocking incidents
+- `GET /waits-blocking/blocking/{instance_id}/incidents` — historical blocking incidents (each
+  row carries the incident `id`, used by the UI as `?incident=` on the session detail link)
+- `GET /waits-blocking/blocking/{instance_id}/session/{session_id}?incident=` — blocked-session
+  detail. Identity and command come from one anchor incident (`incident`, else the session's most
+  recent); response adds `anchor_incident_id`, `anchor_started_at`, `anchor_ended_at`, `anchored`.
+  The command is resolved from the incident's `sql_hash`, never from the session's latest sample
+  (session ids are reused)
 - `GET /waits-blocking/waits/{instance_id}` — wait type summary
 
 ## Deadlocks (`/deadlocks`)

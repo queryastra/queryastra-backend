@@ -44,7 +44,12 @@ UI to show when a query plan changed.
 
 ### DeadlockEvent (`deadlock_event.py`)
 Single deadlock captured from SQL Server Extended Events or ring buffer. Contains the raw XML
-from SQL Server plus parsed victim/node info.
+from SQL Server plus parsed victim/node info. `detail.processes[]` holds the full graph; since
+0.2.4 each process also has `sql_hashes` — candidate statement hashes (same identity as
+`query_samples.sql_hash`) computed at collection from frame text, `inputbuf` sliced by
+`stmtstart`/`stmtend` and the whole `inputbuf` (`app/normalizers/deadlock_sql_hashes.py`). Used to
+link a deadlock to the query detail screen. Older rows without it are matched at read time from
+`raw_xml_masked` (best effort).
 
 ### Notification (`notification.py`)
 In-app notification (bell icon in TopNav). Created by the alerting worker or other events.

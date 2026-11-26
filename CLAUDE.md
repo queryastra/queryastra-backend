@@ -39,6 +39,8 @@ uv run uvicorn app.main:app --reload --port 8124
 ```bash
 uv run pytest tests/unit -x
 ```
+Repository and integration tests hit the REAL dev database from `.env` — never write a test with
+a global delete/purge that can reach collected data. See `Docs/rules/04-tests-shared-database.md`.
 
 ## Migrations
 ```bash
@@ -62,4 +64,4 @@ uv run ruff format .
 - Data models: `Docs/specs/01-data-models.md`
 - API contract: `Docs/specs/02-backend-contract.md`
 - Screen specs: `Docs/specs/screens/`
-- Rules: `Docs/rules/`
+- Rules: `Docs/rules/` (01 credentials, 02 database access, 03 workers, 04 tests on the shared dev DB)

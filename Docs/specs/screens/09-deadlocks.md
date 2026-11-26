@@ -34,6 +34,10 @@ Shows:
 `DEADLOCK_CHECK_INTERVAL_SECONDS` (default 300s = 5 min). Must be enabled with
 `DEADLOCK_SUPERVISOR_ENABLED=true`.
 
+Each process in the graph stores `sql_hashes` (candidate statement hashes) so the query detail
+screen's "Event involvement" section can list the deadlocks a query took part in and link here
+(see `07-query-detail.md`).
+
 ## Engine support
 - SQL Server: ✓ (ring buffer + Extended Events)
 - PostgreSQL: ✓ (pg_locks + deadlock log)
