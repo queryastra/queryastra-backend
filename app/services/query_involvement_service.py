@@ -11,7 +11,10 @@ Força de cada ligação (exposta em `match` para a UI nunca apresentar heuríst
 - Bloqueio — `exact`: `blocking_incidents.blocker_sql_hash`/`blocked_sql_hash` é a mesma chave.
 - Transação — `exact` quando a transação é referenciada por um desses incidentes de bloqueio
   (`blocker_transaction_id`/`blocked_transaction_id`); `probable` quando só a sessão executou a
-  query dentro da janela da transação (`session_id` é reaproveitado pelo motor).
+  query dentro da janela da transação (`session_id` é reaproveitado pelo motor). Nos dois casos
+  vale o MESMO critério da tela de Transações (`problem_transaction_conditions`: transação
+  problemática — `flag_reason` preenchido — que sobrepõe o período), então toda transação listada
+  aqui também aparece na tela de Transações para o mesmo período.
 - Deadlock — `exact` quando o processo tem `sql_hashes` gravado na coleta; `probable` para
   deadlocks antigos, com os hashes recalculados a partir de `raw_xml_masked` (só texto do frame e
   `inputbuf`, sem a fatia por offset).
@@ -222,7 +225,9 @@ async def build_query_involvement(
     tx_ids_from_blocking = list(
         dict.fromkeys(b.transaction_id for b in blocking if b.transaction_id)
     )
-    exact_txs = await transactions_repository.find_by_identifiers(instance_id, tx_ids_from_blocking)
+    exact_txs = await transactions_repository.find_by_identifiers(
+        instance_id, tx_ids_from_blocking, since=since, until=until
+    )
     transactions: list[InvolvementTransaction] = [
         InvolvementTransaction(
             transaction_identifier=tx.transaction_identifier,

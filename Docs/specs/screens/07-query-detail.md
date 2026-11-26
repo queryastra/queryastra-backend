@@ -44,6 +44,12 @@ same `from`/`to` period as the rest of the screen, with links to the existing de
 | | older deadlocks: hashes recomputed from `raw_xml_masked` (frame text + `inputbuf` only) | `probable` | same |
 | Linked server | `machine` of this query's samples resolves to another registered instance's host | — | `/instances/{id}` |
 
+Recorded transactions obey exactly the Transactions screen criteria (`10-transactions.md`), via
+the shared `problem_transaction_conditions` in `transaction_events_repository.py`: only problematic
+transactions (`flag_reason` set — blocking, error, orphan, sleeping, deadlock) that OVERLAP the
+selected period (`closed_at` null or >= `from`, `begin_time` <= `to`). Every transaction listed
+here is one the Transactions screen shows for the same period, and vice versa for this query.
+
 Deadlock hashes: `app/normalizers/deadlock_sql_hashes.py` — candidate hashes per process (frame
 text, `inputbuf` sliced by `stmtstart`/`stmtend`, whole `inputbuf`), same function as
 `query_samples.sql_hash`. Best effort: a match is the same query; no match does not prove absence.

@@ -33,6 +33,46 @@ def _merge_tags(old: str | None, new: str | None) -> str | None:
     return ",".join(tags) if tags else None
 
 
+def problem_transaction_conditions(
+    instance_id: UUID,
+    *,
+    since: datetime | None = None,
+    until: datetime | None = None,
+) -> list[sa.ColumnElement[bool]]:
+    """Criterio UNICO de "transacao problematica no periodo" — o mesmo da tela de Transacoes
+    (`list_for_instance`) e da secao "Envolvimento em eventos" do detalhe de query
+    (`find_by_identifiers`/`find_overlapping_sql_hash`), para as duas telas nunca divergirem:
+
+    - `flag_reason` preenchido (bloqueio, erro, orfa, sleeping, deadlock — ver
+      `app.collectors.transaction_flagging`); o coletor so grava transacoes flagged, mas o filtro
+      explicito garante a regra mesmo que uma linha sem motivo apareca.
+    - SOBREPOSICAO com `[since, until]`: fechou depois de `since` (ou continua aberta) e comecou
+      antes de `until`. `begin_time` nulo nao entra quando ha `until` (mesmo comportamento da
+      tela — sem inicio conhecido nao da para afirmar que estava aberta no periodo)."""
+    conditions: list[sa.ColumnElement[bool]] = [
+        TransactionEvent.instance_id == instance_id,
+        TransactionEvent.flag_reason.is_not(None),
+        TransactionEvent.flag_reason != "",
+    ]
+    if since is not None:
+        conditions.append(
+            sa.or_(TransactionEvent.closed_at.is_(None), TransactionEvent.closed_at >= since)
+        )
+    if until is not None:
+        conditions.append(TransactionEvent.begin_time <= until)
+    return conditions
+
+
+# `query_samples` e hypertable sem model ORM — so as colunas usadas no casamento heuristico.
+_query_samples = sa.table(
+    "query_samples",
+    sa.column("instance_id"),
+    sa.column("session_id"),
+    sa.column("sql_hash"),
+    sa.column("time"),
+)
+
+
 class TransactionEventsRepository(BaseRepository):
     async def upsert_batch(
         self,
@@ -139,17 +179,11 @@ class TransactionEventsRepository(BaseRepository):
         aberta esta sempre "no periodo atual" por definicao): filtra por SOBREPOSICAO com a
         janela, nao so pelo inicio — uma transacao que comecou antes de `since` mas so fechou
         depois (ou continua aberta) ainda contava como "ativa" durante a janela pedida."""
-        conditions = [TransactionEvent.instance_id == instance_id]
+        conditions = problem_transaction_conditions(instance_id, since=since, until=until)
         if open_only:
             conditions.append(TransactionEvent.closed_at.is_(None))
         if database_name is not None:
             conditions.append(TransactionEvent.database_name == database_name)
-        if since is not None:
-            conditions.append(
-                sa.or_(TransactionEvent.closed_at.is_(None), TransactionEvent.closed_at >= since)
-            )
-        if until is not None:
-            conditions.append(TransactionEvent.begin_time <= until)
         stmt = sa.select(TransactionEvent).where(*conditions)
         stmt = (
             stmt.order_by(sa.asc(TransactionEvent.begin_time).nulls_last())
@@ -171,14 +205,21 @@ class TransactionEventsRepository(BaseRepository):
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def find_by_identifiers(
-        self, instance_id: UUID, transaction_identifiers: list[str]
+        self,
+        instance_id: UUID,
+        transaction_identifiers: list[str],
+        *,
+        since: datetime | None = None,
+        until: datetime | None = None,
     ) -> list[TransactionEvent]:
         """Lote de `get_by_identifier` — usado para resolver as transacoes ja referenciadas por
-        um incidente de bloqueio (`blocker_transaction_id`/`blocked_transaction_id`)."""
+        um incidente de bloqueio (`blocker_transaction_id`/`blocked_transaction_id`). Aplica o
+        mesmo criterio da tela de Transacoes (`problem_transaction_conditions`): so devolve o que
+        a tela listaria no mesmo periodo."""
         if not transaction_identifiers:
             return []
         stmt = sa.select(TransactionEvent).where(
-            TransactionEvent.instance_id == instance_id,
+            *problem_transaction_conditions(instance_id, since=since, until=until),
             TransactionEvent.transaction_identifier.in_(transaction_identifiers),
         )
         return list((await self._session.execute(stmt)).scalars().all())
@@ -191,46 +232,46 @@ class TransactionEventsRepository(BaseRepository):
         until: datetime,
         limit: int,
     ) -> list[tuple[TransactionEvent, int, datetime]]:
-        """Transacoes registradas cuja SESSAO executou `sql_hash` ENQUANTO a transacao estava
-        aberta — ligacao HEURISTICA (a transacao nao guarda o comando que a abriu): mesma
-        `session_id` + amostra de `query_samples` dentro de `[begin_time (ou first_seen_at),
-        closed_at (ou agora)]`. O tempo da amostra fica restrito a `since`/`until` (a hypertable
-        so e varrida no periodo e pelo `sql_hash`). Devolve (transacao, numero de amostras da
-        query dentro dela, ultima amostra) — mais recentes primeiro.
+        """Transacoes problematicas (mesmo criterio da tela de Transacoes —
+        `problem_transaction_conditions`: `flag_reason` preenchido + sobreposicao com o periodo)
+        cuja SESSAO executou `sql_hash` ENQUANTO a transacao estava aberta — ligacao HEURISTICA
+        (a transacao nao guarda o comando que a abriu): mesma `session_id` + amostra de
+        `query_samples` dentro de `[begin_time, closed_at (ou agora)]`. O tempo da amostra fica
+        restrito a `since`/`until` (a hypertable so e varrida no periodo e pelo `sql_hash`).
+        Devolve (transacao, numero de amostras da query dentro dela, ultima amostra) — mais
+        recentes primeiro.
 
         Limite conhecido: `session_id` e reaproveitado pelo motor depois que a sessao fecha; a
         janela de tempo da transacao elimina quase todo falso positivo, mas a UI apresenta o
         vinculo como "provavel". Transacao cuja query nunca foi amostrada (rapida demais para o
         ciclo de coleta — o caso tipico da transacao orfa) nao aparece."""
-        stmt = sa.text(
-            """
-            SELECT t.id, count(*) AS sample_count, max(s.time) AS last_sample_at
-            FROM transaction_events AS t
-            INNER JOIN query_samples AS s
-                ON s.instance_id = t.instance_id
-               AND s.session_id = t.session_id
-               AND s.time >= coalesce(t.begin_time, t.first_seen_at)
-               AND s.time <= coalesce(t.closed_at, now())
-            WHERE t.instance_id = :instance_id
-              AND s.sql_hash = :sql_hash
-              AND s.time >= :since AND s.time <= :until
-            GROUP BY t.id
-            ORDER BY max(s.time) DESC
-            LIMIT :limit
-            """
-        )
-        rows = (
-            await self._session.execute(
-                stmt,
-                {
-                    "instance_id": instance_id,
-                    "sql_hash": sql_hash,
-                    "since": since,
-                    "until": until,
-                    "limit": limit,
-                },
+        s = _query_samples
+        t = TransactionEvent
+        sample_count = sa.func.count().label("sample_count")
+        last_sample_at = sa.func.max(s.c.time).label("last_sample_at")
+        stmt = (
+            sa.select(t.id, sample_count, last_sample_at)
+            .join(
+                s,
+                sa.and_(
+                    s.c.instance_id == t.instance_id,
+                    s.c.session_id == t.session_id,
+                    s.c.time >= sa.func.coalesce(t.begin_time, t.first_seen_at),
+                    s.c.time <= sa.func.coalesce(t.closed_at, sa.func.now()),
+                ),
             )
-        ).fetchall()
+            .where(
+                *problem_transaction_conditions(instance_id, since=since, until=until),
+                s.c.instance_id == instance_id,
+                s.c.sql_hash == sql_hash,
+                s.c.time >= since,
+                s.c.time <= until,
+            )
+            .group_by(t.id)
+            .order_by(sa.desc(sa.func.max(s.c.time)))
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).fetchall()
         if not rows:
             return []
         by_id = {

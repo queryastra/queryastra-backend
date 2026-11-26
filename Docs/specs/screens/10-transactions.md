@@ -11,6 +11,12 @@ contention and rollback storms.
 - `GET /api/v1/transactions/{instance_id}` — open/long-running transactions
 - `GET /api/v1/transactions/{instance_id}/{transaction_identifier}` — transaction detail
 
+## Listing criteria
+Only problematic transactions (`flag_reason` set: `bloqueio`, `erro`, `orfa`, `sleeping`,
+`deadlock`) overlapping the period (`closed_at` null or >= `from`, `begin_time` <= `to`). The rule
+lives in `problem_transaction_conditions` (`app/repositories/transaction_events_repository.py`) and
+is reused by the query detail "Event involvement" section — never fork it.
+
 ## UI
 - **Transactions table** — session ID, database, duration, status, blocking, SQL text
 - Filters: database, min duration, status (open/blocked/sleeping). The database options are
