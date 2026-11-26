@@ -139,6 +139,7 @@ _SERVER_STATE_PERMISSIONS = {"VIEW SERVER STATE", "VIEW SERVER PERFORMANCE STATE
 _IDLE_IN_TRANSACTION_QUERY = """
     SELECT
         s.session_id,
+        ISNULL(DB_NAME(s.database_id), '') AS database_name,
         ISNULL(s.login_name, '') AS username,
         ISNULL(s.host_name, '') AS host_name,
         ISNULL(s.program_name, '') AS program_name,
@@ -1262,6 +1263,7 @@ def _connect_and_collect_idle_in_transaction(
         idle_seconds = row.get("idle_seconds")
         result.append(
             NormalizedIdleInTransactionSession(
+                database_name=str(row.get("database_name") or "") or None,
                 session_id=int(row["session_id"]),
                 username=str(row["username"]) or None,
                 application_name=str(row["program_name"]) or None,
@@ -1296,6 +1298,7 @@ _SS_CONFIG_COMPLIANCE_QUERY = """
 # Fase 5 T65 — consumidores de conexao SQL Server.
 _SS_CONNECTION_CONSUMERS_QUERY = """
     SELECT
+        ISNULL(DB_NAME(s.database_id), '') AS database_name,
         ISNULL(program_name, '')           AS application_name,
         ISNULL(client_net_address, '')     AS client_addr,
         ISNULL(login_name, '')             AS username,
@@ -1311,7 +1314,7 @@ _SS_CONNECTION_CONSUMERS_QUERY = """
     LEFT JOIN sys.dm_exec_requests r ON r.session_id = s.session_id
     LEFT JOIN sys.dm_exec_connections c ON c.session_id = s.session_id
     WHERE s.is_user_process = 1
-    GROUP BY s.program_name, c.client_net_address, s.login_name
+    GROUP BY s.database_id, s.program_name, c.client_net_address, s.login_name
     ORDER BY total DESC, idle_in_transaction DESC
 """
 
@@ -1443,6 +1446,7 @@ def _connect_and_collect_connection_consumers(
 
     return [
         NormalizedConnectionConsumer(
+            database_name=str(r.get("database_name") or "") or None,
             application_name=str(r["application_name"]),
             client_addr=str(r["client_addr"]) if r["client_addr"] else None,
             username=str(r["username"]),
@@ -1497,7 +1501,7 @@ ORDER BY size_bytes DESC
 """
 
 _SS_SCHEMA_HEALTH_MISSING_PK_QUERY = """
-SELECT s.name AS schema_name, t.name AS table_name
+SELECT DB_NAME() AS database_name, s.name AS schema_name, t.name AS table_name
 FROM sys.tables t
 JOIN sys.schemas s ON s.schema_id = t.schema_id
 WHERE OBJECTPROPERTY(t.object_id, 'TableHasPrimaryKey') = 0
@@ -1506,7 +1510,7 @@ ORDER BY s.name, t.name
 """
 
 _SS_SCHEMA_HEALTH_DUPLICATE_INDEXES_QUERY = """
-SELECT s.name AS schema_name, t.name AS table_name,
+SELECT DB_NAME() AS database_name, s.name AS schema_name, t.name AS table_name,
        i1.name AS index_name, i2.name AS overlaps_with
 FROM sys.indexes i1
 JOIN sys.indexes i2 ON i1.object_id = i2.object_id AND i1.index_id < i2.index_id
@@ -1640,6 +1644,7 @@ def _connect_and_collect_schema_health_ss(
         for row in cursor.fetchall():
             results.append(
                 NormalizedSchemaHealthItem(
+                    database_name=str(row.get("database_name") or "") or None,
                     category="missing_pk",
                     schema_name=str(row["schema_name"]),
                     table_name=str(row["table_name"]),
@@ -1651,6 +1656,7 @@ def _connect_and_collect_schema_health_ss(
         for row in cursor.fetchall():
             results.append(
                 NormalizedSchemaHealthItem(
+                    database_name=str(row.get("database_name") or "") or None,
                     category="duplicate_index",
                     schema_name=str(row["schema_name"]),
                     table_name=str(row["table_name"]),

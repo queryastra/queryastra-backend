@@ -21,6 +21,14 @@ PostgreSQL concepts. The menu entry (Saúde → Vacuum / Saúde) is shown for ev
 engines without vacuum the endpoints return empty lists and each section shows its empty state
 ("Nenhum dado encontrado"), never an error.
 
+## Database column
+The three tables start with **Banco de dados** (`database_name` in the API):
+- Idle in transaction: the session's database (`pg_stat_activity.datname`; SQL Server
+  `DB_NAME(database_id)`).
+- Tables needing vacuum and index bloat: `current_database()`. PostgreSQL statistics views only see
+  the database the collector is connected to, so these two tables cover that one database — the
+  column makes that visible.
+
 ## Implementation notes
 - `collect_vacuum_stats` runs its two queries (table stats, autovacuum workers) **one after the
   other**: an asyncpg connection runs one operation at a time, and running them with

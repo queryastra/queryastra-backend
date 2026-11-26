@@ -712,6 +712,7 @@ class _OneOperationAtATimeConnection:
             if "pg_stat_user_tables" in query:
                 return [
                     {
+                        "database_name": "loja",
                         "schemaname": "public",
                         "table_name": "pedidos",
                         "n_dead_tup": 10,
@@ -760,5 +761,6 @@ async def test_collect_vacuum_stats_runs_queries_one_at_a_time(
     tables, workers = await collector.collect_vacuum_stats()
 
     assert [t.table_name for t in tables] == ["pedidos"]
+    assert [t.database_name for t in tables] == ["loja"]
     assert [w.pid for w in workers] == [42]
     assert conn.closed

@@ -47,6 +47,7 @@ class VacuumTableStatsResponse(BaseModel):
     autovacuum_count: int
     table_size_bytes: int
     xid_age: int
+    database_name: str | None = None
 
 
 class AutovacuumWorkerResponse(BaseModel):
@@ -70,6 +71,7 @@ class IdleInTransactionSessionResponse(BaseModel):
     open_transaction_count: int | None
     last_query: str | None
     state: str | None
+    database_name: str | None = None
 
 
 async def _build_collector(

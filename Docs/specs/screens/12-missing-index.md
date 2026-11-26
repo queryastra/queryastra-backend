@@ -25,6 +25,11 @@ missing indexes that would have the most impact on query performance.
 Both buttons call `collectMutation`; the target is passed as a parameter.
 `isBusy = isScanningAll || isScanningSelected` controls button disabled state.
 
+## Database column
+First column of the table is **Banco de dados** (`databaseName` of the suggestion; sortable, also in
+the copy and in the PDF/CSV export). It replaced the earlier rule "no separate database column":
+with "Todos os bancos" selected the table mixes databases, and the column is what tells them apart.
+
 ## Engine support
 - SQL Server: ✓ (`sys.dm_db_missing_index_details` — suggests specific columns)
 - PostgreSQL (and Aurora PG / CockroachDB / Redshift, which delegate to it): heuristic per

@@ -32,6 +32,22 @@ a esta instância" only in that panel.
 Engine-specific panels return an empty result (or `null`) on engines that don't have the
 concept — the panel shows its empty state, not an error.
 
+## Database column
+Every table that lists per-database data starts with **Banco de dados** (`database_name` in the API):
+connection consumers (grouped by database too), query trends, table I/O, unused indexes, schema
+health, buffer cache (tables in cache, temp files, I/O per file), contention hot spots, user functions
+and database sizes. Configuration compliance and replication slots are instance-level (slots already
+had their database).
+
+Where the value comes from:
+- PostgreSQL catalog/statistics views (`pg_stat_user_*`, `pg_statio_*`, `pg_class`): `current_database()`
+  — they only cover the database the collector connects to.
+- `pg_stat_activity`: `datname`. `pg_stat_statements` (query trends): `pg_database.datname` of `dbid`,
+  stored in `query_stats_snapshot.database_name` (migration `d2e3f4a5b6c7`; older snapshots have none).
+- SQL Server: `DB_NAME(database_id)` for sessions; `DB_NAME()` (login's default database) for schema
+  health.
+- Hot spots: `blocking_events.blocked_database_name` (grouped by database + object).
+
 ## "Copiar resultado"
 Every table panel is wrapped in `CopyableTable` (`src/components/common/CopyableTable.tsx`),
 which copies the **rendered** table as TSV (header + rows; bar columns become the value). The

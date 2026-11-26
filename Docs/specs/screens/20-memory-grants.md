@@ -22,6 +22,10 @@ others to wait on RESOURCE_SEMAPHORE), leave most of the grant unused, or spill 
   **"Copiar resultado"** copies it as TSV in the current sort order (full query on one line,
   database in its own column, severity translated).
 
+## Database column
+Both tables (active grants and top queries) have a **Banco de dados** column. In the active-grants
+table the session cell shows only the login (it used to show `login @ banco`).
+
 ## Engine support
 - SQL Server: ✓ (`sys.dm_exec_query_memory_grants`, `sys.dm_exec_query_stats`)
 - PostgreSQL: ✓ (`pg_stat_activity`, work_mem tracking)

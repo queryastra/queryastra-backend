@@ -31,6 +31,11 @@ in **Saúde do BD** (`db-health`), not here.
   (pastes into columns in Excel). Compression also keeps **"Copiar todos os comandos"**
   (only the `ALTER ... REBUILD` DDL above the minimum savings).
 
+## Database column
+Every result table has a **Banco de dados** column of its own (sortable, also in the copy and in the
+PDF/CSV export), before the object column. The object column shows only `schema.table` — the
+database is no longer a prefix there.
+
 ## Engine support
 Both endpoints exist for every collector; each report's `meta.supported` tells the screen
 whether the engine supports it (otherwise `UnsupportedEngineState`). Richest data on SQL Server

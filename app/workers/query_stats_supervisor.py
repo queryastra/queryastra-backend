@@ -148,6 +148,7 @@ class QueryStatsSupervisor:
                                 {
                                     "queryid": s.queryid,
                                     "query_text": s.query_text,
+                                    "database_name": s.database_name,
                                     "calls": s.calls,
                                     "total_exec_time": s.total_exec_time,
                                     "total_rows": s.total_rows,

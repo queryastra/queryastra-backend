@@ -242,6 +242,7 @@ _QUALSTATS_INDEX_ADVISOR_QUERY = """
 # Ordenadas por dead tuples DESC para destacar candidatos urgentes primeiro.
 _VACUUM_TABLE_STATS_QUERY = """
     SELECT
+        current_database() AS database_name,
         s.schemaname,
         s.relname AS table_name,
         COALESCE(s.n_dead_tup, 0) AS n_dead_tup,
@@ -284,6 +285,7 @@ _AUTOVACUUM_WORKERS_QUERY = """
 _IDLE_IN_TRANSACTION_QUERY = """
     SELECT
         pid AS session_id,
+        COALESCE(datname, '') AS database_name,
         COALESCE(usename, '') AS username,
         COALESCE(application_name, '') AS application_name,
         COALESCE(client_addr::text, '') AS client_info,
@@ -300,6 +302,7 @@ _IDLE_IN_TRANSACTION_QUERY = """
 # Apenas indices > 1MB. Ordenado por tamanho DESC para priorizar os que ocupam mais espaco.
 _INDEX_BLOAT_QUERY = """
     SELECT
+        current_database() AS database_name,
         s.schemaname AS schema_name,
         s.relname AS table_name,
         s.indexrelname AS index_name,
@@ -357,6 +360,7 @@ _BGWRITER_STATS_QUERY_PG17 = """
 # Fase 5 T58 — funcoes PL/pgSQL por tempo total. So retorna dados se track_functions != 'none'.
 _USER_FUNCTIONS_QUERY = """
     SELECT
+        current_database() AS database_name,
         schemaname AS schema_name,
         funcname AS func_name,
         calls,
@@ -419,6 +423,7 @@ _REPLICATION_SLOTS_QUERY_PG13 = """
 # Fase 5 T65 — consumidores de conexao agrupados por (application_name, client_addr, usename).
 _CONNECTION_CONSUMERS_QUERY = """
     SELECT
+        COALESCE(datname, '')          AS database_name,
         COALESCE(application_name, '') AS application_name,
         client_addr::text             AS client_addr,
         COALESCE(usename, '')         AS username,
@@ -430,7 +435,7 @@ _CONNECTION_CONSUMERS_QUERY = """
                             AND state = 'active')                     AS waiting
     FROM pg_stat_activity
     WHERE pid <> pg_backend_pid()
-    GROUP BY application_name, client_addr, usename
+    GROUP BY datname, application_name, client_addr, usename
     ORDER BY total DESC, idle_in_transaction DESC
 """
 
@@ -438,6 +443,7 @@ _CONNECTION_CONSUMERS_QUERY = """
 # indices triviais em tabelas pequenas. Ordenado por tamanho DESC para priorizar economia de espaco.
 _UNUSED_INDEXES_QUERY = """
     SELECT
+        current_database() AS database_name,
         s.schemaname AS schema_name,
         s.relname AS table_name,
         s.indexrelname AS index_name,
@@ -456,6 +462,7 @@ _UNUSED_INDEXES_QUERY = """
 # baixo sao candidatas a criacao de indice. Dead tuples altos indicam necessidade de VACUUM.
 _TABLE_IO_STATS_QUERY = """
     SELECT
+        current_database() AS database_name,
         schemaname AS schema_name,
         relname AS table_name,
         COALESCE(seq_scan, 0) AS seq_scan,
@@ -479,6 +486,7 @@ _TABLE_IO_STATS_QUERY = """
 _QUERY_STATS_SNAPSHOT_QUERY = """
     SELECT
         queryid,
+        (SELECT d.datname FROM pg_database d WHERE d.oid = dbid) AS database_name,
         LEFT(query, 500)   AS query_text,
         calls,
         total_exec_time,
@@ -492,6 +500,7 @@ _QUERY_STATS_SNAPSHOT_QUERY = """
 # Schema health — duplicate indexes, tables without PK, FKs without supporting index.
 _SCHEMA_HEALTH_DUPLICATE_INDEXES_QUERY = """
 SELECT
+    current_database() AS database_name,
     n.nspname AS schema_name,
     t.relname AS table_name,
     i1.relname AS index_name,
@@ -510,7 +519,7 @@ ORDER BY n.nspname, t.relname
 """
 
 _SCHEMA_HEALTH_MISSING_PK_QUERY = """
-SELECT n.nspname AS schema_name, c.relname AS table_name
+SELECT current_database() AS database_name, n.nspname AS schema_name, c.relname AS table_name
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE c.relkind = 'r'
@@ -524,7 +533,7 @@ LIMIT 50
 """
 
 _SCHEMA_HEALTH_FK_WITHOUT_INDEX_QUERY = """
-SELECT n.nspname AS schema_name, c.relname AS table_name,
+SELECT current_database() AS database_name, n.nspname AS schema_name, c.relname AS table_name,
        con.conname AS fk_name,
        array_to_string(ARRAY(SELECT a.attname FROM pg_attribute a
            WHERE a.attrelid = con.conrelid AND a.attnum = ANY(con.conkey)
@@ -545,7 +554,7 @@ LIMIT 50
 
 # Buffer cache stats — pg_statio_user_tables.
 _BUFFER_TABLE_STATS_QUERY = """
-SELECT n.nspname AS schema_name, c.relname AS table_name,
+SELECT current_database() AS database_name, n.nspname AS schema_name, c.relname AS table_name,
        COALESCE(s.heap_blks_read, 0) AS heap_blks_read,
        COALESCE(s.heap_blks_hit, 0) AS heap_blks_hit,
        CASE WHEN COALESCE(s.heap_blks_read,0) + COALESCE(s.heap_blks_hit,0) > 0
@@ -1772,6 +1781,7 @@ class PostgreSQLCollector(CollectorNoOpMixin):
 
         tables = [
             NormalizedVacuumTableStats(
+                database_name=row.get("database_name") or None,
                 schema_name=str(row["schemaname"]),
                 table_name=str(row["table_name"]),
                 n_dead_tup=int(row["n_dead_tup"]),
@@ -1815,6 +1825,7 @@ class PostgreSQLCollector(CollectorNoOpMixin):
 
         return [
             NormalizedIdleInTransactionSession(
+                database_name=row.get("database_name") or None,
                 session_id=int(row["session_id"]),
                 username=str(row["username"]) or None,
                 application_name=str(row["application_name"]) or None,
@@ -1842,6 +1853,7 @@ class PostgreSQLCollector(CollectorNoOpMixin):
 
         return [
             NormalizedIndexBloatEntry(
+                database_name=row.get("database_name") or None,
                 schema_name=str(row["schema_name"]),
                 table_name=str(row["table_name"]),
                 index_name=str(row["index_name"]),
@@ -1906,6 +1918,7 @@ class PostgreSQLCollector(CollectorNoOpMixin):
 
         return [
             NormalizedUserFunction(
+                database_name=row.get("database_name") or None,
                 schema_name=str(row["schema_name"]),
                 func_name=str(row["func_name"]),
                 calls=int(row["calls"] or 0),
@@ -1988,6 +2001,7 @@ class PostgreSQLCollector(CollectorNoOpMixin):
 
         return [
             NormalizedConnectionConsumer(
+                database_name=r.get("database_name") or None,
                 application_name=r["application_name"],
                 client_addr=r["client_addr"],
                 username=r["username"],
@@ -2037,6 +2051,7 @@ class PostgreSQLCollector(CollectorNoOpMixin):
             await conn.close()
         return [
             NormalizedQueryStatsSnapshot(
+                database_name=r.get("database_name") or None,
                 queryid=r["queryid"],
                 query_text=r["query_text"],
                 calls=r["calls"],
@@ -2063,6 +2078,7 @@ class PostgreSQLCollector(CollectorNoOpMixin):
 
         return [
             NormalizedUnusedIndex(
+                database_name=row.get("database_name") or None,
                 schema_name=str(row["schema_name"]),
                 table_name=str(row["table_name"]),
                 index_name=str(row["index_name"]),
@@ -2088,6 +2104,7 @@ class PostgreSQLCollector(CollectorNoOpMixin):
 
         return [
             NormalizedTableIoStats(
+                database_name=row.get("database_name") or None,
                 schema_name=str(row["schema_name"]),
                 table_name=str(row["table_name"]),
                 seq_scan=int(row["seq_scan"] or 0),
@@ -2119,6 +2136,7 @@ class PostgreSQLCollector(CollectorNoOpMixin):
             for row in dup_rows:
                 results.append(
                     NormalizedSchemaHealthItem(
+                        database_name=row.get("database_name") or None,
                         category="duplicate_index",
                         schema_name=str(row["schema_name"]),
                         table_name=str(row["table_name"]),
@@ -2138,6 +2156,7 @@ class PostgreSQLCollector(CollectorNoOpMixin):
             for row in pk_rows:
                 results.append(
                     NormalizedSchemaHealthItem(
+                        database_name=row.get("database_name") or None,
                         category="missing_pk",
                         schema_name=str(row["schema_name"]),
                         table_name=str(row["table_name"]),
@@ -2152,6 +2171,7 @@ class PostgreSQLCollector(CollectorNoOpMixin):
             for row in fk_rows:
                 results.append(
                     NormalizedSchemaHealthItem(
+                        database_name=row.get("database_name") or None,
                         category="fk_without_index",
                         schema_name=str(row["schema_name"]),
                         table_name=str(row["table_name"]),
@@ -2187,6 +2207,7 @@ class PostgreSQLCollector(CollectorNoOpMixin):
 
         table_stats = [
             NormalizedBufferTableStats(
+                database_name=r.get("database_name") or None,
                 schema_name=str(r["schema_name"]),
                 table_name=str(r["table_name"]),
                 heap_blks_read=int(r["heap_blks_read"] or 0),

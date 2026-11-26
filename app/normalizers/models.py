@@ -371,6 +371,7 @@ class NormalizedVacuumTableStats(BaseModel):
     autovacuum_count: int
     table_size_bytes: int
     xid_age: int
+    database_name: str | None = None
 
 
 class NormalizedAutovacuumWorker(BaseModel):
@@ -405,6 +406,7 @@ class NormalizedIdleInTransactionSession(BaseModel):
     open_transaction_count: int | None = None
     last_query: str | None = None
     state: str | None = None
+    database_name: str | None = None
 
 
 class NormalizedIndexBloatEntry(BaseModel):
@@ -423,6 +425,7 @@ class NormalizedIndexBloatEntry(BaseModel):
     idx_tup_read: int
     idx_tup_fetch: int
     bloat_pct: float
+    database_name: str | None = None
 
 
 class NormalizedBgwriterStats(BaseModel):
@@ -459,6 +462,7 @@ class NormalizedUserFunction(BaseModel):
     total_time_ms: float
     self_time_ms: float
     avg_time_ms: float
+    database_name: str | None = None
 
 
 class NormalizedReplicationSlot(BaseModel):
@@ -495,6 +499,7 @@ class NormalizedConnectionConsumer(BaseModel):
     idle: int
     idle_in_transaction: int
     waiting: int
+    database_name: str | None = None
 
 
 class NormalizedTempDbStats(BaseModel):
@@ -540,6 +545,7 @@ class NormalizedQueryStatsSnapshot(BaseModel):
     calls: int
     total_exec_time: float
     total_rows: int
+    database_name: str | None = None
 
 
 class NormalizedConfigComplianceItem(BaseModel):
@@ -572,6 +578,7 @@ class NormalizedUnusedIndex(BaseModel):
     index_name: str
     index_size_bytes: int
     idx_scan: int
+    database_name: str | None = None
 
 
 class NormalizedTableIoStats(BaseModel):
@@ -593,6 +600,7 @@ class NormalizedTableIoStats(BaseModel):
     last_autoanalyze: datetime | None
     last_vacuum: datetime | None
     last_autovacuum: datetime | None
+    database_name: str | None = None
 
 
 class NormalizedSchemaHealthItem(BaseModel):
@@ -611,6 +619,7 @@ class NormalizedSchemaHealthItem(BaseModel):
     object_name: str | None = None  # nome do indice ou FK
     detail: dict[str, Any] = Field(default_factory=dict)
     severity: Literal["warning", "info"] = "warning"
+    database_name: str | None = None
 
 
 class NormalizedBufferTableStats(BaseModel):
@@ -627,6 +636,7 @@ class NormalizedBufferTableStats(BaseModel):
     idx_blks_read: int
     idx_blks_hit: int
     idx_hit_ratio: float
+    database_name: str | None = None
 
 
 class NormalizedTempfileStats(BaseModel):

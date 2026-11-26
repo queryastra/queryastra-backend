@@ -33,6 +33,11 @@ Both screens share the `MaintenanceShared` base component (same two-button patte
 rule: union of `/databases` with the already-scanned databases, "Scan all" disabled while the
 list loads (see `13-index-health.md`).
 
+## Database column
+Every result table has a **Banco de dados** column of its own (sortable, also in the copy and in the
+PDF/CSV export), before the object column. The object column shows only `schema.table` — the
+database is no longer a prefix there.
+
 ## Engine support
 - SQL Server: ✓ (`sys.stats`, `sys.dm_db_stats_properties`)
 - PostgreSQL: ✓ (`pg_stat_user_tables`, `pg_statistic`)

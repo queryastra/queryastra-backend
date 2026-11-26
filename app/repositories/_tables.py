@@ -100,6 +100,7 @@ query_stats_snapshot_table = sa.Table(
     sa.Column("instance_id", UUID(as_uuid=True), nullable=False),
     sa.Column("queryid", sa.BigInteger(), nullable=False),
     sa.Column("query_text", sa.Text(), nullable=True),
+    sa.Column("database_name", sa.Text(), nullable=True),
     sa.Column("calls", sa.BigInteger(), nullable=False),
     sa.Column("total_exec_time", sa.Float(), nullable=False),
     sa.Column("total_rows", sa.BigInteger(), nullable=False),

@@ -51,6 +51,11 @@ Known limitations of the cache path: it lists only databases where a query was e
 (quiet databases are missing) and, on instances with a long history, the `DISTINCT` can take
 8–24 s.
 
+## Database column
+Every result table has a **Banco de dados** column of its own (sortable, also in the copy and in the
+PDF/CSV export), before the object column. The object column shows only `schema.table` — the
+database is no longer a prefix there.
+
 ## Engine support
 - SQL Server: ✓ (full fragmentation data via `sys.dm_db_index_physical_stats`)
 - PostgreSQL: ✓ (`pg_stat_user_indexes`, bloat estimation)

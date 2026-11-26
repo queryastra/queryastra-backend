@@ -63,6 +63,7 @@ class IndexBloatEntryResponse(BaseModel):
     idx_tup_read: int
     idx_tup_fetch: int
     bloat_pct: float
+    database_name: str | None = None
 
 
 class BgwriterStatsResponse(BaseModel):
@@ -86,6 +87,7 @@ class UserFunctionResponse(BaseModel):
     total_time_ms: float
     self_time_ms: float
     avg_time_ms: float
+    database_name: str | None = None
 
 
 class ReplicationSlotResponse(BaseModel):
@@ -118,6 +120,7 @@ class ConnectionConsumerResponse(BaseModel):
     idle: int
     idle_in_transaction: int
     waiting: int
+    database_name: str | None = None
 
 
 # ── Shared helper ─────────────────────────────────────────────────────────────
@@ -338,6 +341,7 @@ class UnusedIndexResponse(BaseModel):
     index_name: str
     index_size_bytes: int
     idx_scan: int
+    database_name: str | None = None
 
 
 class TableIoStatsResponse(BaseModel):
@@ -352,6 +356,7 @@ class TableIoStatsResponse(BaseModel):
     last_autoanalyze: datetime | None
     last_vacuum: datetime | None
     last_autovacuum: datetime | None
+    database_name: str | None = None
 
 
 class WaitHeatmapBucketResponse(BaseModel):
@@ -472,6 +477,7 @@ class QueryTrendSeriesResponse(BaseModel):
     baseline_mean_ms: float | None
     current_mean_ms: float | None
     regression_ratio: float | None
+    database_name: str | None = None
 
 
 @router.get("/{instance_id}/query-trends", response_model=list[QueryTrendSeriesResponse])
@@ -515,6 +521,7 @@ async def get_query_trends(
             series_map[qid] = QueryTrendSeriesResponse(
                 queryid=str(qid),
                 query_text=row.query_text,
+                database_name=row.database_name or None,
                 buckets=[],
                 baseline_mean_ms=None,
                 current_mean_ms=None,
@@ -544,6 +551,7 @@ async def get_query_trends(
             QueryTrendSeriesResponse(
                 queryid=series.queryid,
                 query_text=series.query_text,
+                database_name=series.database_name,
                 buckets=series.buckets,
                 baseline_mean_ms=round(baseline_mean, 3) if baseline_mean else None,
                 current_mean_ms=round(current_mean, 3) if current_mean else None,
@@ -617,6 +625,7 @@ class SchemaHealthItemResponse(BaseModel):
     object_name: str | None = None
     detail: dict = {}
     severity: str
+    database_name: str | None = None
 
 
 @router.get("/{instance_id}/schema-health", response_model=list[SchemaHealthItemResponse])
@@ -657,6 +666,7 @@ class BufferTableStatsResponse(BaseModel):
     idx_blks_read: int
     idx_blks_hit: int
     idx_hit_ratio: float
+    database_name: str | None = None
 
 
 class TempfileStatsResponse(BaseModel):
@@ -720,6 +730,7 @@ class HotObjectResponse(BaseModel):
     object_name: str
     incident_count: int
     total_wait_ms: int
+    database_name: str | None = None
 
 
 @router.get("/{instance_id}/hot-objects", response_model=list[HotObjectResponse])
@@ -735,12 +746,13 @@ async def get_hot_objects(
     PostgreSQL + SQL Server."""
     stmt = text(
         """
-        SELECT blocked_object, COUNT(*) AS incident_count, SUM(wait_time_ms) AS total_wait_ms
+        SELECT blocked_database_name, blocked_object, COUNT(*) AS incident_count,
+               SUM(wait_time_ms) AS total_wait_ms
         FROM blocking_events
         WHERE instance_id = :instance_id
           AND time > NOW() - INTERVAL ':window hours'
           AND blocked_object IS NOT NULL
-        GROUP BY blocked_object
+        GROUP BY blocked_database_name, blocked_object
         ORDER BY total_wait_ms DESC
         LIMIT 20
     """.replace(":window", str(window))
@@ -759,6 +771,7 @@ async def get_hot_objects(
     return [
         HotObjectResponse(
             object_name=str(row.blocked_object),
+            database_name=row.blocked_database_name or None,
             incident_count=int(row.incident_count),
             total_wait_ms=int(row.total_wait_ms),
         )

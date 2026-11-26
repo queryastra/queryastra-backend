@@ -32,6 +32,7 @@ class QueryStatsTrendRepository(BaseRepository):
                 "instance_id": instance_id,
                 "queryid": s["queryid"],
                 "query_text": s.get("query_text"),
+                "database_name": s.get("database_name"),
                 "calls": s["calls"],
                 "total_exec_time": s["total_exec_time"],
                 "total_rows": s["total_rows"],
@@ -52,8 +53,8 @@ class QueryStatsTrendRepository(BaseRepository):
 
         Calcula deltas entre snapshots consecutivos via LAG() para obter metricas por
         intervalo de coleta. Ignora deltas negativos (reset de pg_stat_statements).
-        Retorna linhas (queryid, query_text, bucket, calls, mean_exec_ms) ordenadas por
-        (queryid, bucket).
+        Retorna linhas (queryid, query_text, database_name, bucket, calls, mean_exec_ms)
+        ordenadas por (queryid, bucket).
         """
         stmt = sa.text("""
             WITH deltas AS (
@@ -61,6 +62,7 @@ class QueryStatsTrendRepository(BaseRepository):
                     time,
                     queryid,
                     MAX(query_text) OVER (PARTITION BY queryid) AS query_text,
+                    MAX(database_name) OVER (PARTITION BY queryid) AS database_name,
                     calls - LAG(calls)
                         OVER (PARTITION BY queryid ORDER BY time)          AS calls_delta,
                     total_exec_time - LAG(total_exec_time)
@@ -75,6 +77,7 @@ class QueryStatsTrendRepository(BaseRepository):
                     time_bucket('1 hour', time)          AS bucket,
                     queryid,
                     MAX(query_text)                      AS query_text,
+                    MAX(database_name)                   AS database_name,
                     SUM(calls_delta)                     AS period_calls,
                     SUM(exec_time_delta)                 AS period_exec_time
                 FROM deltas
@@ -91,6 +94,7 @@ class QueryStatsTrendRepository(BaseRepository):
             SELECT
                 h.queryid,
                 h.query_text,
+                h.database_name,
                 h.bucket,
                 h.period_calls     AS calls,
                 CASE WHEN h.period_calls > 0
