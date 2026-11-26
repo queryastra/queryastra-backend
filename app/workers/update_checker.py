@@ -28,7 +28,7 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-APP_VERSION = "0.2.2"
+APP_VERSION = "0.2.3"
 _GITHUB_RELEASES_URL = "https://api.github.com/repos/queryastra/queryastra-backend/releases/latest"
 _REQUEST_TIMEOUT = 15.0
 

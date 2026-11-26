@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.2.3] — 2026-11-26
 
 ### Novas funcionalidades
 - **Banco de dados nas respostas de Vacuum / Saúde e Saúde do BD**: `database_name` em vacuum, sessões idle in transaction, bloat de índice, funções, consumidores de conexão (agrupados também por banco), índices não usados, I/O de tabelas, saúde do schema, buffer cache, hot spots e tendências de queries
