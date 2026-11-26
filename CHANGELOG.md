@@ -7,7 +7,8 @@
 - **Deadlocks (SQL Server)**: cada processo do grafo passa a gravar `sql_hashes` (mesma identidade de `query_samples`), o que liga o deadlock à query. Deadlocks antigos são ligados por melhor esforço a partir do XML mascarado
 
 ### Correções
-- **Detalhe de sessão bloqueada mostrava o comando errado**: o comando era a última amostra da sessão (que o pool de conexões já tinha reaproveitado para outro comando), não o que ela executava no bloqueio. Agora o comando vem do `sql_hash` gravado no incidente; o link vindo do detalhe da query ancora a tela no bloqueio clicado (`?incident=`)
+- **Detalhe de sessão bloqueada mostrava o comando errado**: o comando era a última amostra da sessão (que o pool de conexões já tinha reaproveitado para outro comando), não o que ela executava no bloqueio. Agora o comando vem do `sql_hash` gravado no incidente; o link vindo do detalhe da query ancora a tela no bloqueio clicado (`?incident=`), assim como os links do histórico da tela de Bloqueios (`id` do incidente passa a vir em `GET /blocking/{instance_id}/incidents`)
+- **Testes apagavam dados do banco de dev**: os testes de expurgo de bloqueios e transações cortavam em "agora + 1s" sobre a tabela inteira, removendo todo incidente/transação já encerrado do banco compartilhado; agora só alcançam linhas de teste
 
 ## [0.2.3] — 2026-11-26
 

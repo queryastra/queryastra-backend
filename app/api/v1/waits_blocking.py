@@ -142,6 +142,10 @@ class BlockingIncidentResponse(BaseModel):
     investigacao/historico, sem nesting de arvore (misturar incidentes de janelas de tempo bem
     diferentes numa arvore so seria enganoso, ver `session_id` como identidade nao-permanente)."""
 
+    # Id do incidente — o link da sessao no historico leva `?incident=` para o detalhe de sessao
+    # ancorar NESTE bloqueio (sem ele, o detalhe abre o incidente mais recente da sessao, que pode
+    # ser de outro momento: `session_id` e reciclado pelo motor).
+    id: UUID | None = None
     blocker_session_id: str
     blocked_session_id: str
     blocker_database_name: str | None

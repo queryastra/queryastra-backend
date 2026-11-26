@@ -16,6 +16,9 @@ from app.models.instance import Instance
 from app.normalizers.models import NormalizedTransactionEvent
 from app.repositories.transaction_events_repository import TransactionEventsRepository
 
+# Instante de encerramento dos dados de teste de expurgo — ver `test_purge_closed_before_*`.
+_ANCIENT = datetime(2000, 1, 1, tzinfo=UTC)
+
 
 async def test_upsert_batch_inserts_new_transactions(
     db_session: AsyncSession, test_instance: Instance
@@ -407,14 +410,17 @@ async def test_purge_closed_before_removes_only_old_closed_rows(
         {"tx-old-closed", "tx-still-open-2"},
         now,
     )
-    # Fecha so "tx-old-closed" (mantendo "tx-still-open-2" aberta).
-    await repo.upsert_batch(test_instance.id, [], {"tx-still-open-2"}, now)
+    # Fecha so "tx-old-closed" (mantendo "tx-still-open-2" aberta) — com `closed_at` no ANO
+    # 2000. BUG REAL (dado de dev apagado ao rodar a suite): o expurgo age sobre a tabela
+    # INTEIRA, e o corte antigo ("agora + 1s") apagava toda transacao encerrada do banco de dev
+    # compartilhado. Cortando logo depois do ano 2000, so a linha de teste fica abaixo do corte.
+    await repo.upsert_batch(test_instance.id, [], {"tx-still-open-2"}, _ANCIENT)
 
     # `purge_closed_before` age sobre a tabela inteira (sem filtro por instancia, por design —
     # e um expurgo global por idade) — o banco de dev compartilhado pode ja ter outras linhas
     # fechadas de testes/sessoes anteriores, entao so verificamos que ESTAS duas linhas terminam
     # no estado esperado, sem exigir uma contagem exata de linhas removidas.
-    await repo.purge_closed_before(datetime.now(UTC) + timedelta(seconds=1))
+    await repo.purge_closed_before(_ANCIENT + timedelta(seconds=1))
 
     assert await repo.get_by_identifier(test_instance.id, "tx-old-closed") is None
     assert await repo.get_by_identifier(test_instance.id, "tx-still-open-2") is not None

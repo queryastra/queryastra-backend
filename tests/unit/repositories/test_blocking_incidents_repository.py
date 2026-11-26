@@ -11,6 +11,9 @@ from app.models.instance import Instance
 from app.normalizers.models import NormalizedBlockingEvent
 from app.repositories.blocking_incidents_repository import BlockingIncidentsRepository
 
+# Instante de encerramento dos dados de teste de expurgo — ver `test_purge_ended_before_*`.
+_ANCIENT = datetime(2000, 1, 1, tzinfo=UTC)
+
 
 async def test_upsert_batch_inserts_new_incident_with_started_at(
     db_session: AsyncSession, test_instance: Instance
@@ -248,7 +251,11 @@ async def test_purge_ended_before_removes_only_old_ended_incidents(
         ],
         now,
     )
-    # Fecha so o par "purge-*" (mantendo "keep-*" em andamento).
+    # Fecha so o par "purge-*" (mantendo "keep-*" em andamento) — com `ended_at` no ANO 2000.
+    # BUG REAL (dado de dev apagado ao rodar a suite): o expurgo age sobre a tabela INTEIRA, e o
+    # corte antigo ("agora + 1s") apagava todo incidente encerrado do banco de dev compartilhado.
+    # Encerrando o par de teste num instante muito antigo e cortando logo depois dele, so linhas
+    # de teste (nunca dado real coletado) ficam abaixo do corte.
     await repo.upsert_batch(
         test_instance.id,
         [
@@ -260,14 +267,14 @@ async def test_purge_ended_before_removes_only_old_ended_incidents(
                 wait_time_ms=10,
             )
         ],
-        now,
+        _ANCIENT,
     )
 
     # `purge_ended_before` age sobre a tabela inteira (sem filtro por instancia, por design) — o
     # banco de dev compartilhado pode ja ter outras linhas encerradas de sessoes anteriores,
     # entao so verificamos o estado desta instancia (via `list_incidents`), sem exigir uma
     # contagem exata de linhas removidas globalmente.
-    await repo.purge_ended_before(datetime.now(UTC) + timedelta(seconds=1))
+    await repo.purge_ended_before(_ANCIENT + timedelta(seconds=1))
 
     remaining = await repo.list_incidents(test_instance.id, 10)
     assert [r.blocker_session_id for r in remaining] == ["keep-b"]
