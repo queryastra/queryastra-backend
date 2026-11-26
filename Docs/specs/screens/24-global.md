@@ -25,6 +25,11 @@ in a single timeline.
 Top SQL across all instances ranked by total CPU/reads. Helps identify hot queries that
 appear across multiple servers.
 
+### Copy and export (Blocking, Top Queries)
+Both tables have "Copiar resultado" next to "Exportar CSV". The copy is TSV with the **same
+columns as the CSV** (full SQL text, numbers in ms) — not the rendered table, which clips the SQL
+and mixes several values in one cell.
+
 ## UI
 - Instance health grid (same as `/instances?view=overview`)
 - Cross-instance alert count badges

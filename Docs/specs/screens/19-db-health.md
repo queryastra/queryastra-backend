@@ -19,7 +19,7 @@ a esta instância" only in that panel.
 | Connection consumers | `connection-consumers` | table | ✓ |
 | TempDB usage (SQL Server) | `tempdb` | card | — |
 | Wait events heatmap (24 h) | `wait-heatmap?window=24` | heatmap | — |
-| Query performance trends (7 days) | `query-trends?days=7` | chart | — |
+| Query performance trends (7 days) | `query-trends?days=7` | query table + chart | ✓ (table) |
 | Table I/O statistics | `table-io-stats` | table | ✓ |
 | Unused indexes | `unused-indexes` | table | ✓ |
 | Schema health | `schema-health` | table | ✓ |
@@ -38,6 +38,9 @@ which copies the **rendered** table as TSV (header + rows; bar columns become th
 button only appears when the panel actually renders a table — empty, unsupported and error
 states have none. These tables neither truncate text nor reorder rows, so the rendered table is
 the data.
+
+Exception: the query-trends table cuts the query text at 80 characters, so its button builds
+the TSV from the data (`toTsv`) with the full query text.
 
 ## Notes
 - `query-trends` comes from `query_stats_snapshot` (pg_stat_statements snapshots) — empty on

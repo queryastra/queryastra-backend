@@ -15,6 +15,9 @@ current metric values against a seasonal baseline to flag unusual spikes or drop
 - Filters: metric category, severity, time range
 - Click an anomaly → navigates to the metric chart with the anomaly timestamp highlighted
 
+- "Copiar resultado" above the events table (`CopyableTable`): copies the rendered table as TSV,
+  in the current sort order; no button when there are no events.
+
 ## Detection algorithm
 `AnomalyDetectionWorker` runs at `ANOMALY_DETECTION_INTERVAL_SECONDS` (default 300s).
 For each metric, it:

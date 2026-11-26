@@ -27,3 +27,7 @@ engines without vacuum the endpoints return empty lists and each section shows i
   `asyncio.gather` on the same connection failed every time ("another operation is in
   progress" → 502).
 - The screen also shows index bloat (`GET /api/v1/instances/{instance_id}/index-bloat`).
+- "Copiar resultado": each of the three tables (idle in transaction, tables needing vacuum,
+  index bloat) is wrapped in `CopyableTable` — copies the rendered table as TSV; no button
+  when the section is empty. The idle-in-transaction query is clipped only by CSS, so the copy
+  has the full text.
