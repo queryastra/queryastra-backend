@@ -129,6 +129,12 @@ class SessionBlockingDetailResponse(BaseModel):
     sql_text_full_masked: str | None
     blocking: list[BlockingEdgeResponse]
     blocked_by: list[BlockingEdgeResponse]
+    # Incidente que ancora identidade e comando (o pedido via `?incident=`, senao o mais
+    # recente da sessao). `anchored=True` = so as relacoes que se sobrepoem a ele aparecem.
+    anchor_incident_id: UUID | None = None
+    anchor_started_at: datetime | None = None
+    anchor_ended_at: datetime | None = None
+    anchored: bool = False
 
 
 class BlockingIncidentResponse(BaseModel):
@@ -455,6 +461,7 @@ async def get_session_blocking_detail(
         BlockingIncidentsRepository, Depends(get_blocking_incidents_repository)
     ],
     query_repo: Annotated[QuerySamplesRepository, Depends(get_query_samples_repository)],
+    incident_id: Annotated[UUID | None, Query(alias="incident")] = None,
 ) -> SessionBlockingDetailResponse:
     """Folha do drill-down de bloqueio — resolve incidentes envolvendo `session_id` em andamento
     OU ja encerrados (dentro da janela de retencao), nao mais exigindo que a sessao apareca no
@@ -470,13 +477,41 @@ async def get_session_blocking_detail(
             detail="Sessão não encontrada em nenhum incidente de bloqueio retido.",
         )
 
-    info = _collect_session_info(relevant).get(session_id, {})
-    enrichment = await query_repo.latest_by_session(
+    # Ancora (bug relatado pelo usuario: o comando exibido era a ULTIMA coisa que a sessao
+    # rodou, nao o que ela rodava no bloqueio — `session_id` e reciclado e pools de conexao reusam
+    # a mesma sessao para comandos diferentes). Identidade e comando passam a vir de UM incidente:
+    # o pedido em `?incident=` (link do detalhe de query, que sabe qual evento o usuario clicou)
+    # ou, sem ele, o mais recente da sessao (`relevant` ja vem por `last_seen_at DESC`).
+    anchor = relevant[0]
+    anchored = False
+    if incident_id is not None:
+        requested = next((e for e in relevant if e.id == incident_id), None)
+        if requested is not None:
+            anchor = requested
+            anchored = True
+    anchor_end = anchor.ended_at or anchor.last_seen_at
+    if anchored:
+        # So as relacoes do mesmo "episodio" (sobrepostas ao incidente pedido) — as demais sao de
+        # outros momentos em que o mesmo numero de sessao pode ter sido outra conexao.
+        relevant = [
+            e
+            for e in relevant
+            if e.started_at <= anchor_end and (e.ended_at or e.last_seen_at) >= anchor.started_at
+        ]
+
+    all_info = _collect_session_info(relevant).get(session_id, {})
+    info = dict(_collect_session_info([anchor]).get(session_id, {}))
+    for key, value in all_info.items():
+        if info.get(key) is None:
+            info[key] = value
+    is_blocker = anchor.blocker_session_id == session_id
+    sample = await query_repo.command_for_incident(
         instance_id,
-        [session_id],
-        datetime.now(UTC) - timedelta(seconds=settings.api_read_default_lookback_seconds),
+        session_id,
+        anchor.blocker_sql_hash if is_blocker else anchor.blocked_sql_hash,
+        anchor.started_at - timedelta(minutes=5),
+        anchor_end + timedelta(minutes=1),
     )
-    sample = enrichment.get(session_id)
 
     return SessionBlockingDetailResponse(
         session_id=session_id,
@@ -519,6 +554,10 @@ async def get_session_blocking_detail(
             for e in relevant
             if e.blocked_session_id == session_id
         ],
+        anchor_incident_id=anchor.id,
+        anchor_started_at=anchor.started_at,
+        anchor_ended_at=anchor.ended_at,
+        anchored=anchored,
     )
 
 

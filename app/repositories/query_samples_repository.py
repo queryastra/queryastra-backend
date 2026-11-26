@@ -1410,6 +1410,68 @@ class QuerySamplesRepository(BaseRepository):
         )
         return {row.session_id: row for row in result.fetchall()}
 
+    async def command_for_incident(
+        self,
+        instance_id: UUID,
+        session_id: str,
+        sql_hash: str | None,
+        since: datetime,
+        until: datetime,
+    ) -> sa.Row | None:
+        """Comando de UM lado de um incidente de bloqueio especifico — substitui
+        `latest_by_session` no detalhe de sessao, que mostrava o comando ERRADO (bug relatado pelo
+        usuario: o detalhe mostrava a ultima coisa que a sessao rodou, nao o que ela rodava no
+        bloqueio; o motor recicla `session_id` e pools de conexao reutilizam a mesma sessao para
+        comandos diferentes em segundos).
+
+        Com `sql_hash` (o hash gravado no proprio incidente): amostra dessa sessao com esse hash
+        dentro da janela do incidente; sem nenhuma, qualquer amostra com o hash (enderecamento por
+        conteudo, mesmo criterio de `latest_text_by_sql_hash`). Sem `sql_hash` (bloqueador ocioso
+        no momento da coleta): a ultima amostra da sessao dentro da janela — nunca fora dela."""
+        columns = "sql_hash, sql_text_masked, sql_text_full_masked"
+        params: dict[str, object] = {
+            "instance_id": instance_id,
+            "session_id": session_id,
+            "since": since,
+            "until": until,
+        }
+        if sql_hash is not None:
+            params["sql_hash"] = sql_hash
+            row = (
+                await self._session.execute(
+                    sa.text(f"""
+                        SELECT {columns} FROM query_samples
+                        WHERE instance_id = :instance_id AND session_id = :session_id
+                          AND sql_hash = :sql_hash AND time >= :since AND time <= :until
+                        ORDER BY time DESC LIMIT 1
+                    """),
+                    params,
+                )
+            ).first()
+            if row is not None:
+                return row
+            return (
+                await self._session.execute(
+                    sa.text(f"""
+                        SELECT {columns} FROM query_samples
+                        WHERE instance_id = :instance_id AND sql_hash = :sql_hash
+                        ORDER BY time DESC LIMIT 1
+                    """),
+                    {"instance_id": instance_id, "sql_hash": sql_hash},
+                )
+            ).first()
+        return (
+            await self._session.execute(
+                sa.text(f"""
+                    SELECT {columns} FROM query_samples
+                    WHERE instance_id = :instance_id AND session_id = :session_id
+                      AND time >= :since AND time <= :until
+                    ORDER BY time DESC LIMIT 1
+                """),
+                params,
+            )
+        ).first()
+
     async def latest_text_by_sql_hash(
         self, instance_id: UUID, sql_hashes: Sequence[str]
     ) -> dict[str, str]:

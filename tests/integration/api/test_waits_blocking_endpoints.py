@@ -370,6 +370,78 @@ async def test_get_session_blocking_detail_resolves_after_incident_ends(
     assert body["blocked_by"][0]["ended_at"] is not None
 
 
+async def test_get_session_blocking_detail_command_is_from_incident_not_latest_sample(
+    client: AsyncClient, db_session: AsyncSession, test_instance: Instance
+) -> None:
+    """Bug relatado pelo usuario: a sessao (reaproveitada pelo pool de conexoes) rodou OUTRO
+    comando depois do bloqueio, e o detalhe mostrava esse comando mais recente em vez do que
+    estava rodando no bloqueio. O comando agora vem do `sql_hash` gravado no incidente; com
+    `?incident=` a tela fica ancorada nele e descarta incidentes de outro momento."""
+    t0 = datetime.now(UTC) - timedelta(minutes=30)
+    query_repo = QuerySamplesRepository(db_session)
+    await query_repo.insert_batch(
+        [
+            NormalizedQuerySample(
+                time=t0,
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-no-bloqueio",
+                sql_text_masked="UPDATE TAREFAS_CB SET ELEGIVEL = ?",
+                sql_text_full_masked="CREATE PROCEDURE P_INCLUI_TAREFA_CB ...",
+                session_id="65",
+            ),
+            NormalizedQuerySample(
+                time=t0 + timedelta(minutes=20),
+                instance_id=test_instance.id,
+                engine="sqlserver",
+                sql_hash="hash-depois",
+                sql_text_masked="UPDATE TAREFAS_CB SET TAREFA_ATIVA = ?",
+                sql_text_full_masked="CREATE PROCEDURE OUTRA_PROC ...",
+                session_id="65",
+            ),
+        ]
+    )
+
+    def event(blocked: str, at: datetime, blocker_hash: str) -> NormalizedBlockingEvent:
+        return NormalizedBlockingEvent(
+            time=at,
+            instance_id=test_instance.id,
+            blocker_session_id="65",
+            blocked_session_id=blocked,
+            blocker_sql_hash=blocker_hash,
+            wait_time_ms=100,
+        )
+
+    blocking_repo = BlockingIncidentsRepository(db_session)
+    await blocking_repo.upsert_batch(test_instance.id, [event("116", t0, "hash-no-bloqueio")], t0)
+    await blocking_repo.upsert_batch(test_instance.id, [], t0 + timedelta(seconds=2))
+    later = t0 + timedelta(minutes=20)
+    await blocking_repo.upsert_batch(test_instance.id, [event("200", later, "hash-depois")], later)
+    await blocking_repo.upsert_batch(test_instance.id, [], later + timedelta(seconds=2))
+
+    incidents = await blocking_repo.find_involving_session(test_instance.id, "65", 10)
+    first = next(i for i in incidents if i.blocked_session_id == "116")
+
+    anchored = await client.get(
+        f"/api/v1/waits-blocking/blocking/{test_instance.id}/session/65",
+        params={"incident": str(first.id)},
+    )
+    assert anchored.status_code == 200
+    body = anchored.json()
+    assert body["anchored"] is True
+    assert body["anchor_incident_id"] == str(first.id)
+    assert body["sql_hash"] == "hash-no-bloqueio"
+    assert body["sql_text_full_masked"] == "CREATE PROCEDURE P_INCLUI_TAREFA_CB ..."
+    assert [e["session_id"] for e in body["blocking"]] == ["116"]
+
+    # Sem `?incident=`: ancora no incidente mais recente e usa o comando DELE.
+    latest = await client.get(f"/api/v1/waits-blocking/blocking/{test_instance.id}/session/65")
+    latest_body = latest.json()
+    assert latest_body["anchored"] is False
+    assert latest_body["sql_hash"] == "hash-depois"
+    assert sorted(e["session_id"] for e in latest_body["blocking"]) == ["116", "200"]
+
+
 async def test_get_session_blocking_detail_404_when_session_not_in_snapshot(
     client: AsyncClient, test_instance: Instance
 ) -> None:

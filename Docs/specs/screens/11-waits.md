@@ -15,8 +15,14 @@ Saúde do BD (`19-db-health.md`).
   — incident history (default view)
 - `GET /api/v1/waits-blocking/blocking/{instance_id}?from=…&to=…` — open blocking tree
   (blocker → blocked), when "Somente em aberto" is checked
-- `GET /api/v1/waits-blocking/blocking/{instance_id}/session/{session_id}` — session detail
-  (`/waits/[sessionId]`)
+- `GET /api/v1/waits-blocking/blocking/{instance_id}/session/{session_id}?incident=` — session detail
+  (`/blocking/[sessionId]?incident=`). Identity and **command** come from ONE incident (the
+  anchor): `?incident=` when given (links from the query detail's "Event involvement"), otherwise
+  the session's most recent incident. The command is the anchor side's `sql_hash` (sample of that
+  session inside the incident window, else any sample with that hash) — never "the session's latest
+  sample", because session ids are reused and connection pools run different commands on the same
+  session seconds apart. With `?incident=`, only overlapping incidents are listed and the page shows
+  a note with a "show all blocking for this session" link.
 - WebSocket live updates (`useInstanceLiveUpdates`)
 
 ## UI
