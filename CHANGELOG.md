@@ -1,6 +1,6 @@
 # Changelog
 
-## [Não lançado]
+## [0.2.4] — 2026-11-26
 
 ### Novas funcionalidades
 - **Detalhe da query — Envolvimento em eventos**: nova seção (`GET /queries/detail/{instance_id}/{sql_hash}/involvement`) que lista as sessões em que a query participou de bloqueios (como bloqueadora ou bloqueada), transações registradas e deadlocks no período, além das instâncias cadastradas de onde ela foi executada (linked server). Sessões, transações e deadlocks são clicáveis e levam às telas de detalhe; vínculos heurísticos aparecem como "Provável"
