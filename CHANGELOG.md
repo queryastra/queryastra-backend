@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.5] — 2026-11-26
+
+### Correções
+- **Envolvimento em transações no detalhe da query segue o critério da tela de Transações**: só lista transações problemáticas (`flag_reason` preenchido — bloqueio, erro, órfã, sleeping, deadlock) que sobrepõem o período (`closed_at` nulo ou >= `from`, `begin_time` <= `to`). O vínculo exato (via incidente de bloqueio) não tinha filtro de período e o provável não exigia `flag_reason`; o critério agora é único (`problem_transaction_conditions`), compartilhado pelas duas telas
+
 ## [0.2.4] — 2026-11-26
 
 ### Novas funcionalidades
