@@ -90,7 +90,7 @@ class QueryStatsTrendRepository(BaseRepository):
             )
             SELECT
                 h.queryid,
-                MAX(h.query_text)  AS query_text,
+                h.query_text,
                 h.bucket,
                 h.period_calls     AS calls,
                 CASE WHEN h.period_calls > 0

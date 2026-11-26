@@ -1757,15 +1757,15 @@ class PostgreSQLCollector(CollectorNoOpMixin):
             self._connect(), timeout=self._connection_params.connect_timeout_seconds
         )
         try:
-            table_rows, worker_rows = await asyncio.gather(
-                asyncio.wait_for(
-                    conn.fetch(_VACUUM_TABLE_STATS_QUERY),
-                    timeout=settings.collection_query_timeout_seconds,
-                ),
-                asyncio.wait_for(
-                    conn.fetch(_AUTOVACUUM_WORKERS_QUERY),
-                    timeout=settings.collection_query_timeout_seconds,
-                ),
+            # Em sequencia, nao com asyncio.gather: uma conexao asyncpg executa uma operacao por
+            # vez ("another operation is in progress"), entao o gather falhava sempre.
+            table_rows = await asyncio.wait_for(
+                conn.fetch(_VACUUM_TABLE_STATS_QUERY),
+                timeout=settings.collection_query_timeout_seconds,
+            )
+            worker_rows = await asyncio.wait_for(
+                conn.fetch(_AUTOVACUUM_WORKERS_QUERY),
+                timeout=settings.collection_query_timeout_seconds,
             )
         finally:
             await conn.close()

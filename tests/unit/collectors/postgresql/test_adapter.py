@@ -8,6 +8,7 @@ conforme `Docs/collector-queries.md` §1, §2, §5.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
@@ -690,3 +691,74 @@ async def test_collect_backup_status_raises_value_error_without_instance_id() ->
     collector = PostgreSQLCollector(connection=_CONNECTION, instance_id=None)
     with pytest.raises(ValueError, match="instance_id"):
         await collector.collect_backup_status()
+
+
+class _OneOperationAtATimeConnection:
+    """Como uma conexao asyncpg real: recusa uma segunda operacao enquanto outra esta em
+    andamento ("another operation is in progress")."""
+
+    def __init__(self) -> None:
+        self._busy = False
+        self.closed = False
+
+    async def fetch(self, query: str, *args: object) -> list[dict[str, Any]]:
+        if self._busy:
+            raise asyncpg.InterfaceError(
+                "cannot perform operation: another operation is in progress"
+            )
+        self._busy = True
+        try:
+            await asyncio.sleep(0)  # cede o loop, como uma ida ao servidor
+            if "pg_stat_user_tables" in query:
+                return [
+                    {
+                        "schemaname": "public",
+                        "table_name": "pedidos",
+                        "n_dead_tup": 10,
+                        "n_live_tup": 90,
+                        "dead_tup_pct": 10.0,
+                        "last_vacuum": None,
+                        "last_autovacuum": None,
+                        "last_analyze": None,
+                        "last_autoanalyze": None,
+                        "vacuum_count": 0,
+                        "autovacuum_count": 1,
+                        "table_size_bytes": 8192,
+                        "xid_age": 100,
+                    }
+                ]
+            if "autovacuum worker" in query:
+                return [
+                    {
+                        "pid": 42,
+                        "datname": "app",
+                        "query": "autovacuum: VACUUM t",
+                        "running_for_seconds": 3,
+                    }
+                ]
+            raise AssertionError(f"fetch inesperado: {query}")
+        finally:
+            self._busy = False
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+async def test_collect_vacuum_stats_runs_queries_one_at_a_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regressao: as duas consultas rodavam com asyncio.gather na MESMA conexao e o asyncpg
+    recusava a segunda — a tela Vacuum/Health dava erro em toda instancia PostgreSQL."""
+    conn = _OneOperationAtATimeConnection()
+
+    async def fake_connect(**kwargs: object) -> _OneOperationAtATimeConnection:
+        return conn
+
+    monkeypatch.setattr(asyncpg, "connect", fake_connect)
+
+    collector = PostgreSQLCollector(connection=_CONNECTION, instance_id=uuid4())
+    tables, workers = await collector.collect_vacuum_stats()
+
+    assert [t.table_name for t in tables] == ["pedidos"]
+    assert [w.pid for w in workers] == [42]
+    assert conn.closed
