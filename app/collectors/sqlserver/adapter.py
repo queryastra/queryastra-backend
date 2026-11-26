@@ -1527,18 +1527,18 @@ WHERE i1.is_disabled = 0 AND i2.is_disabled = 0
 _SS_FILE_IO_STATS_QUERY = """
 SELECT DB_NAME(fs.database_id) AS database_name,
        mf.physical_name AS file_name,
-       fs.io_stall_read AS io_stall_read_ms,
-       fs.io_stall_write AS io_stall_write_ms,
+       fs.io_stall_read_ms,
+       fs.io_stall_write_ms,
        fs.num_of_reads,
        fs.num_of_writes,
-       CASE WHEN fs.num_of_reads > 0 THEN fs.io_stall_read * 1.0 / fs.num_of_reads ELSE 0 END AS
+       CASE WHEN fs.num_of_reads > 0 THEN fs.io_stall_read_ms * 1.0 / fs.num_of_reads ELSE 0 END AS
        avg_read_ms,
-       CASE WHEN fs.num_of_writes > 0 THEN fs.io_stall_write * 1.0 / fs.num_of_writes ELSE 0 END
+       CASE WHEN fs.num_of_writes > 0 THEN fs.io_stall_write_ms * 1.0 / fs.num_of_writes ELSE 0 END
        AS avg_write_ms
 FROM sys.dm_io_virtual_file_stats(NULL, NULL) fs
 JOIN sys.master_files mf ON mf.database_id = fs.database_id AND mf.file_id = fs.file_id
 WHERE DB_NAME(fs.database_id) IS NOT NULL
-ORDER BY (fs.io_stall_read + fs.io_stall_write) DESC
+ORDER BY (fs.io_stall_read_ms + fs.io_stall_write_ms) DESC
 """
 
 
